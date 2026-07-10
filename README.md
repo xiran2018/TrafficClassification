@@ -633,6 +633,236 @@ python train_tower2.py \
 
 `--select_metric flow_macro_f1` saves `best.pt` by validation macro-F1 instead of validation accuracy. `--hierarchical_weight` adds a coarse-label loss, while `--hierarchical_logit_weight` adds the coarse log-probability back to each fine-class logit at train/test time. `--contrastive_mode confusion` uses only configured same-group hard negatives in SupCon instead of pushing against every different class.
 
+Stage 6 replaces the flat fine classifier with true coarse-to-fine expert heads, weights SupCon negatives by a validation confusion matrix, and uses a flow-level Transformer over window embeddings. Generate the validation confusion file from Stage 5 first; do not use the test metrics JSON for training.
+
+```bash
+python test_tower2.py \
+  --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_macro_hier_conf_supcon/best.pt \
+  --dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --output_json reasoningDataset/vpn-app/valid_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json
+
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_expert_weighted_supcon_flowtrans \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --select_metric flow_macro_f1 \
+  --flow_pooling transformer \
+  --flow_transformer_layers 1 \
+  --flow_transformer_heads 4 \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --hierarchical_mode expert \
+  --hierarchical_weight 0.2 \
+  --coarse_groups vpn_app \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --contrastive_mode confusion_weighted \
+  --confusion_groups vpn_app \
+  --confusion_matrix_json reasoningDataset/vpn-app/valid_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json \
+  --confusion_matrix_level flow \
+  --confusion_weight_power 1.0 \
+  --flow_contrastive_weight 0.03 \
+  --flow_temperature 0.07 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 7 keeps the Stage 5 model/loss setup and tests input regularization in three steps: randomize only IP/port in packet embedding prompts, then add Tower-2 meta-feature dropout, then add graph edge-attribute dropout. This reuses the trained Tower-1 checkpoint; it only regenerates `packet_index.jsonl`, packet embeddings, and Tower-2 datasets.
+
+```bash
+python preprocess_tower1.py \
+  --input_dir /home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/train \
+  --output_dir reasoningDataset/vpn-app/train_tower1_change_weight_ipport_rand \
+  --max_packets_per_flow 64 \
+  --payload_prefix_len 128 \
+  --l3_prefix_len 512 \
+  --label_map_in reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --write_label_map \
+  --embedding_header_policy randomize_ip_port
+
+python preprocess_tower1.py \
+  --input_dir /home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/val \
+  --output_dir reasoningDataset/vpn-app/valid_tower1_change_weight_ipport_rand \
+  --max_packets_per_flow 64 \
+  --payload_prefix_len 128 \
+  --l3_prefix_len 512 \
+  --label_map_in reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --embedding_header_policy randomize_ip_port
+
+python preprocess_tower1.py \
+  --input_dir /home/jing/download/sweet/flow-level-classification/vpn-app/test \
+  --output_dir reasoningDataset/vpn-app/test_tower1_change_weight_ipport_rand \
+  --max_packets_per_flow 64 \
+  --payload_prefix_len 128 \
+  --l3_prefix_len 512 \
+  --label_map_in reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --embedding_header_policy randomize_ip_port
+```
+
+```bash
+python extract_packet_embeddings_qwen.py \
+  --packet_index reasoningDataset/vpn-app/train_tower1_change_weight_ipport_rand/packet_index.jsonl \
+  --output_dir reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_ipport_rand \
+  --base_model Qwen/Qwen2.5-7B-Instruct \
+  --lora_path checkpoints/tower1_qwen_multitask_change_weight/adapter \
+  --tower1_heads checkpoints/tower1_qwen_multitask_change_weight/tower1_heads.pt \
+  --embedding_mode concat \
+  --batch_size 8 \
+  --max_length 1024
+
+python extract_packet_embeddings_qwen.py \
+  --packet_index reasoningDataset/vpn-app/valid_tower1_change_weight_ipport_rand/packet_index.jsonl \
+  --output_dir reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight_ipport_rand \
+  --base_model Qwen/Qwen2.5-7B-Instruct \
+  --lora_path checkpoints/tower1_qwen_multitask_change_weight/adapter \
+  --tower1_heads checkpoints/tower1_qwen_multitask_change_weight/tower1_heads.pt \
+  --embedding_mode concat \
+  --batch_size 8 \
+  --max_length 1024
+
+python extract_packet_embeddings_qwen.py \
+  --packet_index reasoningDataset/vpn-app/test_tower1_change_weight_ipport_rand/packet_index.jsonl \
+  --output_dir reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight_ipport_rand \
+  --base_model Qwen/Qwen2.5-7B-Instruct \
+  --lora_path checkpoints/tower1_qwen_multitask_change_weight/adapter \
+  --tower1_heads checkpoints/tower1_qwen_multitask_change_weight/tower1_heads.pt \
+  --embedding_mode concat \
+  --batch_size 8 \
+  --max_length 1024
+```
+
+```bash
+python preprocess_tower2.py \
+  --flow_embedding_index reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_ipport_rand/flow_embedding_index.jsonl \
+  --output_dir reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_ipport_rand \
+  --window_size 32 \
+  --stride 16
+
+python preprocess_tower2.py \
+  --flow_embedding_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight_ipport_rand/flow_embedding_index.jsonl \
+  --output_dir reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight_ipport_rand \
+  --window_size 32 \
+  --stride 16
+
+python preprocess_tower2.py \
+  --flow_embedding_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight_ipport_rand/flow_embedding_index.jsonl \
+  --output_dir reasoningDataset/vpn-app/test_tower2_rawproj_change_weight_ipport_rand \
+  --window_size 32 \
+  --stride 16
+```
+
+Stage 7.1: Stage 5 baseline on IP/port-randomized embeddings:
+
+```bash
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_ipport_rand_macro_hier_conf_supcon \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --select_metric flow_macro_f1 \
+  --flow_pooling mean \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --hierarchical_weight 0.2 \
+  --hierarchical_logit_weight 0.5 \
+  --coarse_groups vpn_app \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --contrastive_mode confusion \
+  --confusion_groups vpn_app \
+  --flow_contrastive_weight 0.03 \
+  --flow_temperature 0.07 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 7.2: add Tower-2 metadata dropout:
+
+```bash
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_ipport_rand_macro_hier_conf_supcon_meta_dropout \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --select_metric flow_macro_f1 \
+  --flow_pooling mean \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --hierarchical_weight 0.2 \
+  --hierarchical_logit_weight 0.5 \
+  --coarse_groups vpn_app \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --contrastive_mode confusion \
+  --confusion_groups vpn_app \
+  --flow_contrastive_weight 0.03 \
+  --flow_temperature 0.07 \
+  --meta_dropout_prob 0.2 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 7.3: add graph edge-attribute dropout on top of metadata dropout:
+
+```bash
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_ipport_rand_macro_hier_conf_supcon_meta_edge_dropout \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --select_metric flow_macro_f1 \
+  --flow_pooling mean \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --hierarchical_weight 0.2 \
+  --hierarchical_logit_weight 0.5 \
+  --coarse_groups vpn_app \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --contrastive_mode confusion \
+  --confusion_groups vpn_app \
+  --flow_contrastive_weight 0.03 \
+  --flow_temperature 0.07 \
+  --meta_dropout_prob 0.2 \
+  --edge_attr_dropout_prob 0.2 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
 ---
 
 ## 8. Test
@@ -699,6 +929,31 @@ python test_tower2.py \
   --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
   --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
   --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json
+```
+
+### Expert heads + weighted SupCon + flow Transformer
+
+```bash
+python test_tower2.py \
+  --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_expert_weighted_supcon_flowtrans/best.pt \
+  --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
+  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_expert_weighted_supcon_flowtrans.json
+```
+
+### IP/port randomization + Tower-2 dropout ablation
+
+```bash
+for suffix in \
+  ipport_rand_macro_hier_conf_supcon \
+  ipport_rand_macro_hier_conf_supcon_meta_dropout \
+  ipport_rand_macro_hier_conf_supcon_meta_edge_dropout; do
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_${suffix}/best.pt \
+    --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_${suffix}.json
+done
 ```
 
 Metrics include:

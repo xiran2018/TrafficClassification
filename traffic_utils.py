@@ -17,6 +17,18 @@ def stable_id(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
+def pseudo_ipv4(value: str, salt: str) -> str:
+    digest = hashlib.sha1(f"{salt}|ip|{value}".encode("utf-8", errors="ignore")).digest()
+    return f"10.{digest[0]}.{digest[1]}.{1 + digest[2] % 254}"
+
+
+def pseudo_port(value: int, salt: str) -> int:
+    if value < 0:
+        return value
+    digest = hashlib.sha1(f"{salt}|port|{value}".encode("utf-8", errors="ignore")).digest()
+    return 1024 + (int.from_bytes(digest[:2], "big") % (65535 - 1024))
+
+
 def iter_labeled_pcaps(root: str | Path) -> Iterable[Tuple[str, Path]]:
     root = Path(root)
     if not root.exists():
@@ -193,24 +205,39 @@ FullL3Captured: {m.full_l3_captured}
 [EndPacketBytes]""".strip()
 
 
-def format_packet_embedding_prompt(m: PacketMeta, payload_prefix: str) -> str:
+def format_packet_embedding_prompt(
+    m: PacketMeta,
+    payload_prefix: str,
+    header_policy: str = "full",
+    header_random_salt: str = "",
+) -> str:
     """Structured packet prompt for embedding extraction.
 
     It includes raw header fields and payload prefix, but not checksum validity labels.
     """
+    src_ip, dst_ip = m.src_ip, m.dst_ip
+    sport, dport = m.sport, m.dport
+    if header_policy == "randomize_ip_port":
+        salt = header_random_salt or "default"
+        src_ip = pseudo_ipv4(m.src_ip, salt)
+        dst_ip = pseudo_ipv4(m.dst_ip, salt)
+        sport = pseudo_port(m.sport, f"{salt}|src")
+        dport = pseudo_port(m.dport, f"{salt}|dst")
+    elif header_policy != "full":
+        raise ValueError(f"Unknown embedding header policy: {header_policy}")
     if m.l4 == "TCP":
         l4_line = (
-            f"TCP: sport={m.sport} dport={m.dport} seq={m.seq} ack={m.ack} "
+            f"TCP: sport={sport} dport={dport} seq={m.seq} ack={m.ack} "
             f"flags={m.tcp_flags} data_offset={m.tcp_data_offset} window={m.tcp_window} checksum=0x{m.l4_checksum:04x}"
         )
     elif m.l4 == "UDP":
-        l4_line = f"UDP: sport={m.sport} dport={m.dport} length={m.udp_len} checksum=0x{m.l4_checksum:04x}"
+        l4_line = f"UDP: sport={sport} dport={dport} length={m.udp_len} checksum=0x{m.l4_checksum:04x}"
     else:
         l4_line = f"L4: {m.l4}"
     return f"""[Packet]
 Direction: {m.direction}
 L3: {m.l3}
-IP: src={m.src_ip} dst={m.dst_ip} id={m.ip_id} ttl={m.ip_ttl} proto={m.l4} total_len={m.ip_total_len} ihl={m.ip_header_len} checksum=0x{m.ip_checksum:04x}
+IP: src={src_ip} dst={dst_ip} id={m.ip_id} ttl={m.ip_ttl} proto={m.l4} total_len={m.ip_total_len} ihl={m.ip_header_len} checksum=0x{m.ip_checksum:04x}
 {l4_line}
 Observed: packet_len={m.packet_len} captured_l3_len={m.l3_captured_len} full_l3_captured={m.full_l3_captured} payload_len={m.payload_len} entropy={m.payload_entropy} iat={m.iat} payload_truncated={m.payload_truncated}
 PayloadPrefix: {payload_prefix}
@@ -222,6 +249,8 @@ def extract_flow_packets(
     max_packets: int = 128,
     payload_prefix_len: int = 128,
     l3_prefix_len: int = 512,
+    embedding_header_policy: str = "full",
+    header_random_salt: str = "",
 ) -> Tuple[List[PacketMeta], List[str], List[str]]:
     """Return packet metadata, raw QA prompts, and structured embedding prompts."""
     packets = rdpcap(str(pcap_path))
@@ -291,7 +320,14 @@ def extract_flow_packets(
             m.l4_checksum_valid = tcp_udp_checksum_valid(pkt)
         metas.append(m)
         qa_prompts.append(format_packet_qa_prompt(m))
-        embedding_prompts.append(format_packet_embedding_prompt(m, payload_prefix))
+        embedding_prompts.append(
+            format_packet_embedding_prompt(
+                m,
+                payload_prefix,
+                header_policy=embedding_header_policy,
+                header_random_salt=header_random_salt or stable_id(str(Path(pcap_path).resolve())),
+            )
+        )
     return metas, qa_prompts, embedding_prompts
 
 

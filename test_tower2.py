@@ -11,7 +11,15 @@ import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
 
-from train_tower2 import FlowAggregationHead, SeqDataset, GraphDataset, collate_seq, apply_hierarchical_logits, build_class_to_coarse
+from train_tower2 import (
+    FlowAggregationHead,
+    SeqDataset,
+    GraphDataset,
+    collate_seq,
+    apply_hierarchical_logits,
+    build_class_to_coarse,
+    parse_label_groups,
+)
 from models.flow_transformer import FlowTransformerClassifier
 from models.flow_graph_transformer import FlowGraphTransformerClassifier
 
@@ -34,11 +42,20 @@ def load_model(ckpt_path: str, device: str):
     model.to(device).eval()
     flow_head = None
     if "flow_head_state" in ckpt:
+        hierarchical_mode = ckpt.get("hierarchical_mode", "logit")
+        class_groups = ckpt.get("class_groups")
+        if class_groups is None and hierarchical_mode == "expert":
+            class_groups = parse_label_groups(ckpt.get("coarse_groups", "vpn_app"), ckpt["num_classes"])
         flow_head = FlowAggregationHead(
             ckpt["hidden_dim"],
             ckpt["num_classes"],
             pooling=ckpt.get("flow_pooling", "attention"),
             num_coarse_classes=ckpt.get("num_coarse_classes", 0),
+            class_groups=class_groups if hierarchical_mode == "expert" else None,
+            hierarchical_mode=hierarchical_mode,
+            flow_transformer_layers=ckpt.get("flow_transformer_layers", 1),
+            flow_transformer_heads=ckpt.get("flow_transformer_heads", 4),
+            dropout=ckpt.get("dropout", 0.1),
         )
         flow_head.load_state_dict(ckpt["flow_head_state"])
         flow_head.to(device).eval()
@@ -93,6 +110,7 @@ def aggregate_by_flow(
     device: str = "cpu",
     class_to_coarse=None,
     hierarchical_logit_weight: float = 0.0,
+    hierarchical_mode: str = "logit",
 ):
     buckets = defaultdict(list)
     emb_buckets = defaultdict(list)
@@ -110,12 +128,15 @@ def aggregate_by_flow(
             emb = torch.tensor(np.stack(emb_buckets[fid], axis=0), dtype=torch.float32, device=device)
             win_logits = torch.tensor(np.stack(arrs, axis=0), dtype=torch.float32, device=device)
             pooled = flow_head(emb, window_logits=win_logits)
-            logits = apply_hierarchical_logits(
-                pooled["logits"],
-                pooled.get("coarse_logits"),
-                class_to_coarse,
-                hierarchical_logit_weight,
-            ).detach().cpu().numpy()
+            logits = pooled["logits"]
+            if hierarchical_mode != "expert":
+                logits = apply_hierarchical_logits(
+                    logits,
+                    pooled.get("coarse_logits"),
+                    class_to_coarse,
+                    hierarchical_logit_weight,
+                )
+            logits = logits.detach().cpu().numpy()
         flow_true.append(labels[fid])
         flow_pred.append(int(logits.argmax()))
     return flow_true, flow_pred
@@ -188,6 +209,7 @@ def main():
         device=args.device,
         class_to_coarse=class_to_coarse,
         hierarchical_logit_weight=ckpt.get("hierarchical_logit_weight", 0.0),
+        hierarchical_mode=ckpt.get("hierarchical_mode", "logit"),
     )
     flow_metrics = compute_metrics(flow_true, flow_pred)
     metrics = {"window_level": window_metrics, "flow_level": flow_metrics}

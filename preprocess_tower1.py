@@ -162,6 +162,7 @@ def main() -> None:
     ap.add_argument("--max_flows", type=int, default=0)
     ap.add_argument("--label_map_in", default="", help="Use the train label_map.json for valid/test to keep label ids consistent.")
     ap.add_argument("--write_label_map", action="store_true", help="Write label_map.json to output_dir.")
+    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port"], default="full", help="Header policy for packet_index prompts used during embedding extraction; QA/SFT prompts stay unchanged.")
     ap.add_argument("--no_progress", action="store_true", help="Disable pcap preprocessing progress bar.")
     args = ap.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -200,6 +201,8 @@ def main() -> None:
                     max_packets=args.max_packets_per_flow,
                     payload_prefix_len=args.payload_prefix_len,
                     l3_prefix_len=args.l3_prefix_len,
+                    embedding_header_policy=args.embedding_header_policy,
+                    header_random_salt=flow_id,
                 )
             except Exception as exc:
                 msg = f"skip {pcap}: {exc}"
@@ -218,6 +221,7 @@ def main() -> None:
                     "packet_uid": f"{flow_id}_{meta['packet_id']}",
                     "prompt": embed_prompt,
                     "qa_prompt": qa_prompt,
+                    "embedding_header_policy": args.embedding_header_policy,
                     "meta": meta,
                 }
                 pidx.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -229,6 +233,7 @@ def main() -> None:
                     "packet_id": meta["packet_id"],
                     "packet_uid": f"{flow_id}_{meta['packet_id']}",
                     "prompt": embed_prompt,
+                    "embedding_header_policy": args.embedding_header_policy,
                     "packet_weight": packet_information_weight(meta_obj),
                     "meta": {
                         "direction": meta.get("direction"),

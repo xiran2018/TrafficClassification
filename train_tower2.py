@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import random
 from collections import defaultdict
@@ -21,16 +23,61 @@ from models.flow_graph_transformer import FlowGraphTransformerClassifier
 VPN_APP_GROUPS = "0,2,5,6,10,14;1,4;3,8,9;7,11,13,15;12"
 
 
+def sinusoidal_position_encoding(length: int, dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    pos = torch.arange(length, device=device, dtype=dtype).unsqueeze(1)
+    div = torch.exp(torch.arange(0, dim, 2, device=device, dtype=dtype) * (-math.log(10000.0) / dim))
+    pe = torch.zeros(length, dim, device=device, dtype=dtype)
+    pe[:, 0::2] = torch.sin(pos * div)
+    if dim > 1:
+        pe[:, 1::2] = torch.cos(pos * div[: pe[:, 1::2].shape[1]])
+    return pe
+
+
 class FlowAggregationHead(nn.Module):
     """Pool multiple window embeddings into one flow-level prediction."""
 
-    def __init__(self, hidden_dim: int, num_classes: int, pooling: str = "attention", num_coarse_classes: int = 0):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_classes: int,
+        pooling: str = "attention",
+        num_coarse_classes: int = 0,
+        class_groups: Sequence[Sequence[int]] | None = None,
+        hierarchical_mode: str = "logit",
+        flow_transformer_layers: int = 1,
+        flow_transformer_heads: int = 4,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         self.pooling = pooling
+        self.num_classes = num_classes
         self.num_coarse_classes = num_coarse_classes
+        self.hierarchical_mode = hierarchical_mode
+        self.class_groups = [list(group) for group in (class_groups or [])]
         self.score = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1))
+        if pooling == "transformer":
+            if hidden_dim % flow_transformer_heads != 0:
+                raise ValueError("--hidden_dim must be divisible by --flow_transformer_heads")
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=flow_transformer_heads,
+                dim_feedforward=hidden_dim * 4,
+                dropout=dropout,
+                batch_first=True,
+                activation="gelu",
+                norm_first=True,
+            )
+            self.flow_encoder = nn.TransformerEncoder(enc_layer, num_layers=flow_transformer_layers)
+        else:
+            self.flow_encoder = None
         self.cls = nn.Linear(hidden_dim, num_classes)
         self.coarse_cls = nn.Linear(hidden_dim, num_coarse_classes) if num_coarse_classes > 0 else None
+        self.use_expert_heads = hierarchical_mode == "expert" and self.coarse_cls is not None and bool(self.class_groups)
+        if self.use_expert_heads and len(self.class_groups) != num_coarse_classes:
+            raise ValueError("class_groups must match num_coarse_classes when --hierarchical_mode expert is used")
+        self.expert_heads = nn.ModuleList(
+            [nn.Linear(hidden_dim, len(group)) for group in self.class_groups]
+        ) if self.use_expert_heads else nn.ModuleList()
         if pooling == "late_fusion":
             self.fusion_logit_scale = nn.Parameter(torch.tensor(1.0))
 
@@ -39,17 +86,33 @@ class FlowAggregationHead(nn.Module):
             raise ValueError("Cannot pool an empty flow.")
         if self.pooling == "mean":
             return h.mean(dim=0)
+        if self.pooling == "transformer":
+            pos = sinusoidal_position_encoding(h.size(0), h.size(1), h.device, h.dtype)
+            h = self.flow_encoder((h + pos).unsqueeze(0)).squeeze(0)
         weights = torch.softmax(self.score(h).squeeze(-1), dim=0)
         return torch.sum(h * weights.unsqueeze(-1), dim=0)
 
+    def expert_logits(self, emb: torch.Tensor, coarse_logits: torch.Tensor) -> torch.Tensor:
+        coarse_log_prob = F.log_softmax(coarse_logits, dim=-1)
+        logits = emb.new_full((self.num_classes,), -1e9)
+        for coarse_idx, (group, head) in enumerate(zip(self.class_groups, self.expert_heads)):
+            fine_log_prob = F.log_softmax(head(emb), dim=-1)
+            for local_idx, class_id in enumerate(group):
+                logits[class_id] = coarse_log_prob[coarse_idx] + fine_log_prob[local_idx]
+        return logits
+
     def forward(self, h: torch.Tensor, window_logits: torch.Tensor | None = None):
         emb = self.pool(h)
-        logits = self.cls(emb)
+        coarse_logits = self.coarse_cls(emb) if self.coarse_cls is not None else None
+        if self.use_expert_heads:
+            logits = self.expert_logits(emb, coarse_logits)
+        else:
+            logits = self.cls(emb)
         if self.pooling == "late_fusion" and window_logits is not None:
             logits = logits + self.fusion_logit_scale * window_logits.mean(dim=0)
         out = {"embedding": emb, "logits": logits}
-        if self.coarse_cls is not None:
-            out["coarse_logits"] = self.coarse_cls(emb)
+        if coarse_logits is not None:
+            out["coarse_logits"] = coarse_logits
         return out
 
 
@@ -291,17 +354,41 @@ def build_class_to_coarse(spec: str, num_classes: int, device: str | torch.devic
     return class_to_coarse.to(device), int(class_to_coarse.max().item() + 1)
 
 
-def build_confusion_matrix(spec: str, num_classes: int, device: str | torch.device = "cpu"):
-    groups = parse_label_groups(spec, num_classes)
-    if not groups:
-        return None
-    mat = torch.zeros(num_classes, num_classes, dtype=torch.bool)
-    for group in groups:
-        for a in group:
-            for b in group:
-                if a != b:
-                    mat[a, b] = True
-    return mat.to(device)
+def build_confusion_weights(
+    spec: str,
+    num_classes: int,
+    device: str | torch.device = "cpu",
+    metrics_json: str = "",
+    level: str = "flow",
+    power: float = 1.0,
+):
+    weights = torch.zeros(num_classes, num_classes, dtype=torch.float32)
+    if metrics_json:
+        with open(metrics_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        prefix = "flow" if level == "flow" else "window"
+        y_true = data.get(f"{prefix}_y_true", [])
+        y_pred = data.get(f"{prefix}_y_pred", [])
+        counts = torch.zeros(num_classes, num_classes, dtype=torch.float32)
+        for true, pred in zip(y_true, y_pred):
+            true = int(true)
+            pred = int(pred)
+            if 0 <= true < num_classes and 0 <= pred < num_classes and true != pred:
+                counts[true, pred] += 1.0
+        weights = counts + counts.T
+        if weights.max() > 0:
+            weights = weights / weights.max().clamp(min=1.0)
+    if weights.max() <= 0:
+        groups = parse_label_groups(spec, num_classes)
+        for group in groups:
+            for a in group:
+                for b in group:
+                    if a != b:
+                        weights[a, b] = 1.0
+    weights.fill_diagonal_(0.0)
+    if power != 1.0 and weights.max() > 0:
+        weights = weights.clamp(min=0.0).pow(power)
+    return weights.to(device) if weights.max() > 0 else None
 
 
 def apply_hierarchical_logits(
@@ -318,6 +405,24 @@ def apply_hierarchical_logits(
         return fine_logits + weight * coarse_log_prob[class_to_coarse]
     coarse_log_prob = F.log_softmax(coarse_logits, dim=-1)
     return fine_logits + weight * coarse_log_prob[:, class_to_coarse]
+
+
+def needs_hierarchical_head(args) -> bool:
+    return args.hierarchical_mode == "expert" or args.hierarchical_weight > 0 or args.hierarchical_logit_weight > 0
+
+
+def build_hierarchical_mapping(args):
+    if not needs_hierarchical_head(args):
+        return None, 0, []
+    class_to_coarse, num_coarse_classes = build_class_to_coarse(args.coarse_groups, args.num_classes, args.device)
+    class_groups = parse_label_groups(args.coarse_groups, args.num_classes)
+    if args.hierarchical_mode == "expert" and (class_to_coarse is None or num_coarse_classes <= 0):
+        raise ValueError("--hierarchical_mode expert requires non-empty --coarse_groups")
+    return class_to_coarse, num_coarse_classes, class_groups
+
+
+def effective_hierarchical_logit_weight(args) -> float:
+    return 0.0 if args.hierarchical_mode == "expert" else args.hierarchical_logit_weight
 
 
 def classification_metrics_from_lists(y_true: Sequence[int], y_pred: Sequence[int], num_classes: int):
@@ -386,6 +491,7 @@ def supervised_contrastive_loss(
     labels: torch.Tensor,
     temperature: float = 0.07,
     negative_mask: torch.Tensor | None = None,
+    negative_weight: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if z.size(0) <= 1:
         return z.sum() * 0.0
@@ -398,22 +504,37 @@ def supervised_contrastive_loss(
     valid = pos_mask.sum(dim=1) > 0
     if valid.sum() == 0:
         return z.sum() * 0.0
-    if negative_mask is None:
-        denom_mask = ~self_mask
+    if negative_weight is not None:
+        denom_weight = pos_mask.float() + negative_weight.to(z.device, dtype=logits.dtype)
+    elif negative_mask is None:
+        denom_weight = (~self_mask).float()
     else:
-        denom_mask = (pos_mask | negative_mask.to(z.device)) & ~self_mask
-    logits = logits.masked_fill(~denom_mask, -1e9)
-    log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+        denom_weight = (pos_mask | negative_mask.to(z.device)).float()
+    denom_weight = denom_weight.masked_fill(self_mask, 0.0)
+    weighted_logits = logits + torch.log(denom_weight.clamp(min=1e-12))
+    weighted_logits = weighted_logits.masked_fill(denom_weight <= 0, -1e9)
+    log_prob = logits - torch.logsumexp(weighted_logits, dim=1, keepdim=True)
     mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / pos_mask.sum(dim=1).clamp(min=1)
     return -mean_log_prob_pos[valid].mean()
 
 
-def contrastive_loss(z: torch.Tensor, labels: torch.Tensor, args, confusion_matrix: torch.Tensor | None = None) -> torch.Tensor:
+def contrastive_loss(z: torch.Tensor, labels: torch.Tensor, args, confusion_weights: torch.Tensor | None = None) -> torch.Tensor:
     negative_mask = None
-    if args.contrastive_mode == "confusion" and confusion_matrix is not None:
-        label_ids = labels.long().clamp(min=0, max=confusion_matrix.size(0) - 1)
-        negative_mask = confusion_matrix[label_ids][:, label_ids] & (labels.view(-1, 1) != labels.view(1, -1))
-    return supervised_contrastive_loss(z, labels, args.flow_temperature, negative_mask=negative_mask)
+    negative_weight = None
+    if args.contrastive_mode in {"confusion", "confusion_weighted"} and confusion_weights is not None:
+        label_ids = labels.long().clamp(min=0, max=confusion_weights.size(0) - 1)
+        negative_weight = confusion_weights[label_ids][:, label_ids]
+        negative_weight = negative_weight * (labels.view(-1, 1) != labels.view(1, -1)).float()
+        if args.contrastive_mode == "confusion":
+            negative_mask = negative_weight > 0
+            negative_weight = None
+    return supervised_contrastive_loss(
+        z,
+        labels,
+        args.flow_temperature,
+        negative_mask=negative_mask,
+        negative_weight=negative_weight,
+    )
 
 
 def train_seq(args):
@@ -429,7 +550,8 @@ def train_seq(args):
     for epoch in range(1, args.epochs + 1):
         model.train(); total = 0.0; ok = 0; cnt = 0; skipped_no_grad = 0
         for batch in dl:
-            x, mask, y = batch["x"].to(args.device), batch["mask"].to(args.device), batch["label"].to(args.device)
+            x = apply_meta_dropout(batch["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
+            mask, y = batch["mask"].to(args.device), batch["label"].to(args.device)
             out = model(x, mask)
             loss = class_weighted_loss(out["logits"], y, class_weight)
             loss = loss + next_aux_loss(out, {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}, args.aux_weight)
@@ -457,14 +579,50 @@ def mean_logits_by_flow(window_logits: torch.Tensor, owners: torch.Tensor, num_f
     return torch.stack(flow_logits, dim=0)
 
 
+def apply_meta_dropout(x: torch.Tensor, prob: float, meta_dim: int) -> torch.Tensor:
+    if prob <= 0 or meta_dim <= 0:
+        return x
+    meta_dim = min(meta_dim, x.shape[-1])
+    if meta_dim <= 0:
+        return x
+    x = x.clone()
+    x[..., -meta_dim:] = F.dropout(x[..., -meta_dim:], p=prob, training=True)
+    return x
+
+
+def apply_edge_attr_dropout(edge_attr: torch.Tensor, prob: float) -> torch.Tensor:
+    if prob <= 0 or edge_attr.numel() == 0 or edge_attr.shape[-1] <= 1:
+        return edge_attr
+    edge_attr = edge_attr.clone()
+    edge_attr[:, 1:] = F.dropout(edge_attr[:, 1:], p=prob, training=True)
+    return edge_attr
+
+
 def train_seq_flow(args):
     ds = SeqDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
     sample = (tr_groups or va_groups)[0]["items"][0]
-    class_to_coarse, num_coarse_classes = build_class_to_coarse(args.coarse_groups, args.num_classes, args.device) if (args.hierarchical_weight > 0 or args.hierarchical_logit_weight > 0) else (None, 0)
-    confusion_matrix = build_confusion_matrix(args.confusion_groups, args.num_classes, args.device) if args.contrastive_mode == "confusion" else None
+    class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
+    confusion_weights = build_confusion_weights(
+        args.confusion_groups,
+        args.num_classes,
+        args.device,
+        metrics_json=args.confusion_matrix_json,
+        level=args.confusion_matrix_level,
+        power=args.confusion_weight_power,
+    ) if args.contrastive_mode in {"confusion", "confusion_weighted"} else None
     model = FlowTransformerClassifier(sample["x"].shape[1], args.num_classes, args.hidden_dim, args.num_layers, args.num_heads, args.dropout).to(args.device)
-    flow_head = FlowAggregationHead(args.hidden_dim, args.num_classes, pooling=args.flow_pooling, num_coarse_classes=num_coarse_classes).to(args.device)
+    flow_head = FlowAggregationHead(
+        args.hidden_dim,
+        args.num_classes,
+        pooling=args.flow_pooling,
+        num_coarse_classes=num_coarse_classes,
+        class_groups=class_groups if args.hierarchical_mode == "expert" else None,
+        hierarchical_mode=args.hierarchical_mode,
+        flow_transformer_layers=args.flow_transformer_layers,
+        flow_transformer_heads=args.flow_transformer_heads,
+        dropout=args.dropout,
+    ).to(args.device)
     class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta)
     opt = torch.optim.AdamW(list(model.parameters()) + list(flow_head.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -483,7 +641,8 @@ def train_seq_flow(args):
             if not windows:
                 continue
             batch = collate_seq(windows)
-            out = model(batch["x"].to(args.device), batch["mask"].to(args.device))
+            x = apply_meta_dropout(batch["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
+            out = model(x, batch["mask"].to(args.device))
             owners_t = torch.tensor(owners, dtype=torch.long, device=args.device)
             window_labels = batch["label"].to(args.device)
             flow_logits = []
@@ -498,7 +657,7 @@ def train_seq_flow(args):
                 flow_embs.append(pooled["embedding"])
             flow_logits = torch.stack(flow_logits, dim=0)
             coarse_logits = torch.stack(flow_coarse_logits, dim=0) if flow_coarse_logits else None
-            flow_logits = apply_hierarchical_logits(flow_logits, coarse_logits, class_to_coarse, args.hierarchical_logit_weight)
+            flow_logits = apply_hierarchical_logits(flow_logits, coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             flow_embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = class_weighted_loss(flow_logits, y, class_weight)
@@ -507,7 +666,7 @@ def train_seq_flow(args):
             if args.window_loss_weight > 0:
                 loss = loss + args.window_loss_weight * class_weighted_loss(out["logits"], window_labels, class_weight)
             if args.flow_contrastive_weight > 0:
-                loss = loss + args.flow_contrastive_weight * contrastive_loss(flow_embs, y, args, confusion_matrix)
+                loss = loss + args.flow_contrastive_weight * contrastive_loss(flow_embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(flow_head.parameters()), 1.0)
             opt.step()
@@ -521,7 +680,8 @@ def train_seq_flow(args):
             args.num_classes,
             flow_head=flow_head,
             class_to_coarse=class_to_coarse,
-            hierarchical_logit_weight=args.hierarchical_logit_weight,
+            hierarchical_logit_weight=effective_hierarchical_logit_weight(args),
+            hierarchical_mode=args.hierarchical_mode,
         ) if va_groups else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
         print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} flows={cnt}")
@@ -555,6 +715,7 @@ def evaluate_seq_flow(
     flow_head: FlowAggregationHead | None = None,
     class_to_coarse: torch.Tensor | None = None,
     hierarchical_logit_weight: float = 0.0,
+    hierarchical_mode: str = "logit",
 ):
     model.eval(); y_true = []; y_pred = []
     if flow_head is not None:
@@ -616,9 +777,9 @@ def train_graph(args):
         random.shuffle(order)
         for idx in order:
             item = tr[idx]
-            x = item["x"].to(args.device)
+            x = apply_meta_dropout(item["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
             edge_index = item["edge_index"].to(args.device)
-            edge_attr = item["edge_attr"].to(args.device)
+            edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
             y = torch.tensor([int(item.get("label", -1))], dtype=torch.long, device=args.device)
             out = model(x, edge_index, edge_attr)
             loss = class_weighted_loss(out["logits"], y, class_weight)
@@ -649,8 +810,15 @@ def train_graph_flow(args):
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
     sample = (tr_groups or va_groups)[0]["items"][0]
     edge_attr_dim = int(sample.get("edge_attr", torch.zeros((0, 4))).shape[1])
-    class_to_coarse, num_coarse_classes = build_class_to_coarse(args.coarse_groups, args.num_classes, args.device) if (args.hierarchical_weight > 0 or args.hierarchical_logit_weight > 0) else (None, 0)
-    confusion_matrix = build_confusion_matrix(args.confusion_groups, args.num_classes, args.device) if args.contrastive_mode == "confusion" else None
+    class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
+    confusion_weights = build_confusion_weights(
+        args.confusion_groups,
+        args.num_classes,
+        args.device,
+        metrics_json=args.confusion_matrix_json,
+        level=args.confusion_matrix_level,
+        power=args.confusion_weight_power,
+    ) if args.contrastive_mode in {"confusion", "confusion_weighted"} else None
     model = FlowGraphTransformerClassifier(
         sample["x"].shape[1],
         args.num_classes,
@@ -660,7 +828,17 @@ def train_graph_flow(args):
         edge_attr_dim=edge_attr_dim,
         dropout=args.dropout,
     ).to(args.device)
-    flow_head = FlowAggregationHead(args.hidden_dim, args.num_classes, pooling=args.flow_pooling, num_coarse_classes=num_coarse_classes).to(args.device)
+    flow_head = FlowAggregationHead(
+        args.hidden_dim,
+        args.num_classes,
+        pooling=args.flow_pooling,
+        num_coarse_classes=num_coarse_classes,
+        class_groups=class_groups if args.hierarchical_mode == "expert" else None,
+        hierarchical_mode=args.hierarchical_mode,
+        flow_transformer_layers=args.flow_transformer_layers,
+        flow_transformer_heads=args.flow_transformer_heads,
+        dropout=args.dropout,
+    ).to(args.device)
     class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta)
     opt = torch.optim.AdamW(list(model.parameters()) + list(flow_head.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -678,7 +856,9 @@ def train_graph_flow(args):
                 window_embs = []
                 window_logits = []
                 for item in group["items"]:
-                    out = model(item["x"].to(args.device), item["edge_index"].to(args.device), item["edge_attr"].to(args.device))
+                    x = apply_meta_dropout(item["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
+                    edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
+                    out = model(x, item["edge_index"].to(args.device), edge_attr)
                     window_embs.append(out["embedding"])
                     window_logits.append(out["logits"].squeeze(0))
                     window_logits_all.append(out["logits"].squeeze(0))
@@ -694,7 +874,7 @@ def train_graph_flow(args):
                 continue
             logits = torch.stack(flow_logits, dim=0)
             coarse_logits = torch.stack(flow_coarse_logits, dim=0) if flow_coarse_logits else None
-            logits = apply_hierarchical_logits(logits, coarse_logits, class_to_coarse, args.hierarchical_logit_weight)
+            logits = apply_hierarchical_logits(logits, coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = class_weighted_loss(logits, y, class_weight)
@@ -705,7 +885,7 @@ def train_graph_flow(args):
                 win_y = torch.tensor(window_labels, dtype=torch.long, device=args.device)
                 loss = loss + args.window_loss_weight * class_weighted_loss(win_logits, win_y, class_weight)
             if args.flow_contrastive_weight > 0:
-                loss = loss + args.flow_contrastive_weight * contrastive_loss(embs, y, args, confusion_matrix)
+                loss = loss + args.flow_contrastive_weight * contrastive_loss(embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(flow_head.parameters()), 1.0)
             opt.step()
@@ -718,7 +898,8 @@ def train_graph_flow(args):
             args.num_classes,
             flow_head=flow_head,
             class_to_coarse=class_to_coarse,
-            hierarchical_logit_weight=args.hierarchical_logit_weight,
+            hierarchical_logit_weight=effective_hierarchical_logit_weight(args),
+            hierarchical_mode=args.hierarchical_mode,
         ) if va_groups else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
         print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} flows={cnt}")
@@ -748,6 +929,7 @@ def evaluate_graph_flow(
     flow_head: FlowAggregationHead | None = None,
     class_to_coarse: torch.Tensor | None = None,
     hierarchical_logit_weight: float = 0.0,
+    hierarchical_mode: str = "logit",
 ):
     model.eval(); y_true = []; y_pred = []
     if flow_head is not None:
@@ -792,14 +974,24 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "balanced_flow_batches": args.balanced_flow_batches,
         "classes_per_batch": args.classes_per_batch,
         "samples_per_class": args.samples_per_class,
+        "hierarchical_mode": args.hierarchical_mode,
         "hierarchical_weight": args.hierarchical_weight,
         "hierarchical_logit_weight": args.hierarchical_logit_weight,
         "coarse_groups": args.coarse_groups,
+        "class_groups": parse_label_groups(args.coarse_groups, args.num_classes) if num_coarse_classes > 0 else [],
         "num_coarse_classes": num_coarse_classes,
         "contrastive_mode": args.contrastive_mode,
         "confusion_groups": args.confusion_groups,
+        "confusion_matrix_json": args.confusion_matrix_json,
+        "confusion_matrix_level": args.confusion_matrix_level,
+        "confusion_weight_power": args.confusion_weight_power,
         "flow_contrastive_weight": args.flow_contrastive_weight,
         "flow_temperature": args.flow_temperature,
+        "flow_transformer_layers": args.flow_transformer_layers,
+        "flow_transformer_heads": args.flow_transformer_heads,
+        "meta_dropout_prob": args.meta_dropout_prob,
+        "meta_feature_dim": args.meta_feature_dim,
+        "edge_attr_dropout_prob": args.edge_attr_dropout_prob,
     }
     if edge_attr_dim is not None:
         payload["edge_attr_dim"] = edge_attr_dim
@@ -833,14 +1025,23 @@ def main():
     ap.add_argument("--balanced_flow_batches", action="store_true", help="Sample each flow batch from multiple classes with repeated positives, useful for flow SupCon.")
     ap.add_argument("--classes_per_batch", type=int, default=0, help="Classes per balanced flow batch. 0 derives it from batch_size / samples_per_class.")
     ap.add_argument("--samples_per_class", type=int, default=2, help="Flows per class in balanced flow batches.")
+    ap.add_argument("--hierarchical_mode", choices=["logit", "expert"], default="logit", help="logit: add coarse log-probability to flat logits; expert: use group-specific fine heads P(coarse)*P(class|coarse).")
     ap.add_argument("--hierarchical_weight", type=float, default=0.0, help="Coarse-label CE weight for hierarchical coarse-to-fine flow classification.")
     ap.add_argument("--hierarchical_logit_weight", type=float, default=0.0, help="Add coarse log-probability to fine logits during training/evaluation.")
     ap.add_argument("--coarse_groups", default="vpn_app", help="Coarse groups. Use 'vpn_app', 'none', or semicolon groups like '0,2;1,4'.")
-    ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion"], default="attention", help="Pooling used by --train_level flow over window embeddings.")
-    ap.add_argument("--contrastive_mode", choices=["standard", "confusion"], default="standard", help="standard uses all non-self negatives; confusion uses only negatives from configured confusion groups.")
+    ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer"], default="attention", help="Pooling used by --train_level flow over window embeddings.")
+    ap.add_argument("--flow_transformer_layers", type=int, default=1, help="Number of Transformer layers for --flow_pooling transformer.")
+    ap.add_argument("--flow_transformer_heads", type=int, default=4, help="Attention heads for --flow_pooling transformer.")
+    ap.add_argument("--contrastive_mode", choices=["standard", "confusion", "confusion_weighted"], default="standard", help="standard uses all non-self negatives; confusion uses configured hard negatives; confusion_weighted weights hard negatives by a confusion matrix.")
     ap.add_argument("--confusion_groups", default="vpn_app", help="Groups used by --contrastive_mode confusion. Use 'vpn_app', 'none', or semicolon groups.")
+    ap.add_argument("--confusion_matrix_json", default="", help="Optional previous test/valid metrics JSON. Its flow/window y_true/y_pred arrays define weighted SupCon negatives.")
+    ap.add_argument("--confusion_matrix_level", choices=["flow", "window"], default="flow", help="Use flow or window predictions from --confusion_matrix_json.")
+    ap.add_argument("--confusion_weight_power", type=float, default=1.0, help="Power applied to normalized confusion weights; >1 focuses more on the strongest confusions.")
     ap.add_argument("--flow_contrastive_weight", type=float, default=0.0, help="Weight for supervised contrastive loss over flow embeddings in --train_level flow.")
     ap.add_argument("--flow_temperature", type=float, default=0.07)
+    ap.add_argument("--meta_dropout_prob", type=float, default=0.0, help="Training-only dropout on the trailing metadata feature dimensions of x.")
+    ap.add_argument("--meta_feature_dim", type=int, default=14, help="Number of trailing metadata feature dimensions appended by preprocess_tower2.py.")
+    ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.0, help="Training-only dropout on continuous graph edge attributes; edge type id is kept.")
     ap.add_argument("--valid_ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -850,8 +1051,12 @@ def main():
         print("WARNING: --train_level flow ignores aux/coherence weights; use --window_loss_weight for dual flow/window classification.")
     if args.flow_contrastive_weight > 0 and not args.balanced_flow_batches:
         print("WARNING: flow SupCon is usually more effective with --balanced_flow_batches so each batch has positive pairs.")
-    if args.hierarchical_logit_weight > 0 and args.hierarchical_weight <= 0:
+    if args.hierarchical_mode == "expert" and args.hierarchical_logit_weight > 0:
+        print("WARNING: --hierarchical_mode expert already uses coarse probabilities; --hierarchical_logit_weight is ignored.")
+    if args.hierarchical_mode == "logit" and args.hierarchical_logit_weight > 0 and args.hierarchical_weight <= 0:
         print("WARNING: --hierarchical_logit_weight is enabled but --hierarchical_weight is 0, so the coarse head has no direct supervision.")
+    if args.contrastive_mode == "confusion_weighted" and not args.confusion_matrix_json:
+        print("WARNING: --contrastive_mode confusion_weighted has no --confusion_matrix_json; falling back to binary group weights.")
     if args.model_type == "seq":
         train_seq_flow(args) if args.train_level == "flow" else train_seq(args)
     else:
