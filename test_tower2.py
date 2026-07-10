@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
 
-from train_tower2 import FlowAggregationHead, SeqDataset, GraphDataset, collate_seq
+from train_tower2 import FlowAggregationHead, SeqDataset, GraphDataset, collate_seq, apply_hierarchical_logits, build_class_to_coarse
 from models.flow_transformer import FlowTransformerClassifier
 from models.flow_graph_transformer import FlowGraphTransformerClassifier
 
@@ -38,6 +38,7 @@ def load_model(ckpt_path: str, device: str):
             ckpt["hidden_dim"],
             ckpt["num_classes"],
             pooling=ckpt.get("flow_pooling", "attention"),
+            num_coarse_classes=ckpt.get("num_coarse_classes", 0),
         )
         flow_head.load_state_dict(ckpt["flow_head_state"])
         flow_head.to(device).eval()
@@ -83,7 +84,16 @@ def predict_graph(model, dataset_path: str, device: str):
     return y_true, y_pred, flow_ids, logits_all, emb_all
 
 
-def aggregate_by_flow(y_true, flow_ids, logits_all, emb_all=None, flow_head=None, device: str = "cpu"):
+def aggregate_by_flow(
+    y_true,
+    flow_ids,
+    logits_all,
+    emb_all=None,
+    flow_head=None,
+    device: str = "cpu",
+    class_to_coarse=None,
+    hierarchical_logit_weight: float = 0.0,
+):
     buckets = defaultdict(list)
     emb_buckets = defaultdict(list)
     labels = {}
@@ -98,7 +108,14 @@ def aggregate_by_flow(y_true, flow_ids, logits_all, emb_all=None, flow_head=None
             logits = np.mean(np.stack(arrs, axis=0), axis=0)
         else:
             emb = torch.tensor(np.stack(emb_buckets[fid], axis=0), dtype=torch.float32, device=device)
-            logits = flow_head(emb)["logits"].detach().cpu().numpy()
+            win_logits = torch.tensor(np.stack(arrs, axis=0), dtype=torch.float32, device=device)
+            pooled = flow_head(emb, window_logits=win_logits)
+            logits = apply_hierarchical_logits(
+                pooled["logits"],
+                pooled.get("coarse_logits"),
+                class_to_coarse,
+                hierarchical_logit_weight,
+            ).detach().cpu().numpy()
         flow_true.append(labels[fid])
         flow_pred.append(int(logits.argmax()))
     return flow_true, flow_pred
@@ -153,13 +170,25 @@ def main():
     args = ap.parse_args()
     model, ckpt, flow_head = load_model(args.checkpoint, args.device)
     label_names, label_map = load_label_names(args.label_map)
+    class_to_coarse = None
+    if ckpt.get("num_coarse_classes", 0) > 0:
+        class_to_coarse, _ = build_class_to_coarse(ckpt.get("coarse_groups", "vpn_app"), ckpt["num_classes"], args.device)
     if ckpt["model_type"] == "seq":
         y_true, y_pred, flow_ids, logits_all, emb_all = predict_seq(model, args.dataset, args.device, args.batch_size)
     else:
         y_true, y_pred, flow_ids, logits_all, emb_all = predict_graph(model, args.dataset, args.device)
 
     window_metrics = compute_metrics(y_true, y_pred)
-    flow_true, flow_pred = aggregate_by_flow(y_true, flow_ids, logits_all, emb_all=emb_all, flow_head=flow_head, device=args.device)
+    flow_true, flow_pred = aggregate_by_flow(
+        y_true,
+        flow_ids,
+        logits_all,
+        emb_all=emb_all,
+        flow_head=flow_head,
+        device=args.device,
+        class_to_coarse=class_to_coarse,
+        hierarchical_logit_weight=ckpt.get("hierarchical_logit_weight", 0.0),
+    )
     flow_metrics = compute_metrics(flow_true, flow_pred)
     metrics = {"window_level": window_metrics, "flow_level": flow_metrics}
     print(json.dumps(metrics, indent=2))

@@ -351,20 +351,137 @@ retransmission_candidate
 
 ---
 
-## 6. Train Tower 2: sequence Transformer
+## 6. Train Tower 2: staged sequence Transformer experiments
+
+The next experiments use the `rawproj_change_weight` Tower-2 data and enable changes step by step.
+
+Stage 1 adds flow/window dual loss and keeps SupCon off:
 
 ```bash
 python train_tower2.py \
   --model_type seq \
   --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
   --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
-  --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_attn_supcon \
+  --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_dual \
   --num_classes 16 \
   --epochs 30 \
   --batch_size 16 \
   --train_level flow \
   --flow_pooling attention \
-  --flow_contrastive_weight 0.1 \
+  --window_loss_weight 0.3 \
+  --flow_contrastive_weight 0 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 2 adds class-balanced CE:
+
+```bash
+python train_tower2.py \
+  --model_type seq \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+  --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_dual_cbce \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --train_level flow \
+  --flow_pooling attention \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --flow_contrastive_weight 0 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 3 adds balanced SupCon. `--balanced_flow_batches` makes each batch contain positive pairs for contrastive learning:
+
+```bash
+python train_tower2.py \
+  --model_type seq \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+  --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_dual_cbce_bal_supcon \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --train_level flow \
+  --flow_pooling attention \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --flow_contrastive_weight 0.05 \
+  --flow_temperature 0.07 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 4 compares flow pooling strategies on the same loss setup:
+
+```bash
+for pooling in mean attention late_fusion; do
+  python train_tower2.py \
+    --model_type seq \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_dual_cbce_bal_supcon_pool_${pooling} \
+    --num_classes 16 \
+    --epochs 30 \
+    --batch_size 16 \
+    --train_level flow \
+    --flow_pooling ${pooling} \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --flow_contrastive_weight 0.05 \
+    --flow_temperature 0.07 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --aux_weight 0 \
+    --coherence_weight 0
+done
+```
+
+Stage 5 selects checkpoints by flow macro-F1, adds hierarchical coarse-to-fine classification, and uses confusion-aware SupCon:
+
+```bash
+python train_tower2.py \
+  --model_type seq \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+  --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_macro_hier_conf_supcon \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --train_level flow \
+  --select_metric flow_macro_f1 \
+  --flow_pooling mean \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --hierarchical_weight 0.2 \
+  --hierarchical_logit_weight 0.5 \
+  --coarse_groups vpn_app \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --contrastive_mode confusion \
+  --confusion_groups vpn_app \
+  --flow_contrastive_weight 0.03 \
   --flow_temperature 0.07 \
   --hidden_dim 256 \
   --num_layers 2 \
@@ -375,14 +492,16 @@ python train_tower2.py \
 
 ---
 
-## 7. Train Tower 2: graph Transformer
+## 7. Train Tower 2: staged graph Transformer experiments
+
+Stage 1 adds flow/window dual loss and keeps SupCon off:
 
 ```bash
 python train_tower2.py \
   --model_type graph \
   --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
   --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
-  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_attn_supcon \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_dual \
   --num_classes 16 \
   --epochs 30 \
   --hidden_dim 256 \
@@ -390,7 +509,119 @@ python train_tower2.py \
   --num_heads 4 \
   --train_level flow \
   --flow_pooling attention \
-  --flow_contrastive_weight 0.1 \
+  --window_loss_weight 0.3 \
+  --flow_contrastive_weight 0 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 2 adds class-balanced CE:
+
+```bash
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_dual_cbce \
+  --num_classes 16 \
+  --epochs 30 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --flow_pooling attention \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --flow_contrastive_weight 0 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 3 adds balanced SupCon:
+
+```bash
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_dual_cbce_bal_supcon \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --flow_pooling attention \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --flow_contrastive_weight 0.05 \
+  --flow_temperature 0.07 \
+  --aux_weight 0 \
+  --coherence_weight 0
+```
+
+Stage 4 compares flow pooling strategies on the same loss setup:
+
+```bash
+for pooling in mean attention late_fusion; do
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_dual_cbce_bal_supcon_pool_${pooling} \
+    --num_classes 16 \
+    --epochs 30 \
+    --batch_size 16 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --train_level flow \
+    --flow_pooling ${pooling} \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --flow_contrastive_weight 0.05 \
+    --flow_temperature 0.07 \
+    --aux_weight 0 \
+    --coherence_weight 0
+done
+```
+
+Stage 5 selects checkpoints by flow macro-F1, adds hierarchical coarse-to-fine classification, and uses confusion-aware SupCon:
+
+```bash
+python train_tower2.py \
+  --model_type graph \
+  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_macro_hier_conf_supcon \
+  --num_classes 16 \
+  --epochs 30 \
+  --batch_size 16 \
+  --hidden_dim 256 \
+  --num_layers 2 \
+  --num_heads 4 \
+  --train_level flow \
+  --select_metric flow_macro_f1 \
+  --flow_pooling mean \
+  --window_loss_weight 0.3 \
+  --class_weighting effective \
+  --class_weight_beta 0.9999 \
+  --hierarchical_weight 0.2 \
+  --hierarchical_logit_weight 0.5 \
+  --coarse_groups vpn_app \
+  --balanced_flow_batches \
+  --samples_per_class 2 \
+  --contrastive_mode confusion \
+  --confusion_groups vpn_app \
+  --flow_contrastive_weight 0.03 \
   --flow_temperature 0.07 \
   --aux_weight 0 \
   --coherence_weight 0
@@ -398,30 +629,76 @@ python train_tower2.py \
 
 `--valid_dataset` uses the held-out valid split for checkpoint selection instead of taking a validation subset from the training flows.
 
-`--train_level flow` groups windows by `flow_id`, pools window embeddings with the trainable `--flow_pooling` head, and optimizes the flow label directly. `--flow_contrastive_weight` adds supervised contrastive learning on the pooled flow embeddings, pulling same-class flows together and pushing different-class flows apart. The older default `--train_level window` is still available for ablations.
+`--train_level flow` groups windows by `flow_id`, pools window embeddings with the trainable `--flow_pooling` head, and optimizes the flow label directly. `--window_loss_weight` keeps the original window classifier supervised during flow-level training. `--class_weighting effective` enables class-balanced CE. `--flow_contrastive_weight` adds supervised contrastive learning on pooled flow embeddings, and `--balanced_flow_batches` makes SupCon batches contain same-class positives. `--flow_pooling late_fusion` combines the trainable flow head with mean window logits.
+
+`--select_metric flow_macro_f1` saves `best.pt` by validation macro-F1 instead of validation accuracy. `--hierarchical_weight` adds a coarse-label loss, while `--hierarchical_logit_weight` adds the coarse log-probability back to each fine-class logit at train/test time. `--contrastive_mode confusion` uses only configured same-group hard negatives in SupCon instead of pushing against every different class.
 
 ---
 
 ## 8. Test
 
-### Sequence model
+### Sequence model staged loss comparison
 
 ```bash
-python test_tower2.py \
-  --checkpoint checkpoints/tower2_seq_flow_rawproj_change_weight_attn_supcon/best.pt \
-  --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/seq_dataset.pt \
-  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
-  --output_json reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_attn_supcon.json
+for suffix in dual dual_cbce dual_cbce_bal_supcon; do
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_seq_flow_rawproj_change_weight_${suffix}/best.pt \
+    --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/seq_dataset.pt \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_${suffix}.json
+done
 ```
 
-### Graph model
+### Sequence model pooling comparison
+
+```bash
+for pooling in mean attention late_fusion; do
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_seq_flow_rawproj_change_weight_dual_cbce_bal_supcon_pool_${pooling}/best.pt \
+    --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/seq_dataset.pt \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_dual_cbce_bal_supcon_pool_${pooling}.json
+done
+```
+
+### Graph model staged loss comparison
+
+```bash
+for suffix in dual dual_cbce dual_cbce_bal_supcon; do
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_${suffix}/best.pt \
+    --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_${suffix}.json
+done
+```
+
+### Graph model pooling comparison
+
+```bash
+for pooling in mean attention late_fusion; do
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_dual_cbce_bal_supcon_pool_${pooling}/best.pt \
+    --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_dual_cbce_bal_supcon_pool_${pooling}.json
+done
+```
+
+### Macro-F1 + hierarchical + confusion-aware SupCon
 
 ```bash
 python test_tower2.py \
-  --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_attn_supcon/best.pt \
+  --checkpoint checkpoints/tower2_seq_flow_rawproj_change_weight_macro_hier_conf_supcon/best.pt \
+  --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/seq_dataset.pt \
+  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --output_json reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json
+
+python test_tower2.py \
+  --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_macro_hier_conf_supcon/best.pt \
   --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
   --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
-  --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_attn_supcon.json
+  --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json
 ```
 
 Metrics include:
@@ -441,7 +718,12 @@ Flow-level Accuracy / Precision / Recall / F1
 4. Full Tower1: `L_QA + alpha L_packet_cls + beta L_supcon`
 5. Tower2 sequence Transformer vs Graph Transformer
 6. Raw last-token embedding vs projection-head embedding vs raw+projected concatenation
-7. Window-level Tower-2 training vs flow-level Tower-2 training
-8. Mean pooling vs last-token pooling
+7. Window-level Tower-2 training vs flow/window dual-loss Tower-2 training
+8. Class-balanced CE off vs on
+9. Balanced SupCon off vs on
+10. Flow pooling: mean vs attention vs late_fusion
+11. Best checkpoint by flow accuracy vs flow macro-F1
+12. Flat 16-class classifier vs hierarchical coarse-to-fine classifier
+13. Standard SupCon vs confusion-aware SupCon
 
 These ablations directly support the claim that Tower 1 learns protocol-aware packet semantics while Tower 2 learns flow-level packet interaction patterns.
