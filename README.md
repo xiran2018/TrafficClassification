@@ -1240,11 +1240,11 @@ tls-120:
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
 
 ustc-app:
-  result file: reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s80_stage8_flowaware_safe_prior_residual.json
+  result file: reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_stage8_flowaware_safe_prior_residual.json
   modules: graph/seq Tower-2 + flow-embedding expert + safe target-prior residual candidate
-  selected weights: seq=0.65, emb=0.35, graph=0.0; safe residual selected identity prior
-  test accuracy = 0.5500
-  test macro-F1 = 0.4750
+  selected weights: emb=0.95, seq=0.05, graph=0.0; safe residual selected identity prior
+  test accuracy = 0.6000
+  test macro-F1 = 0.5333
   note: 20 test flows only; use as cross-dataset framework evidence and continue improving representation learning
 ```
 
@@ -1416,23 +1416,29 @@ ustc-binary:
 
 `ustc-app` and `ustc-binary` use a flat layout where each root-level `ClassName.pcap` is treated as one labeled pcap source. The preprocessing code supports both this flat layout and the VPN/TLS class-directory layout. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
 
-USTC app has now been run with full no-limit preprocessing. Each split generated 1280 packet records and a 20-class label map. The first 5-step Tower-1 smoke checkpoint only reached `0.15` accuracy / `0.065` macro-F1 after graph+seq fusion, so it should remain a pipeline smoke test. A stronger 80-step Tower-1 run with conservative memory settings improved graph+seq+embedding-expert fusion to `0.55` accuracy / `0.475` macro-F1:
+USTC app has now been run with full no-limit preprocessing. Each split generated 1280 packet records and a 20-class label map. The first 5-step Tower-1 smoke checkpoint only reached `0.15` accuracy / `0.065` macro-F1 after graph+seq fusion, so it should remain a pipeline smoke test. An 80-step Tower-1 run with `packet_batch_size=2` improved graph+seq+embedding-expert fusion to `0.55` accuracy / `0.475` macro-F1, but its packet contrastive loss stayed inactive because `flows_per_batch=1`.
+
+The current better USTC run uses `packet_batch_size=8`, `packets_per_flow=2`, and 200 Tower-1 steps. This makes the flow-balanced packet sampler use `flows_per_batch=4`, activates Tower-1 SupCon, and improves the final USTC graph/seq/embedding-expert fusion to `0.60` accuracy / `0.5333` macro-F1:
 
 ```text
 Tower-1 checkpoint:
-  checkpoints/tower1_qwen_multitask_ustc_app_flowaware_change_weight_steps80
+  checkpoints/tower1_qwen_multitask_ustc_app_flowaware_change_weight_s200_pb8
 
 Embedding suffix:
-  rawproj_flowaware_change_weight_s80
+  rawproj_flowaware_change_weight_s200_pb8
 
 Best USTC output:
-  reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s80_stage8_flowaware_safe_prior_residual.json
+  reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_stage8_flowaware_safe_prior_residual.json
 
 Validation-selected fusion:
-  seq=0.65, emb=0.35, graph=0.0
+  emb=0.95, seq=0.05, graph=0.0
+
+Tower-1 training signal:
+  step=20  supcon=1.8379, pkt_acc=0.0750
+  step=200 supcon=0.0632, pkt_acc=0.8125
 ```
 
-This is not yet a strong USTC result; the useful finding is that the same module pool can run on USTC and that representation training length has a large effect on transfer from packet embeddings to flow classification.
+This is not yet a strong USTC result, but it is an important ablation: when Tower-1 batches contain multiple flows, the flow-aware SupCon term becomes active and the downstream flow-level result improves. The next USTC step should be validation-aware Tower-1 checkpoint selection or a real flow/window-level contrastive objective, rather than only extending the last checkpoint.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
