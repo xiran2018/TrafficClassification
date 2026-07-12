@@ -293,6 +293,28 @@ def tower2_eval_cmd(args, model_type: str, split: str) -> List[str]:
     ]
 
 
+def model_prob_path(args, model_type: str, split: str) -> str:
+    prefix = "valid" if split == "valid" else "test"
+    return f"reasoningDataset/{args.dataset}/{prefix}_{model_type}_metrics_flow_{args.embedding_suffix}_stage8_flowaware_probs.json"
+
+
+def fusion_payload_path(args, model_type: str) -> str:
+    return f"reasoningDataset/{args.dataset}/{model_type}_metrics_flow_{args.embedding_suffix}_stage8_flowaware_fusion_payload.json"
+
+
+def make_fusion_payload_cmd(args, model_type: str) -> List[str]:
+    return [
+        py(),
+        "make_fusion_payload.py",
+        "--valid_json",
+        model_prob_path(args, model_type, "valid"),
+        "--test_json",
+        model_prob_path(args, model_type, "test"),
+        "--output_json",
+        fusion_payload_path(args, model_type),
+    ]
+
+
 def fusion_cmd(args) -> List[str]:
     cmd = [
         py(),
@@ -302,7 +324,7 @@ def fusion_cmd(args) -> List[str]:
         cmd += [
             "--input",
             model_type,
-            f"reasoningDataset/{args.dataset}/test_{model_type}_metrics_flow_{args.embedding_suffix}_stage8_flowaware_probs.json",
+            fusion_payload_path(args, model_type),
         ]
     cmd += [
         "--label_map",
@@ -427,6 +449,8 @@ def commands(args) -> Iterable[List[str]]:
             yield tower2_eval_cmd(args, model_type, "valid")
             yield tower2_eval_cmd(args, model_type, "test")
     if args.stage in {"fusion", "all"}:
+        for model_type in selected_model_types(args):
+            yield make_fusion_payload_cmd(args, model_type)
         yield fusion_cmd(args)
     if args.stage in {"prior", "all"}:
         yield prior_cmd(args)

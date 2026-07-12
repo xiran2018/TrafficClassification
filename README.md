@@ -1218,7 +1218,7 @@ packet preprocessing
 -> final flow-level prediction
 ```
 
-The important point is that the residual calibration/expert module is always available, but its weight is selected from validation data. It can receive a non-zero weight on VPN, while TLS-120 can automatically fall back to the base graph/seq model when calibration is not reliable. This keeps one unified framework diagram while allowing data-driven weights.
+The important point is that the residual calibration/expert module is always available, but its weight is selected from validation data. It can receive a non-zero weight on VPN, TLS-120 can automatically fall back to the base graph/seq model when calibration is not reliable, and USTC can select the flow-embedding expert when deep Tower-2 heads are less stable under tiny-split training. This keeps one unified framework diagram while allowing data-driven weights.
 
 Current unified-framework target status:
 
@@ -1238,6 +1238,14 @@ tls-120:
   test accuracy = 0.7909
   test macro-F1 = 0.7769
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
+
+ustc-app:
+  result file: reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s80_stage8_flowaware_safe_prior_residual.json
+  modules: graph/seq Tower-2 + flow-embedding expert + safe target-prior residual candidate
+  selected weights: seq=0.65, emb=0.35, graph=0.0; safe residual selected identity prior
+  test accuracy = 0.5500
+  test macro-F1 = 0.4750
+  note: 20 test flows only; use as cross-dataset framework evidence and continue improving representation learning
 ```
 
 The TLS-120 target-prior candidate by itself is a negative ablation: direct prior replacement dropped test accuracy to `0.7363`. Therefore, for the paper, prior calibration should be described as a **safe residual candidate**, not as a mandatory replacement of base predictions. The constrained residual design is what makes the same module usable across datasets.
@@ -1408,7 +1416,23 @@ ustc-binary:
 
 `ustc-app` and `ustc-binary` use a flat layout where each root-level `ClassName.pcap` is treated as one labeled pcap source. The preprocessing code supports both this flat layout and the VPN/TLS class-directory layout. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
 
-USTC app preprocessing has been smoke-tested with `--preprocess_max_flows 2`; the runner generated train/valid/test Tower-1 inputs with 128 packet records per split and a 20-class label map. Full USTC training still needs the normal no-limit preprocessing, Tower-1 embedding extraction, Tower-2 training, and final evaluation.
+USTC app has now been run with full no-limit preprocessing. Each split generated 1280 packet records and a 20-class label map. The first 5-step Tower-1 smoke checkpoint only reached `0.15` accuracy / `0.065` macro-F1 after graph+seq fusion, so it should remain a pipeline smoke test. A stronger 80-step Tower-1 run with conservative memory settings improved graph+seq+embedding-expert fusion to `0.55` accuracy / `0.475` macro-F1:
+
+```text
+Tower-1 checkpoint:
+  checkpoints/tower1_qwen_multitask_ustc_app_flowaware_change_weight_steps80
+
+Embedding suffix:
+  rawproj_flowaware_change_weight_s80
+
+Best USTC output:
+  reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s80_stage8_flowaware_safe_prior_residual.json
+
+Validation-selected fusion:
+  seq=0.65, emb=0.35, graph=0.0
+```
+
+This is not yet a strong USTC result; the useful finding is that the same module pool can run on USTC and that representation training length has a large effect on transfer from packet embeddings to flow classification.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
@@ -1509,7 +1533,7 @@ conda run --no-capture-output -n llm-factory \
     --no_progress
 ```
 
-`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation.
+`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. The runner's `fusion` stage now first calls `make_fusion_payload.py` for each selected Tower-2 model, so valid/test probability JSONs are automatically merged into the payload format required by `fuse_prediction_jsons.py`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation.
 
 The runner's `prior` stage now implements the paper-safe residual calibration path by default:
 
@@ -1573,7 +1597,7 @@ conda run --no-capture-output -n llm-factory \
     --best_output_json reasoningDataset/vpn-app/test_residual_fusion_search_stage8_minbase90_top12_valid_acc.json
 ```
 
-The current top-12 residual search selected `base=1.0`, so the existing fusion/statistics/embedding experts do not provide enough validation-supported residual signal to cross the VPN `75%` target. The next meaningful improvement should therefore come from representation learning rather than more probability-level fusion: resume GPU Stage-8 Tower-1 flow-aware contrastive training, re-extract embeddings, and rerun Tower-2/fusion on VPN first, then verify the same protocol on TLS-120 and USTC.
+The current top-12 residual search selected `base=1.0`, so the existing fusion/statistics/embedding experts do not provide enough validation-supported residual signal to push VPN beyond the stronger aspirational `75%` mark. The next meaningful improvement should therefore come from representation learning rather than more probability-level fusion: resume GPU Stage-8 Tower-1 flow-aware contrastive training, re-extract embeddings, and rerun Tower-2/fusion on VPN first, then verify the same protocol on TLS-120 and USTC.
 
 Tower-2 also supports a multi-view flow aggregation head through `--flow_pooling multi_view`. It pools each flow with mean, max, standard deviation, and attention statistics, then fuses those views with a gated MLP. This is useful as a multi-instance ablation, but on the current old VPN embeddings it overfits the validation split and does not improve the target test result:
 
