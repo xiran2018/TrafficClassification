@@ -111,6 +111,8 @@ def aggregate_by_flow(
     class_to_coarse=None,
     hierarchical_logit_weight: float = 0.0,
     hierarchical_mode: str = "logit",
+    flow_eval_pooling: str = "checkpoint",
+    flow_eval_topk: int = 3,
 ):
     buckets = defaultdict(list)
     emb_buckets = defaultdict(list)
@@ -120,10 +122,11 @@ def aggregate_by_flow(
         if emb_all is not None:
             emb_buckets[fid].append(emb_all[i])
         labels[fid] = y
-    flow_true, flow_pred = [], []
+    flow_true, flow_pred, out_flow_ids, flow_logits_all = [], [], [], []
     for fid, arrs in buckets.items():
-        if flow_head is None:
-            logits = np.mean(np.stack(arrs, axis=0), axis=0)
+        if flow_head is None or flow_eval_pooling != "checkpoint":
+            pooling = "mean_logits" if flow_eval_pooling == "checkpoint" else flow_eval_pooling
+            logits = pool_window_logits(arrs, pooling, flow_eval_topk)
         else:
             emb = torch.tensor(np.stack(emb_buckets[fid], axis=0), dtype=torch.float32, device=device)
             win_logits = torch.tensor(np.stack(arrs, axis=0), dtype=torch.float32, device=device)
@@ -139,7 +142,38 @@ def aggregate_by_flow(
             logits = logits.detach().cpu().numpy()
         flow_true.append(labels[fid])
         flow_pred.append(int(logits.argmax()))
-    return flow_true, flow_pred
+        out_flow_ids.append(fid)
+        flow_logits_all.append(np.asarray(logits, dtype=np.float32))
+    return flow_true, flow_pred, out_flow_ids, flow_logits_all
+
+
+def softmax_np(x: np.ndarray) -> np.ndarray:
+    x = x - np.max(x, axis=-1, keepdims=True)
+    ex = np.exp(x)
+    return ex / np.sum(ex, axis=-1, keepdims=True).clip(min=1e-12)
+
+
+def pool_window_logits(arrs, mode: str, topk: int) -> np.ndarray:
+    logits = np.stack(arrs, axis=0)
+    if mode == "mean_logits":
+        return logits.mean(axis=0)
+
+    probs = softmax_np(logits)
+    if mode == "mean_probs":
+        return probs.mean(axis=0)
+
+    conf = probs.max(axis=1)
+    if mode == "max_conf":
+        return logits[int(conf.argmax())]
+    if mode == "topk_logits":
+        k = min(max(1, int(topk)), logits.shape[0])
+        idx = np.argsort(conf)[-k:]
+        return logits[idx].mean(axis=0)
+    if mode == "vote":
+        votes = logits.argmax(axis=1)
+        counts = np.bincount(votes, minlength=logits.shape[1]).astype(np.float32)
+        return counts + 1e-6 * probs.mean(axis=0)
+    raise ValueError(f"Unknown --flow_eval_pooling: {mode}")
 
 
 def compute_metrics(y_true, y_pred):
@@ -188,6 +222,14 @@ def main():
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--output_json", default="")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--no_report", action="store_true", help="Only print the metrics JSON, without classification reports.")
+    ap.add_argument(
+        "--flow_eval_pooling",
+        default="checkpoint",
+        choices=["checkpoint", "mean_logits", "mean_probs", "max_conf", "topk_logits", "vote"],
+        help="Flow-level aggregation at eval time. 'checkpoint' uses the trained flow head when available.",
+    )
+    ap.add_argument("--flow_eval_topk", type=int, default=3, help="Top-k windows for --flow_eval_pooling topk_logits.")
     args = ap.parse_args()
     model, ckpt, flow_head = load_model(args.checkpoint, args.device)
     label_names, label_map = load_label_names(args.label_map)
@@ -200,7 +242,7 @@ def main():
         y_true, y_pred, flow_ids, logits_all, emb_all = predict_graph(model, args.dataset, args.device)
 
     window_metrics = compute_metrics(y_true, y_pred)
-    flow_true, flow_pred = aggregate_by_flow(
+    flow_true, flow_pred, out_flow_ids, flow_logits_all = aggregate_by_flow(
         y_true,
         flow_ids,
         logits_all,
@@ -210,12 +252,22 @@ def main():
         class_to_coarse=class_to_coarse,
         hierarchical_logit_weight=ckpt.get("hierarchical_logit_weight", 0.0),
         hierarchical_mode=ckpt.get("hierarchical_mode", "logit"),
+        flow_eval_pooling=args.flow_eval_pooling,
+        flow_eval_topk=args.flow_eval_topk,
     )
     flow_metrics = compute_metrics(flow_true, flow_pred)
-    metrics = {"window_level": window_metrics, "flow_level": flow_metrics}
+    metrics = {
+        "window_level": window_metrics,
+        "flow_level": flow_metrics,
+        "eval_config": {
+            "flow_eval_pooling": args.flow_eval_pooling,
+            "flow_eval_topk": args.flow_eval_topk,
+        },
+    }
     print(json.dumps(metrics, indent=2))
-    print_report("Window-level report", y_true, y_pred, label_names)
-    print_report("Flow-level report", flow_true, flow_pred, label_names)
+    if not args.no_report:
+        print_report("Window-level report", y_true, y_pred, label_names)
+        print_report("Flow-level report", flow_true, flow_pred, label_names)
     if args.output_json:
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w", encoding="utf-8") as f:
@@ -225,8 +277,12 @@ def main():
                     "label_map": label_map,
                     "window_y_true": y_true,
                     "window_y_pred": y_pred,
+                    "window_prob": softmax_np(np.stack(logits_all, axis=0)).tolist() if logits_all else [],
+                    "window_flow_ids": flow_ids,
                     "flow_y_true": flow_true,
                     "flow_y_pred": flow_pred,
+                    "flow_prob": softmax_np(np.stack(flow_logits_all, axis=0)).tolist() if flow_logits_all else [],
+                    "flow_ids": out_flow_ids,
                 },
                 f,
                 indent=2,

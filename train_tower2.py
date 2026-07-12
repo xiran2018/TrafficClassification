@@ -72,6 +72,16 @@ class FlowAggregationHead(nn.Module):
             self.flow_encoder = None
         self.cls = nn.Linear(hidden_dim, num_classes)
         self.coarse_cls = nn.Linear(hidden_dim, num_coarse_classes) if num_coarse_classes > 0 else None
+        if pooling == "multi_view":
+            self.multi_view_gate = nn.Sequential(
+                nn.LayerNorm(hidden_dim * 4),
+                nn.Linear(hidden_dim * 4, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+        else:
+            self.multi_view_gate = None
         self.use_expert_heads = hierarchical_mode == "expert" and self.coarse_cls is not None and bool(self.class_groups)
         if self.use_expert_heads and len(self.class_groups) != num_coarse_classes:
             raise ValueError("class_groups must match num_coarse_classes when --hierarchical_mode expert is used")
@@ -86,6 +96,13 @@ class FlowAggregationHead(nn.Module):
             raise ValueError("Cannot pool an empty flow.")
         if self.pooling == "mean":
             return h.mean(dim=0)
+        if self.pooling == "multi_view":
+            mean = h.mean(dim=0)
+            maxv = h.max(dim=0).values
+            std = h.std(dim=0, unbiased=False) if h.size(0) > 1 else torch.zeros_like(mean)
+            weights = torch.softmax(self.score(h).squeeze(-1), dim=0)
+            attn = torch.sum(h * weights.unsqueeze(-1), dim=0)
+            return self.multi_view_gate(torch.cat([mean, maxv, std, attn], dim=-1))
         if self.pooling == "transformer":
             pos = sinusoidal_position_encoding(h.size(0), h.size(1), h.device, h.dtype)
             h = self.flow_encoder((h + pos).unsqueeze(0)).squeeze(0)
@@ -247,6 +264,13 @@ def split_or_external_flow_groups(ds: Dataset, dataset_cls, args):
     return split_flow_groups(groups, args.valid_ratio, args.seed)
 
 
+def paired_flow_group_lookup(path: str, dataset_cls) -> Dict[str, dict]:
+    if not path:
+        return {}
+    groups = build_flow_groups(dataset_cls(path))
+    return {str(group["flow_id"]): group for group in groups}
+
+
 def collate_seq(batch):
     max_n = max(item["x"].shape[0] for item in batch)
     d = batch[0]["x"].shape[1]
@@ -272,14 +296,26 @@ def classification_loss(logits: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.tensor(0.0, device=logits.device)
 
 
-def class_weighted_loss(logits: torch.Tensor, y: torch.Tensor, class_weight: torch.Tensor | None = None) -> torch.Tensor:
+def class_weighted_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    class_weight: torch.Tensor | None = None,
+    label_smoothing: float = 0.0,
+) -> torch.Tensor:
     valid = y >= 0
     if valid.any():
-        return F.cross_entropy(logits[valid], y[valid], weight=class_weight)
+        return F.cross_entropy(logits[valid], y[valid], weight=class_weight, label_smoothing=label_smoothing)
     return torch.tensor(0.0, device=logits.device)
 
 
-def compute_class_weights(labels: Sequence[int], num_classes: int, device: str, scheme: str = "none", beta: float = 0.9999):
+def compute_class_weights(
+    labels: Sequence[int],
+    num_classes: int,
+    device: str,
+    scheme: str = "none",
+    beta: float = 0.9999,
+    strength: float = 1.0,
+):
     if scheme == "none":
         return None
     counts = torch.zeros(num_classes, dtype=torch.float32)
@@ -299,6 +335,9 @@ def compute_class_weights(labels: Sequence[int], num_classes: int, device: str, 
     else:
         raise ValueError(f"Unknown class weighting scheme: {scheme}")
     weights[present] = weights[present] / weights[present].mean().clamp(min=1e-12)
+    strength = min(max(float(strength), 0.0), 1.0)
+    if strength < 1.0:
+        weights[present] = 1.0 + strength * (weights[present] - 1.0)
     return weights.to(device)
 
 
@@ -421,6 +460,23 @@ def build_hierarchical_mapping(args):
     return class_to_coarse, num_coarse_classes, class_groups
 
 
+def maybe_load_init_checkpoint(args, model: nn.Module, flow_head: FlowAggregationHead | None = None) -> None:
+    if not args.init_checkpoint:
+        return
+    ckpt = torch.load(args.init_checkpoint, map_location=args.device, weights_only=False)
+    missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
+    msg = {
+        "checkpoint": args.init_checkpoint,
+        "model_missing": list(missing),
+        "model_unexpected": list(unexpected),
+    }
+    if flow_head is not None and ckpt.get("flow_head_state") is not None:
+        flow_missing, flow_unexpected = flow_head.load_state_dict(ckpt["flow_head_state"], strict=False)
+        msg["flow_head_missing"] = list(flow_missing)
+        msg["flow_head_unexpected"] = list(flow_unexpected)
+    print("loaded_init_checkpoint " + json.dumps(msg, sort_keys=True), flush=True)
+
+
 def effective_hierarchical_logit_weight(args) -> float:
     return 0.0 if args.hierarchical_mode == "expert" else args.hierarchical_logit_weight
 
@@ -451,6 +507,21 @@ def selected_metric_value(metrics: Dict[str, float], metric_name: str) -> float:
         "window_macro_f1": "macro_f1",
     }
     return float(metrics[aliases[metric_name]])
+
+
+def early_stop_update(select_score: float, best: float, stale_epochs: int, epoch: int, args) -> tuple[bool, float, int, bool]:
+    improved = select_score > best
+    if improved:
+        return False, select_score, 0, True
+    stale_epochs += 1
+    if args.early_stop_patience > 0 and stale_epochs >= args.early_stop_patience:
+        print(
+            f"early_stop epoch={epoch} best_{args.select_metric}={best:.4f} "
+            f"patience={args.early_stop_patience}",
+            flush=True,
+        )
+        return True, best, stale_epochs, False
+    return False, best, stale_epochs, False
 
 
 def next_aux_loss(out, targets: Dict[str, torch.Tensor], weight: float) -> torch.Tensor:
@@ -544,16 +615,18 @@ def train_seq(args):
     vdl = DataLoader(va, batch_size=args.batch_size, shuffle=False, collate_fn=collate_seq) if len(va) else None
     sample = ds[0]
     model = FlowTransformerClassifier(sample["x"].shape[1], args.num_classes, args.hidden_dim, args.num_layers, args.num_heads, args.dropout).to(args.device)
-    class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta)
+    maybe_load_init_checkpoint(args, model)
+    class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
+    stale_epochs = 0
     for epoch in range(1, args.epochs + 1):
         model.train(); total = 0.0; ok = 0; cnt = 0; skipped_no_grad = 0
         for batch in dl:
-            x = apply_meta_dropout(batch["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
+            x = apply_input_augmentation(batch["x"].to(args.device), args)
             mask, y = batch["mask"].to(args.device), batch["label"].to(args.device)
             out = model(x, mask)
-            loss = class_weighted_loss(out["logits"], y, class_weight)
+            loss = class_weighted_loss(out["logits"], y, class_weight, args.label_smoothing)
             loss = loss + next_aux_loss(out, {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}, args.aux_weight)
             loss = loss + coherence_loss(out, batch["coherence_label"], args.coherence_weight)
             if not loss.requires_grad:
@@ -567,9 +640,12 @@ def train_seq(args):
                 ok += int((pred[valid] == y[valid]).sum()); cnt += int(valid.sum())
         val_metrics = evaluate_seq(model, vdl, args.device, args.num_classes) if vdl else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
-        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} skipped_no_grad={skipped_no_grad}")
-        if select_score > best:
-            best = select_score; save_ckpt(args, model, sample["x"].shape[1])
+        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} skipped_no_grad={skipped_no_grad}", flush=True)
+        stop, best, stale_epochs, improved = early_stop_update(select_score, best, stale_epochs, epoch, args)
+        if improved:
+            save_ckpt(args, model, sample["x"].shape[1])
+        if stop:
+            break
 
 
 def mean_logits_by_flow(window_logits: torch.Tensor, owners: torch.Tensor, num_flows: int) -> torch.Tensor:
@@ -590,6 +666,17 @@ def apply_meta_dropout(x: torch.Tensor, prob: float, meta_dim: int) -> torch.Ten
     return x
 
 
+def apply_embedding_dropout(x: torch.Tensor, prob: float, meta_dim: int) -> torch.Tensor:
+    if prob <= 0:
+        return x
+    embed_dim = x.shape[-1] - max(0, meta_dim)
+    if embed_dim <= 0:
+        return x
+    x = x.clone()
+    x[..., :embed_dim] = F.dropout(x[..., :embed_dim], p=prob, training=True)
+    return x
+
+
 def apply_edge_attr_dropout(edge_attr: torch.Tensor, prob: float) -> torch.Tensor:
     if prob <= 0 or edge_attr.numel() == 0 or edge_attr.shape[-1] <= 1:
         return edge_attr
@@ -598,9 +685,42 @@ def apply_edge_attr_dropout(edge_attr: torch.Tensor, prob: float) -> torch.Tenso
     return edge_attr
 
 
+def maybe_drop_windows(items: Sequence[dict], prob: float) -> List[dict]:
+    items = list(items)
+    if prob <= 0 or len(items) <= 1:
+        return items
+    kept = [item for item in items if random.random() >= prob]
+    if kept:
+        return kept
+    return [random.choice(items)]
+
+
+def apply_input_augmentation(x: torch.Tensor, args) -> torch.Tensor:
+    x = apply_meta_dropout(x, args.meta_dropout_prob, args.meta_feature_dim)
+    x = apply_embedding_dropout(x, args.embedding_dropout_prob, args.meta_feature_dim)
+    return x
+
+
+def consistency_kl_loss(reference_logits: torch.Tensor, augmented_logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    if reference_logits.numel() == 0 or augmented_logits.numel() == 0:
+        return reference_logits.sum() * 0.0
+    temperature = max(float(temperature), 1e-6)
+    target = F.softmax(reference_logits.detach() / temperature, dim=-1)
+    log_prob = F.log_softmax(augmented_logits / temperature, dim=-1)
+    return F.kl_div(log_prob, target, reduction="batchmean") * (temperature ** 2)
+
+
+def symmetric_consistency_kl(logits_a: torch.Tensor, logits_b: torch.Tensor, temperature: float) -> torch.Tensor:
+    return 0.5 * (
+        consistency_kl_loss(logits_a, logits_b, temperature)
+        + consistency_kl_loss(logits_b, logits_a, temperature)
+    )
+
+
 def train_seq_flow(args):
     ds = SeqDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
+    paired_groups = paired_flow_group_lookup(args.paired_view_dataset, SeqDataset)
     sample = (tr_groups or va_groups)[0]["items"][0]
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
     confusion_weights = build_confusion_weights(
@@ -623,9 +743,11 @@ def train_seq_flow(args):
         flow_transformer_heads=args.flow_transformer_heads,
         dropout=args.dropout,
     ).to(args.device)
-    class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta)
+    maybe_load_init_checkpoint(args, model, flow_head)
+    class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(list(model.parameters()) + list(flow_head.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
+    stale_epochs = 0
     for epoch in range(1, args.epochs + 1):
         model.train(); total = 0.0; ok = 0; cnt = 0
         flow_head.train()
@@ -633,21 +755,37 @@ def train_seq_flow(args):
             windows = []
             owners = []
             labels = []
+            paired_windows = []
+            paired_owners = []
+            paired_labels = []
             for flow_idx, group in enumerate(flow_batch):
                 labels.append(int(group["label"]))
-                for item in group["items"]:
+                for item in maybe_drop_windows(group["items"], args.window_dropout_prob):
                     windows.append(item)
                     owners.append(flow_idx)
+                paired_group = paired_groups.get(str(group["flow_id"]))
+                if paired_group is not None and int(paired_group["label"]) == int(group["label"]):
+                    paired_labels.append(int(paired_group["label"]))
+                    for item in maybe_drop_windows(paired_group["items"], args.window_dropout_prob):
+                        paired_windows.append(item)
+                        paired_owners.append(flow_idx)
             if not windows:
                 continue
             batch = collate_seq(windows)
-            x = apply_meta_dropout(batch["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
-            out = model(x, batch["mask"].to(args.device))
+            x_clean = batch["x"].to(args.device)
+            mask = batch["mask"].to(args.device)
+            if args.consistency_weight > 0:
+                out = model(x_clean, mask)
+                out_aug = model(apply_input_augmentation(x_clean, args), mask)
+            else:
+                out = model(apply_input_augmentation(x_clean, args), mask)
+                out_aug = None
             owners_t = torch.tensor(owners, dtype=torch.long, device=args.device)
             window_labels = batch["label"].to(args.device)
             flow_logits = []
             flow_coarse_logits = []
             flow_embs = []
+            flow_logits_aug = []
             for flow_idx in range(len(flow_batch)):
                 win_mask = owners_t == flow_idx
                 pooled = flow_head(out["embedding"][win_mask], window_logits=out["logits"][win_mask])
@@ -655,16 +793,49 @@ def train_seq_flow(args):
                 if pooled.get("coarse_logits") is not None:
                     flow_coarse_logits.append(pooled["coarse_logits"])
                 flow_embs.append(pooled["embedding"])
+                if out_aug is not None:
+                    pooled_aug = flow_head(out_aug["embedding"][win_mask], window_logits=out_aug["logits"][win_mask])
+                    flow_logits_aug.append(pooled_aug["logits"])
             flow_logits = torch.stack(flow_logits, dim=0)
             coarse_logits = torch.stack(flow_coarse_logits, dim=0) if flow_coarse_logits else None
             flow_logits = apply_hierarchical_logits(flow_logits, coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
+            if flow_logits_aug:
+                flow_logits_aug = torch.stack(flow_logits_aug, dim=0)
             flow_embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
-            loss = class_weighted_loss(flow_logits, y, class_weight)
+            loss = class_weighted_loss(flow_logits, y, class_weight, args.label_smoothing)
+            paired_logits = None
+            if paired_windows and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0):
+                paired_batch = collate_seq(paired_windows)
+                paired_out = model(
+                    apply_input_augmentation(paired_batch["x"].to(args.device), args),
+                    paired_batch["mask"].to(args.device),
+                )
+                paired_owners_t = torch.tensor(paired_owners, dtype=torch.long, device=args.device)
+                paired_flow_logits = []
+                paired_flow_coarse_logits = []
+                for flow_idx in range(len(flow_batch)):
+                    win_mask = paired_owners_t == flow_idx
+                    if not win_mask.any():
+                        continue
+                    pooled = flow_head(paired_out["embedding"][win_mask], window_logits=paired_out["logits"][win_mask])
+                    paired_flow_logits.append(pooled["logits"])
+                    if pooled.get("coarse_logits") is not None:
+                        paired_flow_coarse_logits.append(pooled["coarse_logits"])
+                if paired_flow_logits and len(paired_flow_logits) == len(flow_batch):
+                    paired_logits = torch.stack(paired_flow_logits, dim=0)
+                    paired_coarse = torch.stack(paired_flow_coarse_logits, dim=0) if paired_flow_coarse_logits else None
+                    paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse, class_to_coarse, effective_hierarchical_logit_weight(args))
+                    if args.paired_view_weight > 0:
+                        loss = loss + args.paired_view_weight * class_weighted_loss(paired_logits, y, class_weight, args.label_smoothing)
+                    if args.paired_consistency_weight > 0:
+                        loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(flow_logits, paired_logits, args.consistency_temperature)
+            if args.consistency_weight > 0 and isinstance(flow_logits_aug, torch.Tensor):
+                loss = loss + args.consistency_weight * consistency_kl_loss(flow_logits, flow_logits_aug, args.consistency_temperature)
             if coarse_logits is not None and args.hierarchical_weight > 0:
                 loss = loss + args.hierarchical_weight * F.cross_entropy(coarse_logits, class_to_coarse[y])
             if args.window_loss_weight > 0:
-                loss = loss + args.window_loss_weight * class_weighted_loss(out["logits"], window_labels, class_weight)
+                loss = loss + args.window_loss_weight * class_weighted_loss(out["logits"], window_labels, class_weight, args.label_smoothing)
             if args.flow_contrastive_weight > 0:
                 loss = loss + args.flow_contrastive_weight * contrastive_loss(flow_embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
@@ -684,9 +855,12 @@ def train_seq_flow(args):
             hierarchical_mode=args.hierarchical_mode,
         ) if va_groups else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
-        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} flows={cnt}")
-        if select_score > best:
-            best = select_score; save_ckpt(args, model, sample["x"].shape[1], flow_head=flow_head, num_coarse_classes=num_coarse_classes)
+        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} flows={cnt}", flush=True)
+        stop, best, stale_epochs, improved = early_stop_update(select_score, best, stale_epochs, epoch, args)
+        if improved:
+            save_ckpt(args, model, sample["x"].shape[1], flow_head=flow_head, num_coarse_classes=num_coarse_classes)
+        if stop:
+            break
 
 
 @torch.no_grad()
@@ -768,21 +942,23 @@ def train_graph(args):
         edge_attr_dim=edge_attr_dim,
         dropout=args.dropout,
     ).to(args.device)
-    class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta)
+    maybe_load_init_checkpoint(args, model)
+    class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
+    stale_epochs = 0
     for epoch in range(1, args.epochs + 1):
         model.train(); total = 0.0; ok = 0; cnt = 0; skipped_no_grad = 0
         order = list(range(len(tr)))
         random.shuffle(order)
         for idx in order:
             item = tr[idx]
-            x = apply_meta_dropout(item["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
+            x = apply_input_augmentation(item["x"].to(args.device), args)
             edge_index = item["edge_index"].to(args.device)
             edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
             y = torch.tensor([int(item.get("label", -1))], dtype=torch.long, device=args.device)
             out = model(x, edge_index, edge_attr)
-            loss = class_weighted_loss(out["logits"], y, class_weight)
+            loss = class_weighted_loss(out["logits"], y, class_weight, args.label_smoothing)
             targets = {
                 "next_direction": item.get("next_direction", torch.tensor(-1)).view(1),
                 "next_length_bin": item.get("next_length_bin", torch.tensor(-1)).view(1),
@@ -800,14 +976,18 @@ def train_graph(args):
                 total += float(loss.item()); ok += int(out["logits"].argmax(-1).item() == int(y.item())); cnt += 1
         val_metrics = evaluate_graph(model, va, args.device, args.num_classes) if len(va) else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
-        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} skipped_no_grad={skipped_no_grad}")
-        if select_score > best:
-            best = select_score; save_ckpt(args, model, sample["x"].shape[1], edge_attr_dim=edge_attr_dim)
+        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} skipped_no_grad={skipped_no_grad}", flush=True)
+        stop, best, stale_epochs, improved = early_stop_update(select_score, best, stale_epochs, epoch, args)
+        if improved:
+            save_ckpt(args, model, sample["x"].shape[1], edge_attr_dim=edge_attr_dim)
+        if stop:
+            break
 
 
 def train_graph_flow(args):
     ds = GraphDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
+    paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
     sample = (tr_groups or va_groups)[0]["items"][0]
     edge_attr_dim = int(sample.get("edge_attr", torch.zeros((0, 4))).shape[1])
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
@@ -839,9 +1019,11 @@ def train_graph_flow(args):
         flow_transformer_heads=args.flow_transformer_heads,
         dropout=args.dropout,
     ).to(args.device)
-    class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta)
+    maybe_load_init_checkpoint(args, model, flow_head)
+    class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(list(model.parameters()) + list(flow_head.parameters()), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
+    stale_epochs = 0
     for epoch in range(1, args.epochs + 1):
         model.train(); total = 0.0; ok = 0; cnt = 0
         flow_head.train()
@@ -849,41 +1031,88 @@ def train_graph_flow(args):
             flow_logits = []
             flow_coarse_logits = []
             flow_embs = []
+            flow_logits_aug = []
+            paired_flow_logits = []
+            paired_flow_coarse_logits = []
             window_logits_all = []
             window_labels = []
             labels = []
             for group in flow_batch:
                 window_embs = []
                 window_logits = []
-                for item in group["items"]:
-                    x = apply_meta_dropout(item["x"].to(args.device), args.meta_dropout_prob, args.meta_feature_dim)
+                window_embs_aug = []
+                window_logits_aug = []
+                for item in maybe_drop_windows(group["items"], args.window_dropout_prob):
+                    x_clean = item["x"].to(args.device)
                     edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
-                    out = model(x, item["edge_index"].to(args.device), edge_attr)
+                    if args.consistency_weight > 0:
+                        out = model(x_clean, item["edge_index"].to(args.device), item["edge_attr"].to(args.device))
+                        out_aug = model(apply_input_augmentation(x_clean, args), item["edge_index"].to(args.device), edge_attr)
+                    else:
+                        out = model(apply_input_augmentation(x_clean, args), item["edge_index"].to(args.device), edge_attr)
+                        out_aug = None
                     window_embs.append(out["embedding"])
                     window_logits.append(out["logits"].squeeze(0))
                     window_logits_all.append(out["logits"].squeeze(0))
                     window_labels.append(int(item.get("label", -1)))
+                    if out_aug is not None:
+                        window_embs_aug.append(out_aug["embedding"])
+                        window_logits_aug.append(out_aug["logits"].squeeze(0))
                 if window_embs:
                     pooled = flow_head(torch.stack(window_embs, dim=0), window_logits=torch.stack(window_logits, dim=0))
                     flow_logits.append(pooled["logits"])
                     if pooled.get("coarse_logits") is not None:
                         flow_coarse_logits.append(pooled["coarse_logits"])
                     flow_embs.append(pooled["embedding"])
+                    if window_embs_aug:
+                        pooled_aug = flow_head(torch.stack(window_embs_aug, dim=0), window_logits=torch.stack(window_logits_aug, dim=0))
+                        flow_logits_aug.append(pooled_aug["logits"])
                     labels.append(int(group["label"]))
+                    paired_group = paired_groups.get(str(group["flow_id"]))
+                    if paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0):
+                        paired_window_embs = []
+                        paired_window_logits = []
+                        for paired_item in maybe_drop_windows(paired_group["items"], args.window_dropout_prob):
+                            paired_x = apply_input_augmentation(paired_item["x"].to(args.device), args)
+                            paired_edge_attr = apply_edge_attr_dropout(paired_item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
+                            paired_out = model(paired_x, paired_item["edge_index"].to(args.device), paired_edge_attr)
+                            paired_window_embs.append(paired_out["embedding"])
+                            paired_window_logits.append(paired_out["logits"].squeeze(0))
+                        if paired_window_embs:
+                            paired_pooled = flow_head(
+                                torch.stack(paired_window_embs, dim=0),
+                                window_logits=torch.stack(paired_window_logits, dim=0),
+                            )
+                            paired_flow_logits.append(paired_pooled["logits"])
+                            if paired_pooled.get("coarse_logits") is not None:
+                                paired_flow_coarse_logits.append(paired_pooled["coarse_logits"])
             if not flow_logits:
                 continue
             logits = torch.stack(flow_logits, dim=0)
             coarse_logits = torch.stack(flow_coarse_logits, dim=0) if flow_coarse_logits else None
             logits = apply_hierarchical_logits(logits, coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
+            paired_logits = None
+            if paired_flow_logits and len(paired_flow_logits) == len(flow_logits):
+                paired_logits = torch.stack(paired_flow_logits, dim=0)
+                paired_coarse_logits = torch.stack(paired_flow_coarse_logits, dim=0) if paired_flow_coarse_logits else None
+                paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
-            loss = class_weighted_loss(logits, y, class_weight)
+            loss = class_weighted_loss(logits, y, class_weight, args.label_smoothing)
+            if paired_logits is not None:
+                if args.paired_view_weight > 0:
+                    loss = loss + args.paired_view_weight * class_weighted_loss(paired_logits, y, class_weight, args.label_smoothing)
+                if args.paired_consistency_weight > 0:
+                    loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(logits, paired_logits, args.consistency_temperature)
+            if args.consistency_weight > 0 and flow_logits_aug:
+                aug_logits = torch.stack(flow_logits_aug, dim=0)
+                loss = loss + args.consistency_weight * consistency_kl_loss(logits, aug_logits, args.consistency_temperature)
             if coarse_logits is not None and args.hierarchical_weight > 0:
                 loss = loss + args.hierarchical_weight * F.cross_entropy(coarse_logits, class_to_coarse[y])
             if args.window_loss_weight > 0 and window_logits_all:
                 win_logits = torch.stack(window_logits_all, dim=0)
                 win_y = torch.tensor(window_labels, dtype=torch.long, device=args.device)
-                loss = loss + args.window_loss_weight * class_weighted_loss(win_logits, win_y, class_weight)
+                loss = loss + args.window_loss_weight * class_weighted_loss(win_logits, win_y, class_weight, args.label_smoothing)
             if args.flow_contrastive_weight > 0:
                 loss = loss + args.flow_contrastive_weight * contrastive_loss(embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
@@ -902,9 +1131,12 @@ def train_graph_flow(args):
             hierarchical_mode=args.hierarchical_mode,
         ) if va_groups else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
-        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} flows={cnt}")
-        if select_score > best:
-            best = select_score; save_ckpt(args, model, sample["x"].shape[1], edge_attr_dim=edge_attr_dim, flow_head=flow_head, num_coarse_classes=num_coarse_classes)
+        print(f"epoch={epoch} train_loss={total/max(1,cnt):.4f} train_acc={ok/max(1,cnt):.4f} val_acc={val_metrics['accuracy']:.4f} val_macro_f1={val_metrics['macro_f1']:.4f} select={args.select_metric}:{select_score:.4f} flows={cnt}", flush=True)
+        stop, best, stale_epochs, improved = early_stop_update(select_score, best, stale_epochs, epoch, args)
+        if improved:
+            save_ckpt(args, model, sample["x"].shape[1], edge_attr_dim=edge_attr_dim, flow_head=flow_head, num_coarse_classes=num_coarse_classes)
+        if stop:
+            break
 
 
 @torch.no_grad()
@@ -965,12 +1197,15 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "num_layers": args.num_layers,
         "num_heads": args.num_heads,
         "dropout": args.dropout,
+        "init_checkpoint": args.init_checkpoint,
         "train_level": args.train_level,
         "flow_pooling": args.flow_pooling,
         "select_metric": args.select_metric,
         "window_loss_weight": args.window_loss_weight,
         "class_weighting": args.class_weighting,
         "class_weight_beta": args.class_weight_beta,
+        "class_weight_strength": args.class_weight_strength,
+        "label_smoothing": args.label_smoothing,
         "balanced_flow_batches": args.balanced_flow_batches,
         "classes_per_batch": args.classes_per_batch,
         "samples_per_class": args.samples_per_class,
@@ -991,7 +1226,14 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "flow_transformer_heads": args.flow_transformer_heads,
         "meta_dropout_prob": args.meta_dropout_prob,
         "meta_feature_dim": args.meta_feature_dim,
+        "embedding_dropout_prob": args.embedding_dropout_prob,
+        "window_dropout_prob": args.window_dropout_prob,
         "edge_attr_dropout_prob": args.edge_attr_dropout_prob,
+        "consistency_weight": args.consistency_weight,
+        "consistency_temperature": args.consistency_temperature,
+        "paired_view_dataset": args.paired_view_dataset,
+        "paired_view_weight": args.paired_view_weight,
+        "paired_consistency_weight": args.paired_consistency_weight,
     }
     if edge_attr_dim is not None:
         payload["edge_attr_dim"] = edge_attr_dim
@@ -1015,13 +1257,17 @@ def main():
     ap.add_argument("--num_layers", type=int, default=2)
     ap.add_argument("--num_heads", type=int, default=4)
     ap.add_argument("--dropout", type=float, default=0.1)
+    ap.add_argument("--init_checkpoint", default="", help="Optional best.pt checkpoint used to initialize model/flow_head before fine-tuning.")
     ap.add_argument("--aux_weight", type=float, default=0.1)
     ap.add_argument("--coherence_weight", type=float, default=0.1)
     ap.add_argument("--select_metric", choices=["accuracy", "acc", "macro_f1", "flow_acc", "flow_macro_f1", "window_acc", "window_macro_f1"], default="accuracy", help="Validation metric used to save best.pt.")
+    ap.add_argument("--early_stop_patience", type=int, default=0, help="Stop when --select_metric does not improve for this many epochs. 0 disables early stopping.")
     ap.add_argument("--train_level", choices=["window", "flow"], default="window", help="window: classify each window; flow: pool window embeddings and optimize flow labels directly.")
     ap.add_argument("--window_loss_weight", type=float, default=0.0, help="Extra window-level CE weight used together with flow CE in --train_level flow.")
     ap.add_argument("--class_weighting", choices=["none", "inverse", "effective"], default="none", help="Class-balanced CE weighting scheme.")
     ap.add_argument("--class_weight_beta", type=float, default=0.9999, help="Beta used by --class_weighting effective.")
+    ap.add_argument("--class_weight_strength", type=float, default=1.0, help="Interpolate class weights toward 1.0. 1 keeps full weighting, 0 disables the weighting effect.")
+    ap.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing for main flow/window classification CE losses.")
     ap.add_argument("--balanced_flow_batches", action="store_true", help="Sample each flow batch from multiple classes with repeated positives, useful for flow SupCon.")
     ap.add_argument("--classes_per_batch", type=int, default=0, help="Classes per balanced flow batch. 0 derives it from batch_size / samples_per_class.")
     ap.add_argument("--samples_per_class", type=int, default=2, help="Flows per class in balanced flow batches.")
@@ -1029,7 +1275,7 @@ def main():
     ap.add_argument("--hierarchical_weight", type=float, default=0.0, help="Coarse-label CE weight for hierarchical coarse-to-fine flow classification.")
     ap.add_argument("--hierarchical_logit_weight", type=float, default=0.0, help="Add coarse log-probability to fine logits during training/evaluation.")
     ap.add_argument("--coarse_groups", default="vpn_app", help="Coarse groups. Use 'vpn_app', 'none', or semicolon groups like '0,2;1,4'.")
-    ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer"], default="attention", help="Pooling used by --train_level flow over window embeddings.")
+    ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="attention", help="Pooling used by --train_level flow over window embeddings.")
     ap.add_argument("--flow_transformer_layers", type=int, default=1, help="Number of Transformer layers for --flow_pooling transformer.")
     ap.add_argument("--flow_transformer_heads", type=int, default=4, help="Attention heads for --flow_pooling transformer.")
     ap.add_argument("--contrastive_mode", choices=["standard", "confusion", "confusion_weighted"], default="standard", help="standard uses all non-self negatives; confusion uses configured hard negatives; confusion_weighted weights hard negatives by a confusion matrix.")
@@ -1041,7 +1287,14 @@ def main():
     ap.add_argument("--flow_temperature", type=float, default=0.07)
     ap.add_argument("--meta_dropout_prob", type=float, default=0.0, help="Training-only dropout on the trailing metadata feature dimensions of x.")
     ap.add_argument("--meta_feature_dim", type=int, default=14, help="Number of trailing metadata feature dimensions appended by preprocess_tower2.py.")
+    ap.add_argument("--embedding_dropout_prob", type=float, default=0.0, help="Training-only dropout on packet embedding dimensions; trailing metadata dimensions are controlled by --meta_dropout_prob.")
+    ap.add_argument("--window_dropout_prob", type=float, default=0.0, help="Training-only random window dropping for --train_level flow; at least one window per flow is kept.")
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.0, help="Training-only dropout on continuous graph edge attributes; edge type id is kept.")
+    ap.add_argument("--consistency_weight", type=float, default=0.0, help="Weight for clean/augmented view KL consistency. CE is computed on the clean view when this is >0.")
+    ap.add_argument("--consistency_temperature", type=float, default=2.0, help="Temperature for clean/augmented consistency KL.")
+    ap.add_argument("--paired_view_dataset", default="", help="Optional second-view Tower2 dataset aligned by flow_id, e.g. ip/port randomized or masked view.")
+    ap.add_argument("--paired_view_weight", type=float, default=0.0, help="Flow CE weight for --paired_view_dataset.")
+    ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired flow logits.")
     ap.add_argument("--valid_ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -1057,6 +1310,10 @@ def main():
         print("WARNING: --hierarchical_logit_weight is enabled but --hierarchical_weight is 0, so the coarse head has no direct supervision.")
     if args.contrastive_mode == "confusion_weighted" and not args.confusion_matrix_json:
         print("WARNING: --contrastive_mode confusion_weighted has no --confusion_matrix_json; falling back to binary group weights.")
+    if args.paired_view_dataset and args.train_level != "flow":
+        print("WARNING: --paired_view_dataset is only used with --train_level flow.")
+    if args.paired_view_dataset and args.paired_view_weight <= 0 and args.paired_consistency_weight <= 0:
+        print("WARNING: --paired_view_dataset is set but paired losses are both 0.")
     if args.model_type == "seq":
         train_seq_flow(args) if args.train_level == "flow" else train_seq(args)
     else:

@@ -12,6 +12,7 @@ The packet embedding follows scheme B for decoder-only LLMs: last-token hidden s
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -22,7 +23,7 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import BatchSampler, DataLoader, Dataset
 from tqdm import tqdm
 
 def load_jsonl(path: str | Path, show_progress: bool = True) -> List[dict]:
@@ -78,6 +79,45 @@ class PacketAuxDataset(Dataset):
         return self.rows[idx]
 
 
+class FlowBalancedPacketBatchSampler(BatchSampler):
+    """Sample several packets from each selected flow so flow-aware SupCon has positives."""
+
+    def __init__(self, rows: List[dict], batch_size: int, packets_per_flow: int, seed: int = 42):
+        self.flow_to_indices: Dict[str, List[int]] = {}
+        for idx, row in enumerate(rows):
+            self.flow_to_indices.setdefault(str(row.get("flow_id", idx)), []).append(idx)
+        self.flows = list(self.flow_to_indices.keys())
+        self.batch_size = max(1, int(batch_size))
+        self.packets_per_flow = max(1, int(packets_per_flow))
+        self.flows_per_batch = max(1, self.batch_size // self.packets_per_flow)
+        self.seed = seed
+        self.epoch = 0
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        self.epoch += 1
+        flows = list(self.flows)
+        rng.shuffle(flows)
+        for start in range(0, len(flows), self.flows_per_batch):
+            batch = []
+            for flow_id in flows[start:start + self.flows_per_batch]:
+                indices = self.flow_to_indices[flow_id]
+                if len(indices) >= self.packets_per_flow:
+                    batch.extend(rng.sample(indices, self.packets_per_flow))
+                else:
+                    batch.extend(rng.choice(indices) for _ in range(self.packets_per_flow))
+            if batch:
+                yield batch[: self.batch_size]
+
+    def __len__(self) -> int:
+        return max(1, math.ceil(len(self.flows) / self.flows_per_batch))
+
+
+def stable_flow_id(value: str) -> int:
+    digest = hashlib.blake2b(str(value).encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False) & ((1 << 63) - 1)
+
+
 def build_sft_text(row: dict) -> tuple[str, str]:
     instruction = row.get("instruction", "Answer the packet protocol question.")
     inp = row.get("input", "")
@@ -124,11 +164,13 @@ class PacketAuxCollator:
         toks = self.tokenizer(texts, padding=True, truncation=True, max_length=self.max_length, return_tensors="pt")
         labels = torch.tensor([int(r["label_id"]) for r in rows], dtype=torch.long)
         weights = torch.tensor([float(r.get("packet_weight", 1.0)) for r in rows], dtype=torch.float32)
+        flow_ids = torch.tensor([stable_flow_id(str(r.get("flow_id", ""))) for r in rows], dtype=torch.long)
         return {
             "input_ids": toks["input_ids"],
             "attention_mask": toks["attention_mask"],
             "labels": labels,
             "weights": weights,
+            "flow_ids": flow_ids,
         }
 
 
@@ -249,6 +291,10 @@ def main() -> None:
     ap.add_argument("--cls_weight", type=float, default=0.1)
     ap.add_argument("--contrastive_weight", type=float, default=0.3)
     ap.add_argument("--temperature", type=float, default=0.07)
+    ap.add_argument("--same_flow_positive_weight", type=float, default=0.0, help="Extra positive weight for packets from the same flow in Tower-1 SupCon. 0 keeps label-only SupCon.")
+    ap.add_argument("--same_label_positive_weight", type=float, default=1.0, help="Positive weight for same-label packets in flow-aware SupCon.")
+    ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
+    ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
     ap.add_argument("--projection_dim", type=int, default=256)
     ap.add_argument("--lora_r", type=int, default=16)
     ap.add_argument("--lora_alpha", type=int, default=32)
@@ -316,13 +362,31 @@ def main() -> None:
 
     print(f"loading packet auxiliary dataset: {args.packet_aux_jsonl}", flush=True)
     packet_ds = PacketAuxDataset(args.packet_aux_jsonl, show_progress=show_load_progress)
-    packet_loader = DataLoader(
-        packet_ds,
-        batch_size=args.packet_batch_size,
-        shuffle=True,
-        drop_last=True,
-        collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
-    )
+    if args.flow_balanced_packet_batches:
+        packet_sampler = FlowBalancedPacketBatchSampler(
+            packet_ds.rows,
+            batch_size=args.packet_batch_size,
+            packets_per_flow=args.packets_per_flow,
+            seed=args.seed,
+        )
+        packet_loader = DataLoader(
+            packet_ds,
+            batch_sampler=packet_sampler,
+            collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+        )
+        print(
+            f"flow-balanced packet sampler: flows={len(packet_sampler.flows)}, "
+            f"flows_per_batch={packet_sampler.flows_per_batch}, packets_per_flow={packet_sampler.packets_per_flow}",
+            flush=True,
+        )
+    else:
+        packet_loader = DataLoader(
+            packet_ds,
+            batch_size=args.packet_batch_size,
+            shuffle=True,
+            drop_last=True,
+            collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+        )
     print(f"packet samples={len(packet_ds)}, packet batches/epoch={len(packet_loader)}", flush=True)
     packet_iter = cycle(packet_loader)
 
@@ -385,6 +449,8 @@ def main() -> None:
             cls_weight=args.cls_weight,
             contrastive_weight=args.contrastive_weight,
             temperature=args.temperature,
+            same_flow_positive_weight=args.same_flow_positive_weight,
+            same_label_positive_weight=args.same_label_positive_weight,
         )
         if not torch.isfinite(out.loss):
             skipped_nonfinite += 1
@@ -468,6 +534,7 @@ def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "
                 "hidden_size": model.hidden_size,
                 "embedding_pooling": "last_token",
                 "loss": "L_QA + alpha*L_packet_cls + beta*L_supcon",
+                "supports_flow_aware_supcon": True,
             },
             f,
             indent=2,

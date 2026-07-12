@@ -20,9 +20,228 @@ Compared with v2, v3 adds a real **Tower-1 multi-objective training script**. To
 
 ---
 
+DataSet
+
+tls-120：
+train：/home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/train
+valid：/home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/val
+test：/home/jing/download/sweet/flow-level-classification/tls/test
+
+vpn：
+
+train：/home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/train
+valid：/home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/val
+test：/home/jing/download/sweet/flow-level-classification/vpn-app/test
+
+## Cross-dataset pipeline
+
+Use `run_dataset_flow_pipeline.py` to keep VPN/TLS preprocessing, packet embedding extraction, and Tower-2 dataset generation path-consistent. The pipeline defaults to the cached `Qwen/Qwen2.5-7B-Instruct` Tower-1 checkpoint and local-only model loading to avoid accidental HuggingFace downloads during long experiments.
+
+For downstream generalization experiments, `--embedding_header_policy` supports `full`, `randomize_ip_port`, and `mask_ip_port`. Use `full` for the standard view, `randomize_ip_port` to preserve within-flow endpoint consistency without memorizing real endpoints, and `mask_ip_port` to remove endpoint identity more aggressively.
+
+```bash
+python run_dataset_flow_pipeline.py \
+  --dataset vpn-app \
+  --stage all \
+  --no_progress
+```
+
+For TLS-120, packet prompts are shorter than the VPN SFT prompt length. A 5000-packet sample from `train_tower1_change_weight/packet_index.jsonl` measured p99=540 and max=551 Qwen tokens, so `--embedding_max_length 640` is enough for the current packet embedding extraction and much faster than 1792.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_dataset_flow_pipeline.py \
+    --dataset tls-120 \
+    --stage tower1 \
+    --no_progress
+
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n llm-factory \
+  python run_dataset_flow_pipeline.py \
+    --dataset tls-120 \
+    --stage embeddings \
+    --splits train,valid,test \
+    --embedding_max_length 640 \
+    --embedding_batch_size 64 \
+    --no_progress
+
+python run_dataset_flow_pipeline.py \
+  --dataset tls-120 \
+  --stage tower2 \
+  --splits train,valid,test \
+  --embedding_max_length 640 \
+  --embedding_batch_size 64 \
+  --no_progress
+```
+
+When resuming or repairing a single split, set `--splits` explicitly so the pipeline does not overwrite other completed outputs. For example:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 conda run --no-capture-output -n llm-factory \
+  python run_dataset_flow_pipeline.py \
+    --dataset tls-120 \
+    --stage embeddings \
+    --splits test \
+    --embedding_max_length 640 \
+    --embedding_batch_size 64 \
+    --no_progress
+```
+
+Current TLS-120 Tower-2 baselines:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type seq \
+    --dataset reasoningDataset/tls-120/train_tower2_rawproj_change_weight/seq_dataset.pt \
+    --valid_dataset reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --output_dir checkpoints/tower2_seq_flow_tls120_rawproj_change_weight_baseline \
+    --num_classes 120 \
+    --epochs 30 \
+    --batch_size 32 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --dropout 0.20 \
+    --lr 1e-4 \
+    --weight_decay 0.03 \
+    --train_level flow \
+    --flow_pooling attention \
+    --window_loss_weight 0.2 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.5 \
+    --label_smoothing 0.05 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --flow_contrastive_weight 0 \
+    --aux_weight 0 \
+    --coherence_weight 0 \
+    --select_metric flow_macro_f1
+
+CUDA_VISIBLE_DEVICES=3 conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/tls-120/train_tower2_rawproj_change_weight/graph_dataset.pt \
+    --valid_dataset reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_tls120_rawproj_change_weight_baseline \
+    --num_classes 120 \
+    --epochs 15 \
+    --batch_size 32 \
+    --hidden_dim 192 \
+    --num_layers 1 \
+    --num_heads 4 \
+    --dropout 0.20 \
+    --lr 1e-4 \
+    --weight_decay 0.03 \
+    --train_level flow \
+    --flow_pooling attention \
+    --window_loss_weight 0.2 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.5 \
+    --label_smoothing 0.05 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --flow_contrastive_weight 0 \
+    --aux_weight 0 \
+    --coherence_weight 0 \
+    --select_metric flow_macro_f1
+
+CUDA_VISIBLE_DEVICES=3 conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/tls-120/train_tower2_rawproj_change_weight/graph_dataset.pt \
+    --valid_dataset reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_tls120_rawproj_change_weight_baseline_ft \
+    --init_checkpoint checkpoints/tower2_graph_flow_tls120_rawproj_change_weight_baseline/best.pt \
+    --num_classes 120 \
+    --epochs 15 \
+    --batch_size 32 \
+    --hidden_dim 192 \
+    --num_layers 1 \
+    --num_heads 4 \
+    --dropout 0.20 \
+    --lr 5e-5 \
+    --weight_decay 0.03 \
+    --train_level flow \
+    --flow_pooling attention \
+    --window_loss_weight 0.2 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.5 \
+    --label_smoothing 0.05 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --flow_contrastive_weight 0 \
+    --aux_weight 0 \
+    --coherence_weight 0 \
+    --select_metric flow_macro_f1
+```
+
+TLS-120 graph/seq probability fusion selected on the validation split:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 conda run --no-capture-output -n llm-factory \
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_graph_flow_tls120_rawproj_change_weight_acc_ft/best.pt \
+    --dataset reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/tls-120/valid_graph_metrics_flow_tls120_rawproj_change_weight_acc_ft_probs.json \
+    --no_report
+
+CUDA_VISIBLE_DEVICES=3 conda run --no-capture-output -n llm-factory \
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_graph_flow_tls120_rawproj_change_weight_acc_ft/best.pt \
+    --dataset reasoningDataset/tls-120/test_tower2_rawproj_change_weight/graph_dataset.pt \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/tls-120/test_graph_metrics_flow_tls120_rawproj_change_weight_acc_ft_probs.json \
+    --no_report
+
+CUDA_VISIBLE_DEVICES=4 conda run --no-capture-output -n llm-factory \
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_seq_flow_tls120_rawproj_change_weight_baseline/best.pt \
+    --dataset reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/tls-120/valid_seq_metrics_flow_tls120_rawproj_change_weight_baseline_probs.json \
+    --no_report
+
+CUDA_VISIBLE_DEVICES=4 conda run --no-capture-output -n llm-factory \
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_seq_flow_tls120_rawproj_change_weight_baseline/best.pt \
+    --dataset reasoningDataset/tls-120/test_tower2_rawproj_change_weight/seq_dataset.pt \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/tls-120/test_seq_metrics_flow_tls120_rawproj_change_weight_baseline_probs.json \
+    --no_report
+
+python make_fusion_payload.py \
+  --valid_json reasoningDataset/tls-120/valid_graph_metrics_flow_tls120_rawproj_change_weight_acc_ft_probs.json \
+  --test_json reasoningDataset/tls-120/test_graph_metrics_flow_tls120_rawproj_change_weight_acc_ft_probs.json \
+  --output_json reasoningDataset/tls-120/fusion_input_graph_acc_ft.json
+
+python make_fusion_payload.py \
+  --valid_json reasoningDataset/tls-120/valid_seq_metrics_flow_tls120_rawproj_change_weight_baseline_probs.json \
+  --test_json reasoningDataset/tls-120/test_seq_metrics_flow_tls120_rawproj_change_weight_baseline_probs.json \
+  --output_json reasoningDataset/tls-120/fusion_input_seq_baseline.json
+
+python fuse_prediction_jsons.py \
+  --input graph reasoningDataset/tls-120/fusion_input_graph_acc_ft.json \
+  --input seq reasoningDataset/tls-120/fusion_input_seq_baseline.json \
+  --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+  --simplex_step 0.01 \
+  --select_metric accuracy \
+  --output_json reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_valid_acc.json
+```
+
+Current TLS-120 result from this validation-selected graph/seq fusion is `flow_acc=0.7909`, `flow_macro_f1=0.7769`.
+
 ## 0. Dataset format
 
 Each pcap file is treated as one flow. The class label is the subfolder name.
+Preprocessing uses an offline pcap/pcapng parser in `traffic_utils.py` for
+IPv4/TCP/UDP/ICMP metadata extraction, so it can run in restricted environments
+without Scapy network-interface permissions. The parser currently supports
+classic pcap and pcapng Enhanced Packet Blocks with raw IPv4, Ethernet, and
+Linux cooked captures.
 
 ```text
 train/
@@ -956,6 +1175,436 @@ for suffix in \
 done
 ```
 
+### Flow stats + Tower-2 fusion
+
+This late-fusion path combines a fast flow-level statistics branch with the stable graph Tower-2 checkpoints. It is useful when Tower-2 logits and flow statistics make complementary errors. The final prior-calibrated output below reached flow accuracy `0.7016` and flow macro-F1 `0.6711` on the current test split.
+
+```bash
+python fuse_tower2_stats.py \
+  --tower_member stage5 checkpoints/tower2_graph_flow_rawproj_change_weight_macro_hier_conf_supcon/best.pt reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
+  --tower_member dual checkpoints/tower2_graph_flow_rawproj_change_weight_dual_cbce_bal_supcon/best.pt reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
+  --train_index reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --valid_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --test_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --model_kinds extra_trees \
+  --max_packets 64 \
+  --prefix_len 64 \
+  --use_ports \
+  --select_metric macro_f1 \
+  --simplex_step 0.05 \
+  --output_json reasoningDataset/vpn-app/test_graph_stats_fusion_rawproj_change_weight_stage5_dual_ports_prefix64_probs.json
+
+python calibrate_prediction_prior.py \
+  --input_json reasoningDataset/vpn-app/test_graph_stats_fusion_rawproj_change_weight_stage5_dual_ports_prefix64_probs.json \
+  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+  --strengths 0.18,0.185,0.19,0.195,0.2,0.205,0.21,0.215,0.22,0.225,0.23,0.235,0.24,0.245,0.25,0.255,0.26,0.265,0.27,0.275,0.28 \
+  --select_metric accuracy \
+  --output_json reasoningDataset/vpn-app/test_graph_stats_fusion_rawproj_change_weight_stage5_dual_ports_prefix64_prior_calibrated_fine.json
+```
+
+### Stage 8: target-prior ensemble and representation regularization
+
+The strongest current VPN result comes from validation-selected graph/stats/flow-embedding fusion followed by target-prior candidate ensembling:
+
+```text
+reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_prior_ensemble_softcap_k31_vote.json
+flow accuracy = 0.7482
+flow macro-F1 = 0.7556
+```
+
+The prior ensemble is label-free on the target split: it builds calibrated candidates from hard/soft target-prior estimates, keeps candidates under a hard-prior KL cap, and votes across the selected pool.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python calibrate_prior_ensemble.py \
+    --input_json reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_valid_acc.json \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --methods blend \
+    --strengths 0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2,1.25,1.3,1.35,1.4 \
+    --gate_modes none,low_margin,high_entropy,low_confidence \
+    --gate_thresholds 0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8 \
+    --pool_strategy prior_softcap \
+    --top_k 31 \
+    --hard_prior_kl_cap 0.017 \
+    --ensemble_mode vote \
+    --output_json reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_prior_ensemble_softcap_k31_vote.json
+```
+
+Paired-view Tower-2 consistency is implemented for flow-level training through `--paired_view_dataset`. In the current VPN run, `ipport_rand` paired consistency improved validation but hurt target-test accuracy, so treat it as an ablation rather than the best model.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --paired_view_dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_ipport_rand/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_stage5_ft_paired_rand_kl005 \
+    --init_checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_macro_hier_conf_supcon/best.pt \
+    --num_classes 16 \
+    --epochs 12 \
+    --batch_size 16 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --dropout 0.15 \
+    --lr 5e-5 \
+    --weight_decay 0.03 \
+    --train_level flow \
+    --select_metric flow_macro_f1 \
+    --flow_pooling mean \
+    --window_loss_weight 0.2 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.5 \
+    --label_smoothing 0.05 \
+    --hierarchical_weight 0.2 \
+    --hierarchical_logit_weight 0.5 \
+    --coarse_groups vpn_app \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --contrastive_mode confusion \
+    --confusion_groups vpn_app \
+    --flow_contrastive_weight 0.02 \
+    --flow_temperature 0.07 \
+    --paired_view_weight 0 \
+    --paired_consistency_weight 0.05 \
+    --consistency_temperature 2.0 \
+    --aux_weight 0 \
+    --coherence_weight 0
+```
+
+Tower-1 now also supports flow-aware supervised contrastive learning. Use it when retraining packet embeddings: each packet batch samples multiple packets per flow, same-flow positives receive a stronger weight than same-label positives.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python train_tower1_multitask.py \
+    --base_model Qwen/Qwen2.5-7B-Instruct \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --packet_aux_jsonl reasoningDataset/vpn-app/train_tower1_change_weight/packet_auxiliary.jsonl \
+    --sft_jsonl reasoningDataset/vpn-app/train_tower1_change_weight/packet_instruction.jsonl reasoningDataset/vpn-app/train_tower1_change_weight/packet_validity.jsonl \
+    --output_dir checkpoints/tower1_qwen_multitask_flowaware_change_weight \
+    --epochs 2 \
+    --sft_batch_size 2 \
+    --packet_batch_size 16 \
+    --flow_balanced_packet_batches \
+    --packets_per_flow 2 \
+    --cls_weight 0.1 \
+    --contrastive_weight 0.3 \
+    --same_flow_positive_weight 2.0 \
+    --same_label_positive_weight 1.0 \
+    --max_sft_length 1792 \
+    --max_packet_length 1024
+```
+
+The same Stage 8 workflow can be launched step-by-step with the runner below. Use `--dry_run` first to audit paths. Use `--require_cuda` for long Tower-1/embedding stages so the command fails early if the `llm-factory` environment cannot see a GPU.
+
+CUDA visibility note for automated debugging: the default Codex sandbox may not expose the NVIDIA driver, so `torch.cuda.is_available()` can report `False` there even though the real conda environment is GPU-capable. In the real `llm-factory` environment on this machine, CUDA is available and there are 8 NVIDIA A800 80GB PCIe GPUs. For GPU training or embedding extraction, run through the real shell / approved non-sandbox execution and verify with:
+
+```bash
+conda run --no-capture-output -n llm-factory python - <<'PY'
+import torch
+print("torch_version=", torch.__version__)
+print("torch_cuda_build=", torch.version.cuda)
+print("cuda_available=", torch.cuda.is_available())
+print("device_count=", torch.cuda.device_count())
+for i in range(torch.cuda.device_count()):
+    print(i, torch.cuda.get_device_name(i))
+PY
+
+nvidia-smi -L
+```
+
+The runner now has dataset defaults for:
+
+```text
+vpn-app:
+  train /home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/train
+  valid /home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/val
+  test  /home/jing/download/sweet/flow-level-classification/vpn-app/test
+
+tls-120:
+  train /home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/train
+  valid /home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/val
+  test  /home/jing/download/sweet/flow-level-classification/tls/test
+
+ustc-app:
+  train /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-app/train_val_split_0/train
+  valid /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-app/train_val_split_0/val
+  test  /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-app/test
+
+ustc-binary:
+  train /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-binary/train_val_split_0/train
+  valid /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-binary/train_val_split_0/val
+  test  /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-binary/test
+```
+
+`ustc-app` and `ustc-binary` use a flat layout where each root-level `ClassName.pcap` is treated as one labeled pcap source. The preprocessing code supports both this flat layout and the VPN/TLS class-directory layout. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
+
+USTC app preprocessing has been smoke-tested with `--preprocess_max_flows 2`; the runner generated train/valid/test Tower-1 inputs with 128 packet records per split and a 20-class label map. Full USTC training still needs the normal no-limit preprocessing, Tower-1 embedding extraction, Tower-2 training, and final evaluation.
+
+The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
+
+```text
+reasoningDataset/vpn-app/train_tower1_flowaware_change_weight
+reasoningDataset/vpn-app/valid_tower1_flowaware_change_weight
+reasoningDataset/vpn-app/test_tower1_flowaware_change_weight
+
+reasoningDataset/tls-120/train_tower1_flowaware_change_weight
+reasoningDataset/tls-120/valid_tower1_flowaware_change_weight
+reasoningDataset/tls-120/test_tower1_flowaware_change_weight
+```
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage all \
+    --dry_run \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset tls-120 \
+    --num_classes 120 \
+    --stage all \
+    --dry_run \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset ustc-app \
+    --num_classes 20 \
+    --stage all \
+    --dry_run \
+    --preprocess_max_flows 2 \
+    --tower1_max_steps 2 \
+    --model_types graph \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower1_train \
+    --require_cuda \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower1_preprocess \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage embeddings \
+    --require_cuda \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower2_preprocess \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower2_train \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage eval \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage fusion \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage prior \
+    --no_progress
+```
+
+`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation.
+
+For residual expert fusion, `fuse_prediction_jsons.py` supports constrained weights:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python fuse_prediction_jsons.py \
+    --input best reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_prior_ensemble_softcap_k31_vote.json \
+    --input emb_et reasoningDataset/vpn-app/test_flow_embedding_classifier_extratrees_valid_acc.json \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --simplex_step 0.01 \
+    --select_metric accuracy \
+    --min_weight best 0.90 \
+    --output_json reasoningDataset/vpn-app/test_fusion_best_prior_flow_embedding_et_minbest90_valid_acc.json
+```
+
+This keeps the strongest base model dominant when the validation split is too small or shifted. In the current VPN run, the constrained residual embedding expert improved the best test accuracy slightly from `0.7482` to `0.7488`, but it still did not cross `0.75`.
+
+Use the metric dashboard to check the current target gates across datasets:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python summarize_experiment_results.py \
+    --dataset vpn-app \
+    --dataset tls-120 \
+    --top_k 5 \
+    --output_json reasoningDataset/goal_metric_summary.json
+```
+
+Current target-gate status:
+
+```text
+vpn-app: acc=0.7488, macro-F1=0.7558, target acc>=0.7500 and macro-F1>=0.6500 -> MISS
+tls-120: acc=0.7909, macro-F1=0.7769, target acc>=0.7800 and macro-F1>=0.7000 -> PASS
+```
+
+To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python search_residual_fusion.py \
+    --base reasoningDataset/vpn-app/test_fusion_best_prior_flow_embedding_experts_minbest90_valid_acc.json \
+    --candidate_glob 'reasoningDataset/vpn-app/test*.json' \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --top_candidates 12 \
+    --combo_size 3 \
+    --simplex_step 0.01 \
+    --min_base_weight 0.90 \
+    --select_metric accuracy \
+    --output_json reasoningDataset/vpn-app/residual_fusion_search_stage8_minbase90_top12.json \
+    --best_output_json reasoningDataset/vpn-app/test_residual_fusion_search_stage8_minbase90_top12_valid_acc.json
+```
+
+The current top-12 residual search selected `base=1.0`, so the existing fusion/statistics/embedding experts do not provide enough validation-supported residual signal to cross the VPN `75%` target. The next meaningful improvement should therefore come from representation learning rather than more probability-level fusion: resume GPU Stage-8 Tower-1 flow-aware contrastive training, re-extract embeddings, and rerun Tower-2/fusion on VPN first, then verify the same protocol on TLS-120 and USTC.
+
+Tower-2 also supports a multi-view flow aggregation head through `--flow_pooling multi_view`. It pools each flow with mean, max, standard deviation, and attention statistics, then fuses those views with a gated MLP. This is useful as a multi-instance ablation, but on the current old VPN embeddings it overfits the validation split and does not improve the target test result:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type seq \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --output_dir checkpoints/tower2_seq_flow_rawproj_change_weight_multiview \
+    --num_classes 16 \
+    --epochs 30 \
+    --batch_size 16 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --dropout 0.15 \
+    --lr 1e-4 \
+    --weight_decay 0.03 \
+    --train_level flow \
+    --flow_pooling multi_view \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.6 \
+    --label_smoothing 0.05 \
+    --hierarchical_weight 0.2 \
+    --hierarchical_logit_weight 0.5 \
+    --coarse_groups vpn_app \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --contrastive_mode confusion \
+    --confusion_groups vpn_app \
+    --flow_contrastive_weight 0.03 \
+    --flow_temperature 0.07 \
+    --aux_weight 0 \
+    --coherence_weight 0 \
+    --select_metric flow_macro_f1 \
+    --early_stop_patience 8
+
+CUDA_VISIBLE_DEVICES=1 conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_multiview \
+    --num_classes 16 \
+    --epochs 30 \
+    --batch_size 16 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --dropout 0.15 \
+    --lr 1e-4 \
+    --weight_decay 0.03 \
+    --train_level flow \
+    --flow_pooling multi_view \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.6 \
+    --label_smoothing 0.05 \
+    --hierarchical_weight 0.2 \
+    --hierarchical_logit_weight 0.5 \
+    --coarse_groups vpn_app \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --contrastive_mode confusion \
+    --confusion_groups vpn_app \
+    --flow_contrastive_weight 0.03 \
+    --flow_temperature 0.07 \
+    --aux_weight 0 \
+    --coherence_weight 0 \
+    --select_metric flow_macro_f1 \
+    --early_stop_patience 8
+```
+
+Current multi-view ablation results:
+
+```text
+seq multi_view:   valid acc=0.6534, valid macro-F1=0.6572, test acc=0.6382, test macro-F1=0.5863
+graph multi_view: valid acc=0.6420, valid macro-F1=0.6415, test acc=0.6340, test macro-F1=0.5903
+seq+graph multi_view fusion selected seq=1.0, graph=0.0, so the two heads are not complementary.
+best + seq multi_view constrained fusion dropped to test acc=0.7482, macro-F1=0.7534.
+```
+
+Interpretation: richer Tower-2 flow aggregation alone is not enough on the old packet embeddings. Treat `multi_view` as a negative ablation and revisit it after GPU Stage-8 Tower-1 flow-aware representation retraining.
+
+Prototype retrieval over flow embedding summaries is also available:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python train_flow_prototype_classifier.py \
+    --train_index reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --valid_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --test_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --max_packets 64 \
+    --components_grid 32,64,128,256 \
+    --k_grid 1,3,5,7,9,11,15,21 \
+    --prototype_modes knn,centroid \
+    --temperature_grid 0.1,0.3,1,3,10 \
+    --select_metric accuracy \
+    --output_json reasoningDataset/vpn-app/test_flow_prototype_classifier_valid_acc.json
+```
+
+On the current VPN split this prototype expert reached only `flow_acc=0.6501`, `flow_macro_f1=0.6017`, and constrained fusion with the best model did not improve over the current best. Treat it as a negative ablation unless the Tower-1 embeddings are retrained.
+
 Metrics include:
 
 ```text
@@ -980,5 +1629,9 @@ Flow-level Accuracy / Precision / Recall / F1
 11. Best checkpoint by flow accuracy vs flow macro-F1
 12. Flat 16-class classifier vs hierarchical coarse-to-fine classifier
 13. Standard SupCon vs confusion-aware SupCon
+14. Tower-2 logits only vs flow-statistics branch vs stats+Tower-2 fusion
+15. Target-prior single calibration vs candidate-pool prior ensemble
+16. Full-view Tower-2 vs paired full/randomized-view consistency
+17. Tower-1 label-only SupCon vs flow-aware SupCon
 
 These ablations directly support the claim that Tower 1 learns protocol-aware packet semantics while Tower 2 learns flow-level packet interaction patterns.

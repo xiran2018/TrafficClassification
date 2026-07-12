@@ -147,6 +147,8 @@ class QwenPacketMultiTaskModel(nn.Module):
         cls_weight: float = 0.1,
         contrastive_weight: float = 0.3,
         temperature: float = 0.07,
+        same_flow_positive_weight: float = 0.0,
+        same_label_positive_weight: float = 1.0,
     ) -> Tower1LossOutput:
         device = next(self.parameters()).device
         zero = torch.zeros((), device=device)
@@ -179,7 +181,18 @@ class QwenPacketMultiTaskModel(nn.Module):
                 pkt_cls_loss = (ce_each * weights).sum() / weights.sum().clamp(min=1.0)
             else:
                 pkt_cls_loss = ce_each.mean()
-            supcon_loss = supervised_contrastive_loss(projected_embeddings, labels, temperature=temperature)
+            flow_ids = packet_batch.get("flow_ids")
+            if flow_ids is not None and same_flow_positive_weight > 0:
+                supcon_loss = flow_aware_contrastive_loss(
+                    projected_embeddings,
+                    labels,
+                    flow_ids.long(),
+                    temperature=temperature,
+                    same_flow_weight=same_flow_positive_weight,
+                    same_label_weight=same_label_positive_weight,
+                )
+            else:
+                supcon_loss = supervised_contrastive_loss(projected_embeddings, labels, temperature=temperature)
 
         loss = lm_loss + cls_weight * pkt_cls_loss + contrastive_weight * supcon_loss
         return Tower1LossOutput(loss, lm_loss, pkt_cls_loss, supcon_loss, packet_logits, packet_embeddings, projected_embeddings)
@@ -217,4 +230,36 @@ def supervised_contrastive_loss(z: torch.Tensor, labels: torch.Tensor, temperatu
     logits_masked = logits.masked_fill(self_mask, -1e9)
     log_prob = logits_masked - torch.logsumexp(logits_masked, dim=1, keepdim=True)
     mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / pos_mask.sum(dim=1).clamp(min=1)
+    return -mean_log_prob_pos[valid].mean()
+
+
+def flow_aware_contrastive_loss(
+    z: torch.Tensor,
+    labels: torch.Tensor,
+    flow_ids: torch.Tensor,
+    temperature: float = 0.07,
+    same_flow_weight: float = 2.0,
+    same_label_weight: float = 1.0,
+) -> torch.Tensor:
+    """Weighted SupCon: same-flow positives are stronger than same-label positives."""
+    if z.size(0) <= 1:
+        return z.sum() * 0.0
+    z = F.normalize(z.float(), p=2, dim=-1)
+    labels = labels.view(-1, 1)
+    flow_ids = flow_ids.view(-1, 1)
+    logits = torch.matmul(z, z.T) / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    self_mask = torch.eye(z.size(0), dtype=torch.bool, device=z.device)
+    same_label = torch.eq(labels, labels.T).to(z.device) & ~self_mask
+    same_flow = torch.eq(flow_ids, flow_ids.T).to(z.device) & ~self_mask
+    pos_weight = same_label.float() * float(same_label_weight)
+    pos_weight = pos_weight + same_flow.float() * float(same_flow_weight)
+    valid = pos_weight.sum(dim=1) > 0
+    if valid.sum() == 0:
+        return z.sum() * 0.0
+
+    logits_masked = logits.masked_fill(self_mask, -1e9)
+    log_prob = logits_masked - torch.logsumexp(logits_masked, dim=1, keepdim=True)
+    mean_log_prob_pos = (pos_weight * log_prob).sum(dim=1) / pos_weight.sum(dim=1).clamp(min=1e-12)
     return -mean_log_prob_pos[valid].mean()

@@ -162,7 +162,7 @@ def main() -> None:
     ap.add_argument("--max_flows", type=int, default=0)
     ap.add_argument("--label_map_in", default="", help="Use the train label_map.json for valid/test to keep label ids consistent.")
     ap.add_argument("--write_label_map", action="store_true", help="Write label_map.json to output_dir.")
-    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port"], default="full", help="Header policy for packet_index prompts used during embedding extraction; QA/SFT prompts stay unchanged.")
+    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port", "mask_ip_port"], default="full", help="Header policy for packet_index prompts used during embedding extraction; QA/SFT prompts stay unchanged.")
     ap.add_argument("--no_progress", action="store_true", help="Disable pcap preprocessing progress bar.")
     args = ap.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
