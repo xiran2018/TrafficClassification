@@ -1511,6 +1511,17 @@ conda run --no-capture-output -n llm-factory \
 
 `stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation.
 
+The runner's `prior` stage now implements the paper-safe residual calibration path by default:
+
+```text
+fusion output
+-> calibrate_prior_ensemble.py with --include_identity_candidate
+-> fuse_prediction_jsons.py with --min_weight base 0.90
+-> safe_prior_residual output
+```
+
+This keeps the same module active for every dataset while allowing validation-selected weights to suppress harmful calibration, as happened on TLS-120 where `base=1.0, prior=0.0`.
+
 For residual expert fusion, `fuse_prediction_jsons.py` supports constrained weights:
 
 ```bash

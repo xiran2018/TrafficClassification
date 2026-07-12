@@ -312,9 +312,21 @@ def fusion_cmd(args) -> List[str]:
         "--select_metric",
         "accuracy",
         "--output_json",
-        f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_valid_acc.json",
+        fusion_output_path(args),
     ]
     return cmd
+
+
+def fusion_output_path(args) -> str:
+    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_valid_acc.json"
+
+
+def prior_candidate_output_path(args) -> str:
+    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_safe_prior_candidate.json"
+
+
+def safe_prior_output_path(args) -> str:
+    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_safe_prior_residual.json"
 
 
 def prior_cmd(args) -> List[str]:
@@ -322,27 +334,52 @@ def prior_cmd(args) -> List[str]:
         py(),
         "calibrate_prior_ensemble.py",
         "--input_json",
-        f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_valid_acc.json",
+        fusion_output_path(args),
         "--label_map",
         train_label_map(args),
         "--methods",
         "blend",
         "--strengths",
-        "0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2,1.25,1.3,1.35,1.4",
+        args.prior_strengths,
         "--gate_modes",
-        "none,low_margin,high_entropy,low_confidence",
+        args.prior_gate_modes,
         "--gate_thresholds",
-        "0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8",
+        args.prior_gate_thresholds,
         "--pool_strategy",
-        "prior_softcap",
+        args.prior_pool_strategy,
         "--top_k",
-        "31",
+        str(args.prior_top_k),
         "--hard_prior_kl_cap",
-        "0.017",
+        str(args.prior_hard_kl_cap),
         "--ensemble_mode",
-        "vote",
+        args.prior_ensemble_mode,
+        "--include_identity_candidate",
         "--output_json",
-        f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_prior_ensemble.json",
+        prior_candidate_output_path(args),
+    ]
+
+
+def safe_prior_residual_cmd(args) -> List[str]:
+    return [
+        py(),
+        "fuse_prediction_jsons.py",
+        "--input",
+        "base",
+        fusion_output_path(args),
+        "--input",
+        "prior",
+        prior_candidate_output_path(args),
+        "--label_map",
+        train_label_map(args),
+        "--simplex_step",
+        str(args.safe_prior_simplex_step),
+        "--select_metric",
+        "accuracy",
+        "--min_weight",
+        "base",
+        str(args.safe_prior_min_base_weight),
+        "--output_json",
+        safe_prior_output_path(args),
     ]
 
 
@@ -393,6 +430,7 @@ def commands(args) -> Iterable[List[str]]:
         yield fusion_cmd(args)
     if args.stage in {"prior", "all"}:
         yield prior_cmd(args)
+        yield safe_prior_residual_cmd(args)
 
 
 def main() -> None:
@@ -462,6 +500,15 @@ def main() -> None:
     ap.add_argument("--confusion_groups", default="vpn_app")
     ap.add_argument("--flow_contrastive_weight", type=float, default=0.03)
     ap.add_argument("--flow_temperature", type=float, default=0.07)
+    ap.add_argument("--prior_strengths", default="0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2")
+    ap.add_argument("--prior_gate_modes", default="none,low_margin,high_entropy,low_confidence")
+    ap.add_argument("--prior_gate_thresholds", default="0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8")
+    ap.add_argument("--prior_pool_strategy", choices=["valid", "valid_weighted", "prior_softcap", "prior_softcap_valid", "prior_band"], default="prior_softcap_valid")
+    ap.add_argument("--prior_top_k", type=int, default=1)
+    ap.add_argument("--prior_hard_kl_cap", type=float, default=0.017)
+    ap.add_argument("--prior_ensemble_mode", choices=["mean", "log_mean", "vote"], default="mean")
+    ap.add_argument("--safe_prior_min_base_weight", type=float, default=0.90)
+    ap.add_argument("--safe_prior_simplex_step", type=float, default=0.01)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--require_cuda", action="store_true", help="Fail before long stages if CUDA is unavailable.")
     ap.add_argument("--no_progress", action="store_true")
