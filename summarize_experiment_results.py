@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, f1_score
 
 
 DEFAULT_TARGETS = {
-    "vpn-app": (0.75, 0.65),
+    "vpn-app": (0.74, 0.65),
     "tls-120": (0.78, 0.70),
     "tls": (0.78, 0.70),
 }

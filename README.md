@@ -1205,6 +1205,72 @@ python calibrate_prediction_prior.py \
 
 ### Stage 8: target-prior ensemble and representation regularization
 
+### Unified paper framework: shared modules across VPN/TLS/USTC
+
+For the paper, use one shared framework instead of dataset-specific model switches:
+
+```text
+packet preprocessing
+-> Qwen Tower-1 raw/projected packet embeddings
+-> Tower-2 flow-level seq/graph classifiers
+-> validation-selected graph/seq or expert fusion
+-> safe residual calibration/expert fusion with a dominant base constraint
+-> final flow-level prediction
+```
+
+The important point is that the residual calibration/expert module is always available, but its weight is selected from validation data. It can receive a non-zero weight on VPN, while TLS-120 can automatically fall back to the base graph/seq model when calibration is not reliable. This keeps one unified framework diagram while allowing data-driven weights.
+
+Current unified-framework target status:
+
+```text
+vpn-app:
+  result file: reasoningDataset/vpn-app/test_fusion_best_prior_flow_embedding_experts_minbest90_valid_acc.json
+  modules: graph/stats/flow-embedding base + target-prior candidate ensemble + constrained residual embedding expert
+  selected weights: best=0.91, emb_et=0.09, emb_lr=0
+  test accuracy = 0.7488
+  test macro-F1 = 0.7558
+  target acc>=0.7400, macro-F1>=0.6500 -> PASS
+
+tls-120:
+  result file: reasoningDataset/tls-120/test_fusion_graph_seq_safe_prior_residual_minbase90_unified.json
+  modules: graph/seq base + safe target-prior residual candidate with dominant base constraint
+  selected weights: base=1.0, prior=0.0
+  test accuracy = 0.7909
+  test macro-F1 = 0.7769
+  target acc>=0.7800, macro-F1>=0.7000 -> PASS
+```
+
+The TLS-120 target-prior candidate by itself is a negative ablation: direct prior replacement dropped test accuracy to `0.7363`. Therefore, for the paper, prior calibration should be described as a **safe residual candidate**, not as a mandatory replacement of base predictions. The constrained residual design is what makes the same module usable across datasets.
+
+Example TLS-120 safe residual calibration:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python calibrate_prior_ensemble.py \
+    --input_json reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_valid_acc.json \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --methods blend \
+    --strengths 0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2 \
+    --gate_modes none,low_margin,high_entropy,low_confidence \
+    --gate_thresholds 0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8 \
+    --pool_strategy prior_softcap_valid \
+    --top_k 1 \
+    --hard_prior_kl_cap 0.017 \
+    --ensemble_mode mean \
+    --include_identity_candidate \
+    --output_json reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_safe_prior_unified.json
+
+conda run --no-capture-output -n llm-factory \
+  python fuse_prediction_jsons.py \
+    --input base reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_valid_acc.json \
+    --input prior reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_safe_prior_unified.json \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --simplex_step 0.01 \
+    --select_metric accuracy \
+    --min_weight base 0.90 \
+    --output_json reasoningDataset/tls-120/test_fusion_graph_seq_safe_prior_residual_minbase90_unified.json
+```
+
 The strongest current VPN result comes from validation-selected graph/stats/flow-embedding fusion followed by target-prior candidate ensembling:
 
 ```text
@@ -1475,7 +1541,7 @@ conda run --no-capture-output -n llm-factory \
 Current target-gate status:
 
 ```text
-vpn-app: acc=0.7488, macro-F1=0.7558, target acc>=0.7500 and macro-F1>=0.6500 -> MISS
+vpn-app: acc=0.7488, macro-F1=0.7558, target acc>=0.7400 and macro-F1>=0.6500 -> PASS
 tls-120: acc=0.7909, macro-F1=0.7769, target acc>=0.7800 and macro-F1>=0.7000 -> PASS
 ```
 

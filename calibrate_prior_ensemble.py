@@ -212,6 +212,39 @@ def make_candidates(
     return candidates, context
 
 
+def identity_candidate(
+    valid_prob: np.ndarray,
+    test_prob: np.ndarray,
+    y_valid: np.ndarray,
+    y_test: np.ndarray,
+    num_classes: int,
+) -> Dict[str, Any]:
+    valid_pred = valid_prob.argmax(axis=1).astype(np.int64)
+    test_pred = test_prob.argmax(axis=1).astype(np.int64)
+    sorted_prob = np.sort(test_prob, axis=1)
+    confidence = float(sorted_prob[:, -1].mean())
+    margin = float((sorted_prob[:, -1] - sorted_prob[:, -2]).mean()) if num_classes > 1 else confidence
+    entropy = float((-test_prob * np.log(test_prob.clip(min=1e-12))).sum(axis=1).mean())
+    return {
+        "key": "identity",
+        "method": "identity",
+        "strength": 0.0,
+        "gate_mode": "none",
+        "gate_threshold": 0.0,
+        "valid_prob": valid_prob,
+        "test_prob": test_prob,
+        "valid_metrics": compute_metrics(y_valid.tolist(), valid_pred.tolist()),
+        "valid_weighted_metrics": compute_metrics(y_valid.tolist(), valid_pred.tolist()),
+        "test_metrics": compute_metrics(y_test.tolist(), test_pred.tolist()),
+        "hard_prior_kl": 0.0,
+        "soft_prior_kl": 0.0,
+        "confidence": confidence,
+        "margin": margin,
+        "entropy": entropy,
+        "gate_mean": 0.0,
+    }
+
+
 def select_pool(candidates: List[Dict[str, Any]], strategy: str, select_metric: str, top_k: int, hard_cap: float) -> List[Dict[str, Any]]:
     if strategy == "valid_weighted":
         ranked = sorted(
@@ -301,6 +334,7 @@ def main() -> None:
     ap.add_argument("--hard_prior_kl_cap", type=float, default=0.017)
     ap.add_argument("--ensemble_mode", choices=["mean", "log_mean", "vote"], default="mean")
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--include_identity_candidate", action="store_true", help="Include the uncalibrated input probabilities as a safe fallback candidate.")
     ap.add_argument("--oracle_diagnostics", action="store_true", help="Also report test-label oracle single/pool metrics for diagnosis only.")
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
@@ -328,6 +362,8 @@ def main() -> None:
         args.ridge,
         args.select_metric,
     )
+    if args.include_identity_candidate:
+        candidates.append(identity_candidate(valid_prob, test_prob, y_valid, y_test, test_prob.shape[1]))
     pool = select_pool(candidates, args.pool_strategy, args.select_metric, args.top_k, args.hard_prior_kl_cap)
     valid_ens = ensemble_prob(pool, "valid", args.ensemble_mode, args.temperature)
     test_ens = ensemble_prob(pool, "test", args.ensemble_mode, args.temperature)
