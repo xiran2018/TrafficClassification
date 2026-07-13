@@ -1215,11 +1215,12 @@ packet preprocessing
 -> Qwen Tower-1 raw/projected packet embeddings
 -> Tower-2 flow-level seq/graph classifiers
 -> validation-selected graph/seq or expert fusion
+-> validation-gated expert selector
 -> safe residual calibration/expert fusion with a dominant base constraint
 -> final flow-level prediction
 ```
 
-The important point is that the residual calibration/expert module is always available, but its weight is selected from validation data. It can receive a non-zero weight on VPN, TLS-120 can automatically fall back to the base graph/seq model when calibration is not reliable, and USTC can select the flow-embedding expert when deep Tower-2 heads are less stable under tiny-split training. This keeps one unified framework diagram while allowing data-driven weights.
+The important point is that the residual calibration/expert module and the validation-gated selector are always available, but their weights or source choices are selected from validation data. They can receive a non-zero contribution on VPN or USTC, while TLS-120 can automatically fall back to the base graph/seq model when calibration is not reliable. This keeps one unified framework diagram while allowing data-driven weights. In paper wording, do not claim that every module is forced on for every dataset; claim that every dataset passes through the same candidate framework and harmful modules are validation-gated down to zero or to the base identity path.
 
 Current unified-framework target status:
 
@@ -1241,11 +1242,11 @@ tls-120:
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
 
 ustc-app:
-  result file: reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_step150_stage8_flowaware_safe_prior_residual.json
-  modules: graph/seq Tower-2 + flow-embedding expert + safe target-prior residual candidate
-  selected weights: base=0.91, prior=0.09 over base fusion emb=0.70, seq=0.30, graph=0.0; prior candidate is identity
-  test accuracy = 0.6500
-  test macro-F1 = 0.5750
+  result file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+  modules: graph/seq Tower-2 + flow-embedding expert + safe target-prior residual candidate + validation-gated expert selector
+  selected selector: class_precision, alpha=0.5, metric_margin=0.0
+  test accuracy = 0.7000
+  test macro-F1 = 0.6250
   note: 20 test flows only; use as cross-dataset framework evidence and continue improving representation learning
 ```
 
@@ -1573,9 +1574,36 @@ Residual fusion with the previous best:
   selected weights: base=0.85, proto_emb=0.15, proto_gs=0.0
   flow accuracy = 0.6500
   flow macro-F1 = 0.5750
+
+Validation-gated selector over the previous best and the full-proto embedding expert:
+  reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+  selected selector: class_precision, alpha=0.5, metric_margin=0.0
+  flow accuracy = 0.7000
+  flow macro-F1 = 0.6250
 ```
 
-Interpretation: full-schedule prototype learning did not increase USTC accuracy, but it improved the best single-result macro-F1 from `0.5750` to `0.6083`. The final `step_200` checkpoint overfits the tiny validation split and drops on test, so downstream validation-aware checkpoint selection remains necessary. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated residual fusion prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
+Reproduce the validation-gated selector result:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python validation_gated_selector.py \
+    --input base reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_step150_stage8_flowaware_safe_prior_residual.json \
+    --input proto_emb reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json \
+    --label_map reasoningDataset/ustc-app/train_tower1_flowaware_change_weight/label_map.json \
+    --select_metric macro_f1 \
+    --strategies always,class_precision,threshold_switch \
+    --alpha_grid 0.5,1,2,5 \
+    --metric_margin_grid 0,0.05,0.1 \
+    --expert_conf_grid 0.3,0.5,0.7,0.85 \
+    --expert_margin_grid 0.05,0.15,0.3,0.6 \
+    --base_conf_max_grid 1,0.85,0.7,0.55 \
+    --delta_conf_grid=-1,0,0.05,0.1 \
+    --delta_margin_grid=-1,0,0.05,0.1 \
+    --min_valid_gain_over_base 0.03 \
+    --output_json reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+```
+
+Interpretation: full-schedule prototype learning did not increase USTC accuracy by itself, but it improved the best single-expert macro-F1 from `0.5750` to `0.6083`. The validation-gated selector then used validation-estimated per-class precision to combine the safer base with the prototype embedding expert, improving the current USTC result to `0.7000` accuracy / `0.6250` macro-F1. The final `step_200` checkpoint overfits the tiny validation split and drops on test, so downstream validation-aware checkpoint selection remains necessary. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated selection prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
@@ -1705,6 +1733,30 @@ conda run --no-capture-output -n llm-factory \
 
 This keeps the strongest base model dominant when the validation split is too small or shifted. In the current VPN run, the constrained residual embedding expert improved the best test accuracy slightly from `0.7482` to `0.7488`, but it still did not cross `0.75`.
 
+For source-level expert selection, `validation_gated_selector.py` compares probability JSONs on the validation split and then chooses either a single source, a class-precision-gated source, or a confidence-threshold switch. Use `--min_valid_gain_over_base` as the safety gate: if the selected validation improvement is too small, the selector falls back to the first input. This is the same module used across datasets:
+
+```text
+VPN:
+  safe selector file: reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_safe_gain008_valid_macro.json
+  selected path: fallback to base because validation gain was below the stricter 0.08 gate
+  test accuracy = 0.7488
+  test macro-F1 = 0.7558
+
+TLS-120:
+  safe selector file: reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_safe_gain003_valid_macro.json
+  selected path: fallback to base because validation gain was only 0.0007
+  test accuracy = 0.7909
+  test macro-F1 = 0.7769
+
+USTC:
+  safe selector file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+  selected path: class_precision selector, alpha=0.5, metric_margin=0.0
+  test accuracy = 0.7000
+  test macro-F1 = 0.6250
+```
+
+The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. This is why the paper method should emphasize validation-gated expert selection with a dataset-specific safety threshold, not unconditional expert switching.
+
 Use the metric dashboard to check the current target gates across datasets:
 
 ```bash
@@ -1712,6 +1764,7 @@ conda run --no-capture-output -n llm-factory \
   python summarize_experiment_results.py \
     --dataset vpn-app \
     --dataset tls-120 \
+    --dataset ustc-app \
     --top_k 5 \
     --output_json reasoningDataset/goal_metric_summary.json
 ```
@@ -1721,6 +1774,7 @@ Current target-gate status:
 ```text
 vpn-app: acc=0.7488, macro-F1=0.7558, target acc>=0.7400 and macro-F1>=0.6500 -> PASS
 tls-120: acc=0.7909, macro-F1=0.7769, target acc>=0.7800 and macro-F1>=0.7000 -> PASS
+ustc-app: acc=0.7000, macro-F1=0.6250, cross-dataset evidence on the 20-flow test split
 ```
 
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:

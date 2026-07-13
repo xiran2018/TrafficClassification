@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
+
+
+def compute_metrics(y_true, y_pred):
+    p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)
+    p_weight, r_weight, f_weight, _ = precision_recall_fscore_support(y_true, y_pred, average="weighted", zero_division=0)
+    return {
+        "accuracy": accuracy_score(y_true, y_pred) if len(y_true) else 0.0,
+        "macro_precision": p_macro,
+        "macro_recall": r_macro,
+        "macro_f1": f_macro,
+        "weighted_precision": p_weight,
+        "weighted_recall": r_weight,
+        "weighted_f1": f_weight,
+    }
+
+
+def load_label_names(path: str):
+    if not path:
+        return None, None
+    with open(path, "r", encoding="utf-8") as f:
+        label_map = json.load(f)
+    if not label_map:
+        return None, label_map
+    max_id = max(int(v) for v in label_map.values())
+    label_names = [str(i) for i in range(max_id + 1)]
+    for name, idx in label_map.items():
+        label_names[int(idx)] = name
+    return label_names, label_map
+
+
+def load_payload(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    required = ["valid_flow_ids", "valid_y_true", "valid_prob", "flow_ids", "flow_y_true", "flow_prob"]
+    missing = [key for key in required if key not in data]
+    if missing:
+        raise ValueError(f"{path} is missing required probability fields: {missing}")
+    return data
+
+
+def normalize_prob(prob: np.ndarray) -> np.ndarray:
+    prob = np.asarray(prob, dtype=np.float64)
+    prob = np.clip(prob, 1e-12, None)
+    return prob / prob.sum(axis=1, keepdims=True)
+
+
+def align_payload(data: Dict[str, Any], split: str, fids: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+    if split == "valid":
+        ids = data["valid_flow_ids"]
+        labels = data["valid_y_true"]
+        probs = data["valid_prob"]
+    elif split == "test":
+        ids = data["flow_ids"]
+        labels = data["flow_y_true"]
+        probs = data["flow_prob"]
+    else:
+        raise ValueError(split)
+    idx = {str(fid): i for i, fid in enumerate(ids)}
+    y = np.asarray([labels[idx[fid]] for fid in fids], dtype=np.int64)
+    p = normalize_prob(np.asarray([probs[idx[fid]] for fid in fids], dtype=np.float64))
+    return y, p
+
+
+def confidence_features(prob: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    pred = prob.argmax(axis=1).astype(np.int64)
+    sorted_prob = np.sort(prob, axis=1)
+    conf = sorted_prob[:, -1]
+    margin = sorted_prob[:, -1] - sorted_prob[:, -2] if prob.shape[1] > 1 else conf
+    return pred, conf, margin
+
+
+def one_hot_prob(pred: np.ndarray, num_classes: int, smooth: float) -> np.ndarray:
+    out = np.full((len(pred), num_classes), smooth / max(num_classes - 1, 1), dtype=np.float64)
+    out[np.arange(len(pred)), pred] = 1.0 - smooth
+    return out
+
+
+def selected_prob_from_sources(probs: List[np.ndarray], source_idx: np.ndarray, smooth: float) -> np.ndarray:
+    num_classes = probs[0].shape[1]
+    out = np.zeros((len(source_idx), num_classes), dtype=np.float64)
+    for i, src in enumerate(source_idx):
+        out[i] = probs[int(src)][i]
+    if smooth > 0:
+        pred = out.argmax(axis=1)
+        return one_hot_prob(pred, num_classes, smooth)
+    return normalize_prob(out)
+
+
+def class_precision_selector(
+    valid_probs: List[np.ndarray],
+    y_valid: np.ndarray,
+    target_probs: List[np.ndarray],
+    alpha: float,
+    metric_margin: float,
+) -> np.ndarray:
+    num_sources = len(valid_probs)
+    num_classes = valid_probs[0].shape[1]
+    valid_preds = [p.argmax(axis=1).astype(np.int64) for p in valid_probs]
+    target_preds = [p.argmax(axis=1).astype(np.int64) for p in target_probs]
+    global_acc = np.asarray([(pred == y_valid).mean() for pred in valid_preds], dtype=np.float64)
+    scores = np.zeros((num_sources, num_classes), dtype=np.float64)
+    for s, pred in enumerate(valid_preds):
+        for cls in range(num_classes):
+            mask = pred == cls
+            correct = float(((pred == y_valid) & mask).sum())
+            total = float(mask.sum())
+            scores[s, cls] = (correct + alpha * global_acc[s]) / (total + alpha)
+    source_idx = np.zeros(len(target_preds[0]), dtype=np.int64)
+    target_conf = [confidence_features(p)[1] for p in target_probs]
+    for i in range(len(source_idx)):
+        best_src = 0
+        best_score = scores[0, target_preds[0][i]]
+        best_conf = target_conf[0][i]
+        for s in range(1, num_sources):
+            score = scores[s, target_preds[s][i]]
+            conf = target_conf[s][i]
+            if score > best_score + metric_margin or (abs(score - best_score) <= metric_margin and conf > best_conf):
+                best_src = s
+                best_score = score
+                best_conf = conf
+        source_idx[i] = best_src
+    return source_idx
+
+
+def threshold_switch_selector(
+    base_prob: np.ndarray,
+    expert_prob: np.ndarray,
+    expert_index: int,
+    expert_conf_min: float,
+    expert_margin_min: float,
+    base_conf_max: float,
+    delta_conf_min: float,
+    delta_margin_min: float,
+) -> np.ndarray:
+    _, base_conf, base_margin = confidence_features(base_prob)
+    _, expert_conf, expert_margin = confidence_features(expert_prob)
+    switch = (
+        (expert_conf >= expert_conf_min)
+        & (expert_margin >= expert_margin_min)
+        & (base_conf <= base_conf_max)
+        & ((expert_conf - base_conf) >= delta_conf_min)
+        & ((expert_margin - base_margin) >= delta_margin_min)
+    )
+    out = np.zeros(base_prob.shape[0], dtype=np.int64)
+    out[switch] = expert_index
+    return out
+
+
+def parse_float_list(text: str) -> List[float]:
+    return [float(x) for x in text.split(",") if x.strip()]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Validation-gated expert selection for probability JSONs.")
+    ap.add_argument("--input", nargs=2, action="append", metavar=("NAME", "JSON"), required=True)
+    ap.add_argument("--label_map", default="")
+    ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
+    ap.add_argument("--strategies", default="always,class_precision,threshold_switch")
+    ap.add_argument("--alpha_grid", default="0.5,1,2,5,10")
+    ap.add_argument("--metric_margin_grid", default="0,0.02,0.05,0.1")
+    ap.add_argument("--expert_conf_grid", default="0,0.3,0.5,0.7,0.85")
+    ap.add_argument("--expert_margin_grid", default="0,0.05,0.15,0.3,0.6")
+    ap.add_argument("--base_conf_max_grid", default="1,0.85,0.7,0.55,0.4")
+    ap.add_argument("--delta_conf_grid", default="-1,0,0.05,0.1,0.2")
+    ap.add_argument("--delta_margin_grid", default="-1,0,0.05,0.1,0.2")
+    ap.add_argument("--output_smooth", type=float, default=0.0, help="Optional one-hot smoothing for selected predictions.")
+    ap.add_argument("--min_valid_gain_over_base", type=float, default=0.0, help="Fallback to the first input unless the selected validation metric improves by at least this amount.")
+    ap.add_argument("--print_all_candidates", action="store_true", help="Print every validation selector candidate.")
+    ap.add_argument("--output_json", required=True)
+    args = ap.parse_args()
+
+    named_payloads = [(name, load_payload(path), path) for name, path in args.input]
+    valid_common = sorted(set.intersection(*(set(map(str, data["valid_flow_ids"])) for _, data, _ in named_payloads)))
+    test_common = sorted(set.intersection(*(set(map(str, data["flow_ids"])) for _, data, _ in named_payloads)))
+    if not valid_common or not test_common:
+        raise ValueError("No common flow ids across selector inputs.")
+
+    valid_probs: List[np.ndarray] = []
+    test_probs: List[np.ndarray] = []
+    y_valid_ref = None
+    y_test_ref = None
+    for name, data, _ in named_payloads:
+        y_valid, p_valid = align_payload(data, "valid", valid_common)
+        y_test, p_test = align_payload(data, "test", test_common)
+        if y_valid_ref is None:
+            y_valid_ref = y_valid
+            y_test_ref = y_test
+        elif not np.array_equal(y_valid_ref, y_valid) or not np.array_equal(y_test_ref, y_test):
+            raise ValueError(f"Labels do not align for input {name}.")
+        valid_probs.append(p_valid)
+        test_probs.append(p_test)
+
+    strategies = {x.strip() for x in args.strategies.split(",") if x.strip()}
+    reports: List[Dict[str, Any]] = []
+    best = None
+    base_candidate = None
+
+    def add_candidate(name: str, config: Dict[str, Any], valid_source: np.ndarray, test_source: np.ndarray) -> None:
+        nonlocal best, base_candidate
+        valid_prob = selected_prob_from_sources(valid_probs, valid_source, args.output_smooth)
+        valid_pred = valid_prob.argmax(axis=1).astype(np.int64)
+        metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
+        row = {"strategy": name, "config": config, "metrics": metrics}
+        reports.append(row)
+        if args.print_all_candidates:
+            print("valid_selector", json.dumps(row, sort_keys=True))
+        key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+        if best is None or key > best[0]:
+            best = (key, row, valid_source.copy(), test_source.copy(), valid_prob)
+        if name == "always" and config.get("source") == named_payloads[0][0]:
+            base_candidate = (key, row, valid_source.copy(), test_source.copy(), valid_prob)
+
+    if "always" in strategies:
+        for src, (name, _, _) in enumerate(named_payloads):
+            valid_src = np.full(len(y_valid_ref), src, dtype=np.int64)
+            test_src = np.full(len(y_test_ref), src, dtype=np.int64)
+            add_candidate("always", {"source": name}, valid_src, test_src)
+
+    if "class_precision" in strategies:
+        for alpha in parse_float_list(args.alpha_grid):
+            for margin in parse_float_list(args.metric_margin_grid):
+                valid_src = class_precision_selector(valid_probs, y_valid_ref, valid_probs, alpha, margin)
+                test_src = class_precision_selector(valid_probs, y_valid_ref, test_probs, alpha, margin)
+                add_candidate("class_precision", {"alpha": alpha, "metric_margin": margin}, valid_src, test_src)
+
+    if "threshold_switch" in strategies and len(valid_probs) > 1:
+        conf_grid = parse_float_list(args.expert_conf_grid)
+        margin_grid = parse_float_list(args.expert_margin_grid)
+        base_conf_grid = parse_float_list(args.base_conf_max_grid)
+        delta_conf_grid = parse_float_list(args.delta_conf_grid)
+        delta_margin_grid = parse_float_list(args.delta_margin_grid)
+        for expert_idx in range(1, len(valid_probs)):
+            expert_name = named_payloads[expert_idx][0]
+            for cmin in conf_grid:
+                for mmin in margin_grid:
+                    for bmax in base_conf_grid:
+                        for dcmin in delta_conf_grid:
+                            for dmmin in delta_margin_grid:
+                                valid_src = threshold_switch_selector(
+                                    valid_probs[0], valid_probs[expert_idx], expert_idx, cmin, mmin, bmax, dcmin, dmmin
+                                )
+                                if valid_src.max() == 0:
+                                    continue
+                                test_src = threshold_switch_selector(
+                                    test_probs[0], test_probs[expert_idx], expert_idx, cmin, mmin, bmax, dcmin, dmmin
+                                )
+                                add_candidate(
+                                    "threshold_switch",
+                                    {
+                                        "expert": expert_name,
+                                        "expert_conf_min": cmin,
+                                        "expert_margin_min": mmin,
+                                        "base_conf_max": bmax,
+                                        "delta_conf_min": dcmin,
+                                        "delta_margin_min": dmmin,
+                                    },
+                                    valid_src,
+                                    test_src,
+                                )
+
+    if best is None:
+        raise ValueError("No selector candidates were generated.")
+    if base_candidate is None:
+        valid_src = np.zeros(len(y_valid_ref), dtype=np.int64)
+        test_src = np.zeros(len(y_test_ref), dtype=np.int64)
+        valid_prob = selected_prob_from_sources(valid_probs, valid_src, args.output_smooth)
+        valid_pred = valid_prob.argmax(axis=1).astype(np.int64)
+        metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
+        row = {"strategy": "always", "config": {"source": named_payloads[0][0]}, "metrics": metrics}
+        key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+        base_candidate = (key, row, valid_src, test_src, valid_prob)
+
+    selected_gain = best[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric]
+    if selected_gain < args.min_valid_gain_over_base:
+        fallback_row = dict(base_candidate[1])
+        fallback_row["fallback_reason"] = {
+            "selected_gain": selected_gain,
+            "min_valid_gain_over_base": args.min_valid_gain_over_base,
+            "rejected": best[1],
+        }
+        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4])
+
+    _, selected, selected_valid_source, selected_test_source, selected_valid_prob = best
+    selected_test_prob = selected_prob_from_sources(test_probs, selected_test_source, args.output_smooth)
+    test_pred = selected_test_prob.argmax(axis=1).astype(np.int64)
+    test_metrics = compute_metrics(y_test_ref.tolist(), test_pred.tolist())
+    print("selected_selector", json.dumps(selected, sort_keys=True))
+    print("test_selector", json.dumps(test_metrics, indent=2, sort_keys=True))
+
+    label_names, label_map = load_label_names(args.label_map)
+    if label_names:
+        print(classification_report(y_test_ref, test_pred, labels=list(range(len(label_names))), target_names=label_names, zero_division=0))
+    else:
+        print(classification_report(y_test_ref, test_pred, zero_division=0))
+
+    payload = {
+        "metrics": {"flow_level": test_metrics},
+        "selected": selected,
+        "valid_reports": reports,
+        "inputs": [{"name": name, "path": path} for name, _, path in named_payloads],
+        "label_map": label_map,
+        "flow_ids": test_common,
+        "flow_y_true": y_test_ref.tolist(),
+        "flow_y_pred": test_pred.tolist(),
+        "flow_prob": selected_test_prob.tolist(),
+        "flow_source": selected_test_source.astype(int).tolist(),
+        "valid_flow_ids": valid_common,
+        "valid_y_true": y_valid_ref.tolist(),
+        "valid_y_pred": selected_valid_prob.argmax(axis=1).astype(np.int64).tolist(),
+        "valid_prob": selected_valid_prob.tolist(),
+        "valid_source": selected_valid_source.astype(int).tolist(),
+        "feature_config": {
+            "select_metric": args.select_metric,
+            "strategies": sorted(strategies),
+            "output_smooth": args.output_smooth,
+        },
+    }
+    Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()
