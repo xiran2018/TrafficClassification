@@ -1532,6 +1532,15 @@ Residual fusion with current best:
 
 Interpretation: even a small SFT-preserving prototype continuation is not enough to improve USTC downstream generalization. For future runs, prototype learning should be trained inside the full Tower-1 schedule with validation-aware checkpoint selection, rather than appended as a short continuation after the best checkpoint.
 
+A constrained residual search over the current USTC top-12 existing candidates also selected `base=1.0` and kept `0.6500` accuracy / `0.5750` macro-F1:
+
+```text
+reasoningDataset/ustc-app/test_residual_fusion_search_step150_minbase90_top12_macro.json
+selected weights: base=1.0, candidate=0.0
+```
+
+This means the remaining USTC gap should be attacked through representation learning or dataset construction, not by repeatedly recombining the same probability JSONs.
+
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
 ```text
