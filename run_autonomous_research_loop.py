@@ -68,6 +68,12 @@ def all_goals_met(status: List[Dict[str, Any]], goal_datasets: List[str]) -> boo
     return True
 
 
+def framework_ready(framework: Dict[str, Any] | None, required: bool) -> bool:
+    if not required:
+        return True
+    return bool(isinstance(framework, dict) and framework.get("consistent") is True)
+
+
 def write_ledger(args, payload: Dict[str, Any]) -> None:
     out = Path(args.output_json)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -152,6 +158,7 @@ def main() -> None:
     ap.add_argument("--max_iters", type=int, default=1)
     ap.add_argument("--execute", action="store_true", help="Run recommended experiments when goals are not met.")
     ap.add_argument("--continue_after_targets", action="store_true", help="Keep running recommended suite even if target gates already pass.")
+    ap.add_argument("--require_framework_consistency", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--allow_no_cuda", action="store_true")
     ap.add_argument("--continue_on_error", action="store_true")
     ap.add_argument("--run_tag", default="paired_ipport")
@@ -178,6 +185,7 @@ def main() -> None:
         "goal_datasets": goal_datasets,
         "execute": bool(args.execute),
         "continue_after_targets": bool(args.continue_after_targets),
+        "require_framework_consistency": bool(args.require_framework_consistency),
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
@@ -197,17 +205,21 @@ def main() -> None:
 
         framework = load_framework_consistency()
         goals_met = all_goals_met(before, goal_datasets)
+        framework_met = framework_ready(framework, args.require_framework_consistency)
+        ready_to_stop = goals_met and framework_met
         record: Dict[str, Any] = {
             "iteration": iteration,
             "status_before": before,
             "framework_consistency": framework,
             "goals_met_before": goals_met,
+            "framework_met_before": framework_met,
+            "ready_to_stop_before": ready_to_stop,
             "commands": commands,
         }
-        if goals_met and not args.continue_after_targets:
-            record["action"] = "stop_targets_met"
+        if ready_to_stop and not args.continue_after_targets:
+            record["action"] = "stop_targets_and_framework_met"
             ledger["iterations"].append(record)
-            ledger["stop_reason"] = "targets_met"
+            ledger["stop_reason"] = "targets_and_framework_met"
             write_ledger(args, ledger)
             return
 
@@ -215,6 +227,8 @@ def main() -> None:
         record["commands"].append(suite_result)
         record["status_after"] = dataset_status(datasets, targets)
         record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
+        record["framework_met_after"] = framework_met
+        record["ready_to_stop_after"] = record["goals_met_after"] and framework_met
         record["action"] = "ran_recommended_suite" if args.execute else "dry_run_recommended_suite"
         ledger["iterations"].append(record)
         write_ledger(args, ledger)
@@ -222,8 +236,8 @@ def main() -> None:
             ledger["stop_reason"] = "suite_failed"
             write_ledger(args, ledger)
             raise SystemExit(suite_result["returncode"])
-        if record["goals_met_after"] and not args.continue_after_targets:
-            ledger["stop_reason"] = "targets_met_after_iteration"
+        if record["ready_to_stop_after"] and not args.continue_after_targets:
+            ledger["stop_reason"] = "targets_and_framework_met_after_iteration"
             write_ledger(args, ledger)
             return
 

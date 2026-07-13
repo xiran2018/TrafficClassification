@@ -1925,7 +1925,7 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/recommended_suite_plan.json
 ```
 
-For the full autonomous research loop, use the wrapper below. It first regenerates the recommendation, framework, and ablation reports, checks the VPN/TLS target gates, and stops when the current results already satisfy the goal. If the gates are not met, or if `--continue_after_targets` is set, it calls the recommended suite and records a loop ledger:
+For the full autonomous research loop, use the wrapper below. It first regenerates the recommendation, framework, and ablation reports, checks the VPN/TLS target gates, and stops only when the current results satisfy both the metric goals and the unified-framework consistency audit. If the gates are not met, or if `--continue_after_targets` is set, it calls the recommended suite and records a loop ledger:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -1933,6 +1933,8 @@ conda run --no-capture-output -n llm-factory \
     --max_iters 1 \
     --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
 ```
+
+The framework consistency gate is enabled by default through `--require_framework_consistency`; use `--no-require_framework_consistency` only for temporary debugging runs where the paper-facing unified-framework proof is not being checked.
 
 To keep searching for higher accuracy in the real A800 environment even after the current VPN/TLS targets pass:
 
