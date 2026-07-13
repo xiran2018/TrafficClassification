@@ -1914,6 +1914,8 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/recommended_suite_plan.json
 ```
 
+The suite JSON records CUDA visibility, each dataset's current best test result, target-gate status, generated command, and command return code. This makes the A800 run usable as a lightweight experiment ledger for paper ablations and cross-dataset reproduction.
+
 In the real A800 `llm-factory` shell, add `--execute` to run the suite sequentially:
 
 ```bash

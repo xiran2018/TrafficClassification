@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import shlex
 import subprocess
@@ -10,6 +11,7 @@ from typing import Any, Dict, List
 
 from recommend_next_experiment import cuda_summary
 from run_recommended_experiment import DATASET_PRESETS
+from summarize_experiment_results import DEFAULT_TARGETS, collect_dataset
 
 
 def split_csv(raw: str) -> List[str]:
@@ -21,13 +23,11 @@ def split_csv(raw: str) -> List[str]:
     return out
 
 
-def run(cmd: List[str], execute: bool, continue_on_error: bool) -> int:
+def run(cmd: List[str], execute: bool) -> int:
     print("$ " + " ".join(shlex.quote(x) for x in cmd), flush=True)
     if not execute:
         return 0
     proc = subprocess.run(cmd, check=False)
-    if proc.returncode and not continue_on_error:
-        raise SystemExit(proc.returncode)
     return int(proc.returncode)
 
 
@@ -68,14 +68,42 @@ def dataset_cmd(args, dataset: str) -> List[str]:
     return cmd
 
 
-def write_suite_plan(args, datasets: List[str], commands: List[List[str]], cuda: Dict[str, Any]) -> None:
+def dataset_status(dataset: str) -> Dict[str, Any]:
+    rows = collect_dataset(dataset, ["test*.json"])
+    target = DEFAULT_TARGETS.get(dataset)
+    best = rows[0] if rows else None
+    achieved = None
+    if target and best:
+        achieved = bool(best["accuracy"] >= target[0] and (best.get("macro_f1") or 0.0) >= target[1])
+    return {
+        "dataset": dataset,
+        "target": None if target is None else {"accuracy": target[0], "macro_f1": target[1]},
+        "target_met": achieved,
+        "num_results": len(rows),
+        "best": best,
+    }
+
+
+def write_suite_plan(
+    args,
+    datasets: List[str],
+    commands: List[List[str]],
+    cuda: Dict[str, Any],
+    command_results: List[Dict[str, Any]] | None = None,
+) -> None:
     payload = {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "datasets": datasets,
         "execute": bool(args.execute),
         "run_tag": args.run_tag,
         "model_types": args.model_types,
         "cuda": cuda,
-        "commands": commands,
+        "dataset_status": [dataset_status(dataset) for dataset in datasets],
+        "commands": [
+            {"dataset": dataset, "cmd": cmd}
+            for dataset, cmd in zip(datasets, commands)
+        ],
+        "command_results": command_results or [],
     }
     out = Path(args.output_json)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -108,8 +136,15 @@ def main() -> None:
     cuda = cuda_summary()
     commands = [dataset_cmd(args, dataset) for dataset in datasets]
     write_suite_plan(args, datasets, commands, cuda)
+    command_results: List[Dict[str, Any]] = []
     for cmd in commands:
-        run(cmd, execute=args.execute, continue_on_error=args.continue_on_error)
+        dataset = cmd[cmd.index("--dataset") + 1] if "--dataset" in cmd else ""
+        returncode = run(cmd, execute=args.execute)
+        command_results.append({"dataset": dataset, "returncode": returncode, "cmd": cmd})
+        if returncode and not args.continue_on_error:
+            write_suite_plan(args, datasets, commands, cuda, command_results)
+            raise SystemExit(returncode)
+    write_suite_plan(args, datasets, commands, cuda, command_results)
 
 
 if __name__ == "__main__":
