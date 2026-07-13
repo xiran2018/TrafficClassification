@@ -2045,6 +2045,16 @@ tls-120:  strong               (point target and bootstrap lower bounds both pas
 ustc-app: evidence_only        (tiny 20-flow test split; framework evidence, not a strong performance claim)
 ```
 
+Paper positioning from the evidence pack:
+
+```text
+main claim: unified candidate-expert traffic classification framework with validation-gated safety controls
+strong performance claim: TLS-120
+qualified performance claim: VPN point estimate passes, but bootstrap lower bound is mixed
+cross-dataset framework evidence: USTC, with small-test-split caveat
+reviewer-risk control: report harmful experts as negative ablations and use bootstrap/target-shift guards
+```
+
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
 
 ```bash

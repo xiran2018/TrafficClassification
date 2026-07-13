@@ -136,6 +136,51 @@ def recommendation_rows(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def paper_positioning(claims: List[Dict[str, Any]], ablations: List[Dict[str, Any]], framework: Dict[str, Any]) -> Dict[str, Any]:
+    strong = [row["dataset"] for row in claims if row["claim_strength"] == "strong"]
+    mixed = [row["dataset"] for row in claims if row["claim_strength"] == "point_pass_ci_mixed"]
+    evidence_only = [row["dataset"] for row in claims if row["claim_strength"] == "evidence_only"]
+    harmful = [row for row in ablations if row["effect"] == "harmful"]
+    neutral = [row for row in ablations if row["effect"] == "uncertain_or_neutral"]
+    risks = []
+    if mixed:
+        risks.append(
+            "Some datasets pass point targets but not bootstrap lower-bound targets; avoid overclaiming statistical dominance."
+        )
+    if evidence_only:
+        risks.append(
+            "Some datasets are evidence-only because the test split is too small or lacks a paper target; present them as framework-transfer evidence."
+        )
+    if not framework.get("consistent"):
+        risks.append("Framework consistency audit failed; do not claim a single unified framework until this is fixed.")
+    recommended_claims = [
+        "The method should be framed as a unified candidate-expert traffic classification framework with validation-gated safety controls.",
+        "The strongest performance claim is supported on datasets whose point estimates and bootstrap lower bounds both pass target gates.",
+        "Dataset-specific behavior should be described as automatic expert activation, gating, or identity fallback inside the same module family.",
+    ]
+    risk_controls = [
+        "Use bootstrap and target-shift guards to prevent validation-favorable but target-unstable experts from overriding the base model.",
+        "Report harmful expert candidates as negative ablations instead of hiding them; they motivate the gated-selector design.",
+        "Separate strong performance claims from cross-dataset framework evidence when confidence intervals are wide.",
+    ]
+    next_experiments = [
+        "Run fresh A800 Stage-8 paired-view experiments with flow-aware embeddings instead of old-embedding paired probes.",
+        "Add larger or repeated USTC splits before making strong USTC performance claims.",
+        "For VPN, prioritize representation learning improvements because probability-level expert switching is already gated off by target-shift evidence.",
+    ]
+    return {
+        "strong_claim_datasets": strong,
+        "point_pass_ci_mixed_datasets": mixed,
+        "evidence_only_datasets": evidence_only,
+        "harmful_ablation_count": len(harmful),
+        "neutral_or_uncertain_ablation_count": len(neutral),
+        "recommended_claims": recommended_claims,
+        "risk_controls": risk_controls,
+        "reviewer_risks": risks,
+        "next_experiments": next_experiments,
+    }
+
+
 def render_markdown(pack: Dict[str, Any]) -> str:
     lines = [
         "# Paper Evidence Pack",
@@ -186,6 +231,19 @@ def render_markdown(pack: Dict[str, Any]) -> str:
     lines += ["", "## Next-Step Recommendations", ""]
     for row in pack["recommendations"]:
         lines.append(f"- {row['dataset']}: {row['recommendation']}")
+    positioning = pack.get("paper_positioning") or {}
+    lines += ["", "## Paper Positioning", "", "Recommended claims:"]
+    for item in positioning.get("recommended_claims", []):
+        lines.append(f"- {item}")
+    lines += ["", "Risk controls:"]
+    for item in positioning.get("risk_controls", []):
+        lines.append(f"- {item}")
+    lines += ["", "Reviewer risks:"]
+    for item in positioning.get("reviewer_risks", []):
+        lines.append(f"- {item}")
+    lines += ["", "Next experiments:"]
+    for item in positioning.get("next_experiments", []):
+        lines.append(f"- {item}")
     lines.append("")
     return "\n".join(lines)
 
@@ -202,11 +260,14 @@ def main() -> None:
     framework = load_json(args.framework_json)
     ablation = load_json(args.ablation_json)
     recommendation = load_json(args.recommendation_json)
+    claims = claim_rows(framework)
+    ablations = ablation_rows(ablation)
     pack = {
         "framework_consistency": framework.get("framework_consistency") or {},
-        "claims": claim_rows(framework),
-        "ablations": ablation_rows(ablation),
+        "claims": claims,
+        "ablations": ablations,
         "recommendations": recommendation_rows(recommendation),
+        "paper_positioning": paper_positioning(claims, ablations, framework.get("framework_consistency") or {}),
     }
     md = render_markdown(pack)
     print(md)
