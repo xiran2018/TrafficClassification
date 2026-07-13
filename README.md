@@ -1945,11 +1945,11 @@ conda run --no-capture-output -n llm-factory \
 Current generated table:
 
 ```text
-| Dataset | Accuracy | Macro-F1 | Target | Status | Flows | Selector decision | Guards |
-|---|---:|---:|---|---|---:|---|---|
-| vpn-app | 0.7488 | 0.7558 | 0.7400/0.6500 | PASS | 1672 | fallback to base; rejected reliability_fusion (target_change=0.1268>0.0000) | bootstrap win=1.00, q=0.0310; target change=0.1268, JS=0.0149 |
-| tls-120 | 0.7909 | 0.7772 | 0.7800/0.7000 | PASS | 11542 | threshold_switch expert=seq | bootstrap win=0.79, q=-0.0007; target change=0.0042, JS=0.0001 |
-| ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
+| Dataset | Accuracy | Macro-F1 | Target | Status | Flows | Module usage | Selector decision | Guards |
+|---|---:|---:|---|---|---:|---|---|---|
+| vpn-app | 0.7488 | 0.7558 | 0.7400/0.6500 | PASS | 1672 | base=active; selector=active; expert=gated_off:reliability_fusion; calib=evaluated; guards=boot:active,shift:active | fallback to base; rejected reliability_fusion (target_change=0.1268>0.0000) | bootstrap win=1.00, q=0.0310; target change=0.1268, JS=0.0149 |
+| tls-120 | 0.7909 | 0.7772 | 0.7800/0.7000 | PASS | 11542 | base=active; selector=active; expert=active:threshold_switch; calib=evaluated; guards=boot:active,shift:active | threshold_switch expert=seq | bootstrap win=0.79, q=-0.0007; target change=0.0042, JS=0.0001 |
+| ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | base=active; selector=active; expert=active:class_precision; calib=evaluated; guards=boot:active,shift:active | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
 ```
 
 Generate the paper ablation table:

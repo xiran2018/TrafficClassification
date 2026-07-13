@@ -117,6 +117,61 @@ def guard_summary(selected: Dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "-"
 
 
+def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
+    selected = data.get("selected", {})
+    feature_config = data.get("feature_config") or {}
+    strategies = feature_config.get("strategies") or []
+    strategy = selected.get("strategy", "unknown")
+    config = selected.get("config") or {}
+    fallback = selected.get("fallback_reason")
+
+    usage = {
+        "packet_embedding_backbone": "active",
+        "flow_base_expert": "active",
+        "validation_gated_selector": "active",
+        "bootstrap_guard": "inactive",
+        "target_shift_guard": "inactive",
+        "expert_switch_or_fusion": "identity",
+        "class_bias_calibration_candidate": "not_configured",
+    }
+    if "class_bias_calibration" in strategies:
+        usage["class_bias_calibration_candidate"] = "evaluated"
+
+    carrier = selected
+    if fallback:
+        rejected = fallback.get("rejected", {})
+        if fallback.get("rejected_candidates"):
+            carrier = fallback["rejected_candidates"][0]
+            rejected = carrier.get("rejected", rejected)
+        else:
+            carrier = fallback
+        rejected_strategy = rejected.get("strategy", "candidate")
+        usage["expert_switch_or_fusion"] = f"gated_off:{rejected_strategy}"
+    elif strategy == "always":
+        source = config.get("source", "base")
+        usage["expert_switch_or_fusion"] = f"identity:{source}"
+    elif strategy in {"threshold_switch", "class_precision", "reliability_fusion"}:
+        usage["expert_switch_or_fusion"] = f"active:{strategy}"
+    else:
+        usage["expert_switch_or_fusion"] = f"active:{strategy}"
+
+    if carrier.get("bootstrap_guard"):
+        usage["bootstrap_guard"] = "active"
+    if carrier.get("target_shift_guard"):
+        usage["target_shift_guard"] = "active"
+    return usage
+
+
+def module_usage_summary(usage: Dict[str, str]) -> str:
+    return (
+        f"base={usage['flow_base_expert']}; "
+        f"selector={usage['validation_gated_selector']}; "
+        f"expert={usage['expert_switch_or_fusion']}; "
+        f"calib={usage['class_bias_calibration_candidate']}; "
+        f"guards=boot:{usage['bootstrap_guard']},shift:{usage['target_shift_guard']}"
+    )
+
+
 def build_rows(results: List[Tuple[str, str, float | None, float | None]]) -> List[Dict[str, Any]]:
     rows = []
     for dataset, path, target_acc, target_f1 in results:
@@ -138,6 +193,7 @@ def build_rows(results: List[Tuple[str, str, float | None, float | None]]) -> Li
                 "num_flows": len(data.get("flow_y_true", [])),
                 "selector": selector_summary(selected),
                 "guards": guard_summary(selected),
+                "module_usage": module_usage(data),
             }
         )
     return rows
@@ -145,8 +201,8 @@ def build_rows(results: List[Tuple[str, str, float | None, float | None]]) -> Li
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
     lines = [
-        "| Dataset | Accuracy | Macro-F1 | Target | Status | Flows | Selector decision | Guards |",
-        "|---|---:|---:|---|---|---:|---|---|",
+        "| Dataset | Accuracy | Macro-F1 | Target | Status | Flows | Module usage | Selector decision | Guards |",
+        "|---|---:|---:|---|---|---:|---|---|---|",
     ]
     for row in rows:
         target = "-"
@@ -154,13 +210,14 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
             target = f"{format_float(row['target_accuracy'])}/{format_float(row['target_macro_f1'])}"
         status = "PASS" if row["achieved"] is True else ("MISS" if row["achieved"] is False else "evidence")
         lines.append(
-            "| {dataset} | {acc} | {f1} | {target} | {status} | {flows} | {selector} | {guards} |".format(
+            "| {dataset} | {acc} | {f1} | {target} | {status} | {flows} | {modules} | {selector} | {guards} |".format(
                 dataset=row["dataset"],
                 acc=format_float(row["accuracy"]),
                 f1=format_float(row["macro_f1"]),
                 target=target,
                 status=status,
                 flows=row["num_flows"],
+                modules=module_usage_summary(row["module_usage"]),
                 selector=row["selector"],
                 guards=row["guards"],
             )
