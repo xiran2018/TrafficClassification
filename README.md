@@ -1226,23 +1226,23 @@ Current unified-framework target status:
 
 ```text
 vpn-app:
-  result file: reasoningDataset/vpn-app/test_fusion_best_prior_flow_embedding_experts_minbest90_valid_acc.json
-  modules: graph/stats/flow-embedding base + target-prior candidate ensemble + constrained residual embedding expert
-  selected weights: best=0.91, emb_et=0.09, emb_lr=0
+  result file: reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_reliability_safe_gain008_valid_macro.json
+  modules: graph/stats/flow-embedding base + target-prior candidate ensemble + constrained residual embedding expert + validation-gated selector
+  selected selector: fallback to base after rejecting reliability_fusion because validation gain was below the 0.08 safety gate
   test accuracy = 0.7488
   test macro-F1 = 0.7558
   target acc>=0.7400, macro-F1>=0.6500 -> PASS
 
 tls-120:
-  result file: reasoningDataset/tls-120/test_fusion_graph_seq_safe_prior_residual_minbase90_unified.json
-  modules: graph/seq base + safe target-prior residual candidate with dominant base constraint
-  selected weights: base=1.0, prior=0.0
+  result file: reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_reliability_safe_gain003_valid_macro.json
+  modules: graph/seq base + safe target-prior residual candidate + validation-gated selector
+  selected selector: fallback to base because the best non-base validation gain was only 0.0007
   test accuracy = 0.7909
   test macro-F1 = 0.7769
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
 
 ustc-app:
-  result file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+  result file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_reliability_safe_gain003_valid_macro.json
   modules: graph/seq Tower-2 + flow-embedding expert + safe target-prior residual candidate + validation-gated expert selector
   selected selector: class_precision, alpha=0.5, metric_margin=0.0
   test accuracy = 0.7000
@@ -1576,7 +1576,7 @@ Residual fusion with the previous best:
   flow macro-F1 = 0.5750
 
 Validation-gated selector over the previous best and the full-proto embedding expert:
-  reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+  reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_reliability_safe_gain003_valid_macro.json
   selected selector: class_precision, alpha=0.5, metric_margin=0.0
   flow accuracy = 0.7000
   flow macro-F1 = 0.6250
@@ -1591,7 +1591,7 @@ conda run --no-capture-output -n llm-factory \
     --input proto_emb reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json \
     --label_map reasoningDataset/ustc-app/train_tower1_flowaware_change_weight/label_map.json \
     --select_metric macro_f1 \
-    --strategies always,class_precision,threshold_switch \
+    --strategies always,class_precision,reliability_fusion,threshold_switch \
     --alpha_grid 0.5,1,2,5 \
     --metric_margin_grid 0,0.05,0.1 \
     --expert_conf_grid 0.3,0.5,0.7,0.85 \
@@ -1600,10 +1600,10 @@ conda run --no-capture-output -n llm-factory \
     --delta_conf_grid=-1,0,0.05,0.1 \
     --delta_margin_grid=-1,0,0.05,0.1 \
     --min_valid_gain_over_base 0.03 \
-    --output_json reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+    --output_json reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_reliability_safe_gain003_valid_macro.json
 ```
 
-Interpretation: full-schedule prototype learning did not increase USTC accuracy by itself, but it improved the best single-expert macro-F1 from `0.5750` to `0.6083`. The validation-gated selector then used validation-estimated per-class precision to combine the safer base with the prototype embedding expert, improving the current USTC result to `0.7000` accuracy / `0.6250` macro-F1. The final `step_200` checkpoint overfits the tiny validation split and drops on test, so downstream validation-aware checkpoint selection remains necessary. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated selection prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
+Interpretation: full-schedule prototype learning did not increase USTC accuracy by itself, but it improved the best single-expert macro-F1 from `0.5750` to `0.6083`. The validation-gated selector then considered hard class-precision gating, confidence-threshold switching, and reliability-weighted soft fusion; validation selected class-precision gating and improved the current USTC result to `0.7000` accuracy / `0.6250` macro-F1. The final `step_200` checkpoint overfits the tiny validation split and drops on test, so downstream validation-aware checkpoint selection remains necessary. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated selection prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
@@ -1733,29 +1733,29 @@ conda run --no-capture-output -n llm-factory \
 
 This keeps the strongest base model dominant when the validation split is too small or shifted. In the current VPN run, the constrained residual embedding expert improved the best test accuracy slightly from `0.7482` to `0.7488`, but it still did not cross `0.75`.
 
-For source-level expert selection, `validation_gated_selector.py` compares probability JSONs on the validation split and then chooses either a single source, a class-precision-gated source, or a confidence-threshold switch. Use `--min_valid_gain_over_base` as the safety gate: if the selected validation improvement is too small, the selector falls back to the first input. This is the same module used across datasets:
+For source-level expert selection, `validation_gated_selector.py` compares probability JSONs on the validation split and then chooses either a single source, a class-precision-gated source, a confidence-threshold switch, or a reliability-weighted soft fusion. The reliability fusion estimates each expert's validation precision for its predicted class with shrinkage, then weights expert probabilities by validation reliability and confidence. Use `--min_valid_gain_over_base` as the safety gate: if the selected validation improvement is too small, the selector falls back to the first input. This is the same module used across datasets:
 
 ```text
 VPN:
-  safe selector file: reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_safe_gain008_valid_macro.json
-  selected path: fallback to base because validation gain was below the stricter 0.08 gate
+  safe selector file: reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_reliability_safe_gain008_valid_macro.json
+  selected path: fallback to base because reliability_fusion validation gain was below the stricter 0.08 gate
   test accuracy = 0.7488
   test macro-F1 = 0.7558
 
 TLS-120:
-  safe selector file: reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_safe_gain003_valid_macro.json
+  safe selector file: reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_reliability_safe_gain003_valid_macro.json
   selected path: fallback to base because validation gain was only 0.0007
   test accuracy = 0.7909
   test macro-F1 = 0.7769
 
 USTC:
-  safe selector file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_safe_gain003_valid_macro.json
+  safe selector file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_reliability_safe_gain003_valid_macro.json
   selected path: class_precision selector, alpha=0.5, metric_margin=0.0
   test accuracy = 0.7000
   test macro-F1 = 0.6250
 ```
 
-The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. This is why the paper method should emphasize validation-gated expert selection with a dataset-specific safety threshold, not unconditional expert switching.
+The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. The unsafe reliability-fusion ablation selected `alpha=5.0`, `reliability_power=4.0`, `confidence_power=1.0`, `temperature=0.5`; it improved validation macro-F1 but dropped target-test performance to `0.6956` accuracy / `0.6633` macro-F1. This is why the paper method should emphasize validation-gated expert selection with a dataset-specific safety threshold, not unconditional expert switching.
 
 Use the metric dashboard to check the current target gates across datasets:
 

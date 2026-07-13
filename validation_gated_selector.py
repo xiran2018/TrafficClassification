@@ -132,6 +132,50 @@ def class_precision_selector(
     return source_idx
 
 
+def reliability_tables(valid_probs: List[np.ndarray], y_valid: np.ndarray, alpha: float) -> np.ndarray:
+    num_sources = len(valid_probs)
+    num_classes = valid_probs[0].shape[1]
+    valid_preds = [p.argmax(axis=1).astype(np.int64) for p in valid_probs]
+    global_acc = np.asarray([(pred == y_valid).mean() for pred in valid_preds], dtype=np.float64)
+    tables = np.zeros((num_sources, num_classes), dtype=np.float64)
+    for s, pred in enumerate(valid_preds):
+        for cls in range(num_classes):
+            mask = pred == cls
+            correct = float(((pred == y_valid) & mask).sum())
+            total = float(mask.sum())
+            tables[s, cls] = (correct + alpha * global_acc[s]) / (total + alpha)
+    return tables
+
+
+def reliability_fusion_prob(
+    probs: List[np.ndarray],
+    tables: np.ndarray,
+    reliability_power: float,
+    confidence_power: float,
+    min_weight: float,
+    temperature: float,
+) -> np.ndarray:
+    eps = 1e-12
+    source_weights = []
+    for s, prob in enumerate(probs):
+        pred, conf, _ = confidence_features(prob)
+        reliability = tables[s, pred]
+        score = np.power(np.clip(reliability, eps, 1.0), reliability_power)
+        if confidence_power != 0:
+            score = score * np.power(np.clip(conf, eps, 1.0), confidence_power)
+        source_weights.append(score)
+    weights = np.stack(source_weights, axis=1)
+    if temperature != 1.0:
+        weights = np.power(np.clip(weights, eps, None), 1.0 / max(temperature, eps))
+    if min_weight > 0:
+        weights = weights + min_weight
+    weights = weights / np.maximum(weights.sum(axis=1, keepdims=True), eps)
+    fused = np.zeros_like(probs[0], dtype=np.float64)
+    for s, prob in enumerate(probs):
+        fused += weights[:, s : s + 1] * prob
+    return normalize_prob(fused)
+
+
 def threshold_switch_selector(
     base_prob: np.ndarray,
     expert_prob: np.ndarray,
@@ -173,6 +217,10 @@ def main() -> None:
     ap.add_argument("--base_conf_max_grid", default="1,0.85,0.7,0.55,0.4")
     ap.add_argument("--delta_conf_grid", default="-1,0,0.05,0.1,0.2")
     ap.add_argument("--delta_margin_grid", default="-1,0,0.05,0.1,0.2")
+    ap.add_argument("--reliability_power_grid", default="1,2,4")
+    ap.add_argument("--confidence_power_grid", default="0,0.5,1,2")
+    ap.add_argument("--reliability_min_weight_grid", default="0,0.02,0.05")
+    ap.add_argument("--reliability_temperature_grid", default="0.5,1,2")
     ap.add_argument("--output_smooth", type=float, default=0.0, help="Optional one-hot smoothing for selected predictions.")
     ap.add_argument("--min_valid_gain_over_base", type=float, default=0.0, help="Fallback to the first input unless the selected validation metric improves by at least this amount.")
     ap.add_argument("--print_all_candidates", action="store_true", help="Print every validation selector candidate.")
@@ -205,9 +253,20 @@ def main() -> None:
     best = None
     base_candidate = None
 
-    def add_candidate(name: str, config: Dict[str, Any], valid_source: np.ndarray, test_source: np.ndarray) -> None:
+    def add_prob_candidate(
+        name: str,
+        config: Dict[str, Any],
+        valid_prob: np.ndarray,
+        test_prob: np.ndarray,
+        valid_source: np.ndarray | None = None,
+        test_source: np.ndarray | None = None,
+    ) -> None:
         nonlocal best, base_candidate
-        valid_prob = selected_prob_from_sources(valid_probs, valid_source, args.output_smooth)
+        valid_prob = normalize_prob(valid_prob)
+        test_prob = normalize_prob(test_prob)
+        if args.output_smooth > 0:
+            valid_prob = one_hot_prob(valid_prob.argmax(axis=1).astype(np.int64), valid_prob.shape[1], args.output_smooth)
+            test_prob = one_hot_prob(test_prob.argmax(axis=1).astype(np.int64), test_prob.shape[1], args.output_smooth)
         valid_pred = valid_prob.argmax(axis=1).astype(np.int64)
         metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
         row = {"strategy": name, "config": config, "metrics": metrics}
@@ -215,10 +274,19 @@ def main() -> None:
         if args.print_all_candidates:
             print("valid_selector", json.dumps(row, sort_keys=True))
         key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+        if valid_source is None:
+            valid_source = np.full(len(y_valid_ref), -1, dtype=np.int64)
+        if test_source is None:
+            test_source = np.full(len(y_test_ref), -1, dtype=np.int64)
         if best is None or key > best[0]:
-            best = (key, row, valid_source.copy(), test_source.copy(), valid_prob)
+            best = (key, row, valid_source.copy(), test_source.copy(), valid_prob, test_prob)
         if name == "always" and config.get("source") == named_payloads[0][0]:
-            base_candidate = (key, row, valid_source.copy(), test_source.copy(), valid_prob)
+            base_candidate = (key, row, valid_source.copy(), test_source.copy(), valid_prob, test_prob)
+
+    def add_candidate(name: str, config: Dict[str, Any], valid_source: np.ndarray, test_source: np.ndarray) -> None:
+        valid_prob = selected_prob_from_sources(valid_probs, valid_source, args.output_smooth)
+        test_prob = selected_prob_from_sources(test_probs, test_source, args.output_smooth)
+        add_prob_candidate(name, config, valid_prob, test_prob, valid_source, test_source)
 
     if "always" in strategies:
         for src, (name, _, _) in enumerate(named_payloads):
@@ -232,6 +300,42 @@ def main() -> None:
                 valid_src = class_precision_selector(valid_probs, y_valid_ref, valid_probs, alpha, margin)
                 test_src = class_precision_selector(valid_probs, y_valid_ref, test_probs, alpha, margin)
                 add_candidate("class_precision", {"alpha": alpha, "metric_margin": margin}, valid_src, test_src)
+
+    if "reliability_fusion" in strategies:
+        for alpha in parse_float_list(args.alpha_grid):
+            tables = reliability_tables(valid_probs, y_valid_ref, alpha)
+            for reliability_power in parse_float_list(args.reliability_power_grid):
+                for confidence_power in parse_float_list(args.confidence_power_grid):
+                    for min_weight in parse_float_list(args.reliability_min_weight_grid):
+                        for temperature in parse_float_list(args.reliability_temperature_grid):
+                            valid_prob = reliability_fusion_prob(
+                                valid_probs,
+                                tables,
+                                reliability_power=reliability_power,
+                                confidence_power=confidence_power,
+                                min_weight=min_weight,
+                                temperature=temperature,
+                            )
+                            test_prob = reliability_fusion_prob(
+                                test_probs,
+                                tables,
+                                reliability_power=reliability_power,
+                                confidence_power=confidence_power,
+                                min_weight=min_weight,
+                                temperature=temperature,
+                            )
+                            add_prob_candidate(
+                                "reliability_fusion",
+                                {
+                                    "alpha": alpha,
+                                    "reliability_power": reliability_power,
+                                    "confidence_power": confidence_power,
+                                    "min_weight": min_weight,
+                                    "temperature": temperature,
+                                },
+                                valid_prob,
+                                test_prob,
+                            )
 
     if "threshold_switch" in strategies and len(valid_probs) > 1:
         conf_grid = parse_float_list(args.expert_conf_grid)
@@ -278,7 +382,8 @@ def main() -> None:
         metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
         row = {"strategy": "always", "config": {"source": named_payloads[0][0]}, "metrics": metrics}
         key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
-        base_candidate = (key, row, valid_src, test_src, valid_prob)
+        test_prob = selected_prob_from_sources(test_probs, test_src, args.output_smooth)
+        base_candidate = (key, row, valid_src, test_src, valid_prob, test_prob)
 
     selected_gain = best[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric]
     if selected_gain < args.min_valid_gain_over_base:
@@ -288,10 +393,9 @@ def main() -> None:
             "min_valid_gain_over_base": args.min_valid_gain_over_base,
             "rejected": best[1],
         }
-        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4])
+        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
 
-    _, selected, selected_valid_source, selected_test_source, selected_valid_prob = best
-    selected_test_prob = selected_prob_from_sources(test_probs, selected_test_source, args.output_smooth)
+    _, selected, selected_valid_source, selected_test_source, selected_valid_prob, selected_test_prob = best
     test_pred = selected_test_prob.argmax(axis=1).astype(np.int64)
     test_metrics = compute_metrics(y_test_ref.tolist(), test_pred.tolist())
     print("selected_selector", json.dumps(selected, sort_keys=True))
