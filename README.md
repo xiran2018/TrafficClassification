@@ -1925,6 +1925,26 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/recommended_suite_plan.json
 ```
 
+For the full autonomous research loop, use the wrapper below. It first regenerates the recommendation, framework, and ablation reports, checks the VPN/TLS target gates, and stops when the current results already satisfy the goal. If the gates are not met, or if `--continue_after_targets` is set, it calls the recommended suite and records a loop ledger:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_autonomous_research_loop.py \
+    --max_iters 1 \
+    --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
+```
+
+To keep searching for higher accuracy in the real A800 environment even after the current VPN/TLS targets pass:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_autonomous_research_loop.py \
+    --execute \
+    --continue_after_targets \
+    --max_iters 3 \
+    --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
+```
+
 The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. The final selector output is:
 
 ```text
