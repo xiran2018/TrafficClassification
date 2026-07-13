@@ -2019,6 +2019,15 @@ Current ablation table:
 | ustc-app | safe selector | 0.7000 | +0.0500 | 0.6250 | +0.0500 | class_precision:a=0.5 | class-precision gate |
 ```
 
+Paired bootstrap delta vs each dataset baseline with 300 resamples:
+
+```text
+vpn unsafe reliability fusion:     delta acc CI [-0.0676, -0.0395], delta macro-F1 CI [-0.1125, -0.0735]
+vpn calibration-enabled selector:  delta acc CI [-0.0206, -0.0090], delta macro-F1 CI [-0.0449, -0.0182]
+tls tolerant safe selector:        delta acc CI [-0.0011, +0.0010], delta macro-F1 CI [-0.0010, +0.0012]
+ustc safe selector:                delta acc CI [0.0000, +0.1500], delta macro-F1 CI [0.0000, +0.1331]
+```
+
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
 
 ```bash
