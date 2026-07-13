@@ -1802,6 +1802,31 @@ Current generated table:
 | ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
 ```
 
+Generate the paper ablation table:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python make_paper_ablation_report.py \
+    --output_json reasoningDataset/paper_ablation_report.json \
+    --output_md reasoningDataset/paper_ablation_report.md
+```
+
+Current ablation table:
+
+```text
+| Dataset | Stage | Accuracy | Delta Acc | Macro-F1 | Delta F1 | Selector/Fusion | Note |
+|---|---|---:|---:|---:|---:|---|---|
+| vpn-app | base constrained ensemble | 0.7488 | 0.0000 | 0.7558 | 0.0000 | best=0.91, emb_et=0.09 | strong base |
+| vpn-app | unsafe reliability fusion | 0.6956 | -0.0532 | 0.6633 | -0.0924 | reliability_fusion | validation gain, target shift |
+| vpn-app | safe selector | 0.7488 | 0.0000 | 0.7558 | 0.0000 | fallback; reject reliability_fusion | target-shift fallback |
+| tls-120 | graph/seq base | 0.7909 | 0.0000 | 0.7769 | 0.0000 | graph=0.65, seq=0.35 | strong base |
+| tls-120 | strict safe selector | 0.7909 | 0.0000 | 0.7769 | 0.0000 | fallback; reject threshold_switch | strict bootstrap fallback |
+| tls-120 | tolerant safe selector | 0.7909 | 0.0000 | 0.7772 | +0.0003 | threshold_switch:seq | low-shift seq switch |
+| ustc-app | base residual | 0.6500 | 0.0000 | 0.5750 | 0.0000 | base=0.91, prior=0.09 | base |
+| ustc-app | proto embedding expert | 0.6500 | 0.0000 | 0.6083 | +0.0333 | - | Tower-1 prototype |
+| ustc-app | safe selector | 0.7000 | +0.0500 | 0.6250 | +0.0500 | class_precision:a=0.5 | class-precision gate |
+```
+
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
 
 ```bash
