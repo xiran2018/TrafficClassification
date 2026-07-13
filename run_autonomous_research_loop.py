@@ -13,6 +13,64 @@ from recommend_next_experiment import cuda_summary
 from summarize_experiment_results import DEFAULT_TARGETS, collect_dataset, parse_target
 
 
+VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
+    "none": [
+        {
+            "name": "default",
+            "paired_view_weight": 0.2,
+            "paired_consistency_weight": 0.1,
+            "consistency_weight": 0.05,
+            "meta_dropout_prob": 0.1,
+            "embedding_dropout_prob": 0.05,
+            "window_dropout_prob": 0.1,
+            "edge_attr_dropout_prob": 0.1,
+        }
+    ],
+    "stage8_balanced": [
+        {
+            "name": "default_balanced",
+            "paired_view_weight": 0.2,
+            "paired_consistency_weight": 0.1,
+            "consistency_weight": 0.05,
+            "meta_dropout_prob": 0.1,
+            "embedding_dropout_prob": 0.05,
+            "window_dropout_prob": 0.1,
+            "edge_attr_dropout_prob": 0.1,
+        },
+        {
+            "name": "stronger_invariance",
+            "paired_view_weight": 0.1,
+            "paired_consistency_weight": 0.15,
+            "consistency_weight": 0.1,
+            "meta_dropout_prob": 0.2,
+            "embedding_dropout_prob": 0.1,
+            "window_dropout_prob": 0.15,
+            "edge_attr_dropout_prob": 0.15,
+        },
+        {
+            "name": "higher_paired_view",
+            "paired_view_weight": 0.3,
+            "paired_consistency_weight": 0.1,
+            "consistency_weight": 0.05,
+            "meta_dropout_prob": 0.1,
+            "embedding_dropout_prob": 0.05,
+            "window_dropout_prob": 0.1,
+            "edge_attr_dropout_prob": 0.1,
+        },
+        {
+            "name": "dropout_regularized",
+            "paired_view_weight": 0.15,
+            "paired_consistency_weight": 0.1,
+            "consistency_weight": 0.05,
+            "meta_dropout_prob": 0.25,
+            "embedding_dropout_prob": 0.1,
+            "window_dropout_prob": 0.2,
+            "edge_attr_dropout_prob": 0.2,
+        },
+    ],
+}
+
+
 def split_csv(raw: str) -> List[str]:
     out: List[str] = []
     for item in raw.split(","):
@@ -172,7 +230,12 @@ def iteration_run_tag(args, iteration: int) -> str:
         raise ValueError(f"Invalid --run_tag_template={args.run_tag_template!r}: {exc}") from exc
 
 
-def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str) -> List[str]:
+def iteration_variant(args, iteration: int) -> Dict[str, Any]:
+    variants = VARIANT_SCHEDULES[args.variant_schedule]
+    return dict(variants[(iteration - 1) % len(variants)])
+
+
+def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: Dict[str, Any]) -> List[str]:
     cmd = [
         "python",
         "run_recommended_suite.py",
@@ -186,6 +249,20 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str) -> List[s
         str(args.tower2_epochs),
         "--tower2_early_stop_patience",
         str(args.tower2_early_stop_patience),
+        "--paired_view_weight",
+        str(variant["paired_view_weight"]),
+        "--paired_consistency_weight",
+        str(variant["paired_consistency_weight"]),
+        "--consistency_weight",
+        str(variant["consistency_weight"]),
+        "--meta_dropout_prob",
+        str(variant["meta_dropout_prob"]),
+        "--embedding_dropout_prob",
+        str(variant["embedding_dropout_prob"]),
+        "--window_dropout_prob",
+        str(variant["window_dropout_prob"]),
+        "--edge_attr_dropout_prob",
+        str(variant["edge_attr_dropout_prob"]),
         "--output_json",
         str(Path(args.suite_output_dir) / f"recommended_suite_plan_iter{iteration:02d}.json"),
     ]
@@ -213,6 +290,7 @@ def load_suite_summary(cmd: List[str]) -> Dict[str, Any]:
         "execute",
         "materialize_child_plans",
         "dataset_status",
+        "experiment_config",
         "commands",
         "child_plans",
         "command_results",
@@ -277,6 +355,12 @@ def main() -> None:
     ap.add_argument("--model_types", default="graph,seq")
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
+    ap.add_argument(
+        "--variant_schedule",
+        choices=sorted(VARIANT_SCHEDULES),
+        default="stage8_balanced",
+        help="Stage-8 training hyperparameter schedule used across autonomous-loop iterations.",
+    )
     ap.add_argument("--suite_output_dir", default="reasoningDataset/autonomous_loop")
     ap.add_argument("--output_json", default="reasoningDataset/autonomous_loop/research_loop_ledger.json")
     args = ap.parse_args()
@@ -301,6 +385,7 @@ def main() -> None:
         "require_ci_targets": bool(args.require_ci_targets),
         "run_tag": args.run_tag,
         "run_tag_template": args.run_tag_template,
+        "variant_schedule": args.variant_schedule,
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
@@ -308,6 +393,7 @@ def main() -> None:
 
     for iteration in range(1, args.max_iters + 1):
         run_tag = iteration_run_tag(args, iteration)
+        variant = iteration_variant(args, iteration)
         before = dataset_status(datasets, targets)
         commands = []
         for cmd in report_commands(args, datasets):
@@ -335,6 +421,7 @@ def main() -> None:
             "ci_targets_met_before": ci_targets_met,
             "ready_to_stop_before": ready_to_stop,
             "run_tag": run_tag,
+            "variant": variant,
             "commands": commands,
         }
         if ready_to_stop and not args.continue_after_targets:
@@ -344,7 +431,7 @@ def main() -> None:
             write_ledger(args, ledger)
             return
 
-        suite_command = suite_cmd(args, datasets, iteration, run_tag)
+        suite_command = suite_cmd(args, datasets, iteration, run_tag, variant)
         suite_result = run_cmd(suite_command, execute=True)
         record["commands"].append(suite_result)
         record["suite_summary"] = load_suite_summary(suite_command)

@@ -54,6 +54,20 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         str(args.tower2_epochs),
         "--tower2_early_stop_patience",
         str(args.tower2_early_stop_patience),
+        "--paired_view_weight",
+        str(args.paired_view_weight),
+        "--paired_consistency_weight",
+        str(args.paired_consistency_weight),
+        "--consistency_weight",
+        str(args.consistency_weight),
+        "--meta_dropout_prob",
+        str(args.meta_dropout_prob),
+        "--embedding_dropout_prob",
+        str(args.embedding_dropout_prob),
+        "--window_dropout_prob",
+        str(args.window_dropout_prob),
+        "--edge_attr_dropout_prob",
+        str(args.edge_attr_dropout_prob),
         "--plan_json",
         str(Path("reasoningDataset") / dataset / f"recommended_experiment_plan_{args.run_tag}.json"),
     ]
@@ -96,6 +110,7 @@ def child_plan_summary(dataset: str, cmd: List[str]) -> Dict[str, Any]:
         "base_selector_input",
         "paired_prior_output",
         "final_selector_output",
+        "experiment_config",
     ]:
         if key in data:
             summary[key] = data[key]
@@ -136,6 +151,18 @@ def write_suite_plan(
         "materialize_child_plans": bool(args.materialize_child_plans),
         "run_tag": args.run_tag,
         "model_types": args.model_types,
+        "experiment_config": {
+            "paired_view_weight": args.paired_view_weight,
+            "paired_consistency_weight": args.paired_consistency_weight,
+            "consistency_weight": args.consistency_weight,
+            "meta_dropout_prob": args.meta_dropout_prob,
+            "embedding_dropout_prob": args.embedding_dropout_prob,
+            "window_dropout_prob": args.window_dropout_prob,
+            "edge_attr_dropout_prob": args.edge_attr_dropout_prob,
+            "tower2_epochs": args.tower2_epochs,
+            "tower2_early_stop_patience": args.tower2_early_stop_patience,
+            "model_types": args.model_types,
+        },
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
         "commands": [
@@ -163,6 +190,13 @@ def main() -> None:
     ap.add_argument("--model_types", default="graph,seq")
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
+    ap.add_argument("--paired_view_weight", type=float, default=0.2)
+    ap.add_argument("--paired_consistency_weight", type=float, default=0.1)
+    ap.add_argument("--consistency_weight", type=float, default=0.05)
+    ap.add_argument("--meta_dropout_prob", type=float, default=0.1)
+    ap.add_argument("--embedding_dropout_prob", type=float, default=0.05)
+    ap.add_argument("--window_dropout_prob", type=float, default=0.1)
+    ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument(
         "--materialize_child_plans",

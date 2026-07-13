@@ -1984,12 +1984,13 @@ conda run --no-capture-output -n llm-factory \
     --execute \
     --continue_after_targets \
     --require_ci_targets \
+    --variant_schedule stage8_balanced \
     --run_tag_template '{run_tag}_iter{iteration:02d}' \
     --max_iters 3 \
     --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
 ```
 
-Use `--run_tag_template '{run_tag}_iter{iteration:02d}'` for multi-iteration searches so each loop writes a fresh Stage-8 run instead of reusing old `skip_existing` outputs. The wrapper records the concrete per-iteration run tag in the loop ledger. After each suite run, the loop ledger also embeds the suite `child_plans` summary, including every dataset's child plan JSON, paired-prior output, final-selector output, skipped stages, and CUDA-required stages. The `best_delta` field compares each dataset's best test metric before and after the iteration, so new-best runs are visible without manually scanning all result JSON files.
+Use `--run_tag_template '{run_tag}_iter{iteration:02d}'` for multi-iteration searches so each loop writes a fresh Stage-8 run instead of reusing old `skip_existing` outputs. The default `--variant_schedule stage8_balanced` keeps iteration 1 at the current balanced Stage-8 setting, then cycles through stronger paired-view consistency, higher paired-view CE weight, and stronger Tower-2 dropout regularization. This makes multi-iteration runs search real model/training variants instead of only changing output directories. The wrapper records the concrete per-iteration run tag and variant in the loop ledger. After each suite run, the loop ledger also embeds the suite `child_plans` summary, including every dataset's child plan JSON, paired-prior output, final-selector output, skipped stages, CUDA-required stages, and `experiment_config`. The `best_delta` field compares each dataset's best test metric before and after the iteration, so new-best runs are visible without manually scanning all result JSON files.
 
 The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with the current iteration's run tag, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. With the run-tag template above, the final selector output for iteration 1 is:
 
