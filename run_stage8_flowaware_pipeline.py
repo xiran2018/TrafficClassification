@@ -69,6 +69,13 @@ def train_label_map(args) -> str:
     return f"{train_tower1_dir(args)}/label_map.json"
 
 
+def result_suffix(args) -> str:
+    suffix = f"{args.embedding_suffix}_stage8_flowaware"
+    if args.run_tag:
+        suffix += f"_{safe_name(args.run_tag)}"
+    return suffix
+
+
 def tower1_train_cmd(args) -> List[str]:
     cmd = [
         py(),
@@ -223,7 +230,7 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         "--valid_dataset",
         f"reasoningDataset/{args.dataset}/valid_tower2_{args.embedding_suffix}/{model_type}_dataset.pt",
         "--output_dir",
-        f"checkpoints/tower2_{model_type}_flow_{safe_name(args.dataset)}_{args.embedding_suffix}_stage8_flowaware",
+        f"checkpoints/tower2_{model_type}_flow_{safe_name(args.dataset)}_{result_suffix(args)}",
         "--num_classes",
         str(args.num_classes),
         "--epochs",
@@ -320,24 +327,24 @@ def tower2_eval_cmd(args, model_type: str, split: str) -> List[str]:
         py(),
         "test_tower2.py",
         "--checkpoint",
-        f"checkpoints/tower2_{model_type}_flow_{safe_name(args.dataset)}_{args.embedding_suffix}_stage8_flowaware/best.pt",
+        f"checkpoints/tower2_{model_type}_flow_{safe_name(args.dataset)}_{result_suffix(args)}/best.pt",
         "--dataset",
         f"reasoningDataset/{args.dataset}/{split}_tower2_{args.embedding_suffix}/{model_type}_dataset.pt",
         "--label_map",
         train_label_map(args),
         "--output_json",
-        f"reasoningDataset/{args.dataset}/{prefix}_{model_type}_metrics_flow_{args.embedding_suffix}_stage8_flowaware_probs.json",
+        f"reasoningDataset/{args.dataset}/{prefix}_{model_type}_metrics_flow_{result_suffix(args)}_probs.json",
         "--no_report",
     ]
 
 
 def model_prob_path(args, model_type: str, split: str) -> str:
     prefix = "valid" if split == "valid" else "test"
-    return f"reasoningDataset/{args.dataset}/{prefix}_{model_type}_metrics_flow_{args.embedding_suffix}_stage8_flowaware_probs.json"
+    return f"reasoningDataset/{args.dataset}/{prefix}_{model_type}_metrics_flow_{result_suffix(args)}_probs.json"
 
 
 def fusion_payload_path(args, model_type: str) -> str:
-    return f"reasoningDataset/{args.dataset}/{model_type}_metrics_flow_{args.embedding_suffix}_stage8_flowaware_fusion_payload.json"
+    return f"reasoningDataset/{args.dataset}/{model_type}_metrics_flow_{result_suffix(args)}_fusion_payload.json"
 
 
 def make_fusion_payload_cmd(args, model_type: str) -> List[str]:
@@ -378,15 +385,15 @@ def fusion_cmd(args) -> List[str]:
 
 
 def fusion_output_path(args) -> str:
-    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_valid_acc.json"
+    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_valid_acc.json"
 
 
 def prior_candidate_output_path(args) -> str:
-    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_safe_prior_candidate.json"
+    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_safe_prior_candidate.json"
 
 
 def safe_prior_output_path(args) -> str:
-    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{args.embedding_suffix}_stage8_flowaware_safe_prior_residual.json"
+    return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_safe_prior_residual.json"
 
 
 def prior_cmd(args) -> List[str]:
@@ -462,7 +469,7 @@ def write_manifest(args) -> None:
     payload = vars(args).copy()
     payload["splits"] = selected_splits(args.splits)
     payload["cuda_available_at_launch"] = cuda_available()
-    with open(root / f"stage8_flowaware_manifest_{args.embedding_suffix}.json", "w", encoding="utf-8") as f:
+    with open(root / f"stage8_flowaware_manifest_{result_suffix(args)}.json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
@@ -509,6 +516,7 @@ def main() -> None:
     ap.add_argument("--output_suffix", default="flowaware_change_weight")
     ap.add_argument("--tower1_data_suffix", default="", help="Tower-1 train/eval label-map suffix. Defaults to --source_suffix after dataset-specific normalization.")
     ap.add_argument("--embedding_suffix", default="rawproj_flowaware_change_weight")
+    ap.add_argument("--run_tag", default="", help="Optional suffix appended to Stage-8 training/eval/fusion outputs, useful for ablations.")
     ap.add_argument("--tower1_output_dir", default=default_tower1_output_dir)
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--max_packets_per_flow", type=int, default=64)

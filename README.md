@@ -1750,6 +1750,7 @@ conda run --no-capture-output -n llm-factory \
     --num_classes 16 \
     --stage tower2_train \
     --embedding_suffix rawproj_flowaware_change_weight \
+    --run_tag paired_ipport \
     --paired_embedding_suffix rawproj_flowaware_ipport_rand_change_weight \
     --paired_view_weight 0.2 \
     --paired_consistency_weight 0.1 \
@@ -1762,6 +1763,28 @@ conda run --no-capture-output -n llm-factory \
 ```
 
 Use the same command shape for TLS-120 and USTC by changing `--dataset`, `--num_classes`, and the suffixes. This is the preferred paper-facing experiment over additional probability-level tuning because it tests whether endpoint-invariant representations improve flow classification before the validation-gated selector stage.
+
+CPU-feasible probes on the old `rawproj_change_weight` embeddings show that paired-view regularization alone is not enough; it should be paired with fresh Stage-8 Tower-1 flow-aware embeddings before being considered a final method:
+
+```text
+paired CE + consistency seq probe:
+  test file: reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_stage8_flowaware_paired_ipport_oldview_seqprobe_probs.json
+  test flow accuracy = 0.6376
+  test flow macro-F1 = 0.5961
+
+consistency-only seq probe:
+  test file: reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_stage8_flowaware_paired_ipport_consistency_seqprobe_probs.json
+  test flow accuracy = 0.6465
+  test flow macro-F1 = 0.5936
+
+best + paired seq constrained residual fusion:
+  test file: reasoningDataset/vpn-app/test_fusion_best_paired_seqprobe_minbase90_valid_acc.json
+  selected weights: base=0.91, paired_seq=0.09
+  test flow accuracy = 0.7482
+  test flow macro-F1 = 0.7534
+```
+
+Interpretation: the paired-view idea is still useful as a paper module, but the old embeddings are not view-aligned enough for Tower-2-only regularization to help. Treat these results as negative ablations. The next real run should regenerate paired `rawproj_flowaware_*` embeddings from the Stage-8 Tower-1 checkpoint on the real A800 environment, then rerun the same `--run_tag paired_ipport` training/eval/fusion path.
 
 The runner's `prior` stage now implements the paper-safe residual calibration path by default:
 
