@@ -1562,6 +1562,12 @@ Flow-embedding expert from step_150 embeddings:
   flow accuracy = 0.6500
   flow macro-F1 = 0.6083
 
+Flow-embedding expert from step_200 embeddings:
+  reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step200_message_header_ports_valid_macro.json
+  valid selected logreg, n_components=12, C=0.03
+  flow accuracy = 0.6000
+  flow macro-F1 = 0.5083
+
 Residual fusion with the previous best:
   reasoningDataset/ustc-app/test_fusion_ustc_step150_base_flowproto_full_s200_w002_step150_residual_macro.json
   selected weights: base=0.85, proto_emb=0.15, proto_gs=0.0
@@ -1569,7 +1575,7 @@ Residual fusion with the previous best:
   flow macro-F1 = 0.5750
 ```
 
-Interpretation: full-schedule prototype learning did not increase USTC accuracy, but it improved the best single-result macro-F1 from `0.5750` to `0.6083`. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated residual fusion prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
+Interpretation: full-schedule prototype learning did not increase USTC accuracy, but it improved the best single-result macro-F1 from `0.5750` to `0.6083`. The final `step_200` checkpoint overfits the tiny validation split and drops on test, so downstream validation-aware checkpoint selection remains necessary. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated residual fusion prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
