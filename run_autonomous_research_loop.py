@@ -30,6 +30,13 @@ def run_cmd(cmd: List[str], execute: bool = True) -> Dict[str, Any]:
     return {"cmd": cmd, "returncode": int(proc.returncode), "skipped": False}
 
 
+def cmd_value(cmd: List[str], flag: str) -> str:
+    if flag not in cmd:
+        return ""
+    idx = cmd.index(flag) + 1
+    return cmd[idx] if idx < len(cmd) else ""
+
+
 def target_map(overrides: List[str]) -> Dict[str, Tuple[float, float]]:
     targets = DEFAULT_TARGETS.copy()
     for raw in overrides:
@@ -160,6 +167,30 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str) -> List[s
     return cmd
 
 
+def load_suite_summary(cmd: List[str]) -> Dict[str, Any]:
+    path = cmd_value(cmd, "--output_json")
+    summary: Dict[str, Any] = {"output_json": path, "exists": bool(path and Path(path).exists())}
+    if not summary["exists"]:
+        return summary
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        summary["error"] = str(exc)
+        return summary
+    for key in [
+        "run_tag",
+        "execute",
+        "materialize_child_plans",
+        "dataset_status",
+        "commands",
+        "child_plans",
+        "command_results",
+    ]:
+        if key in data:
+            summary[key] = data[key]
+    return summary
+
+
 def load_framework_consistency() -> Dict[str, Any] | None:
     path = Path("reasoningDataset/paper_framework_report.json")
     if not path.exists():
@@ -282,8 +313,10 @@ def main() -> None:
             write_ledger(args, ledger)
             return
 
-        suite_result = run_cmd(suite_cmd(args, datasets, iteration, run_tag), execute=True)
+        suite_command = suite_cmd(args, datasets, iteration, run_tag)
+        suite_result = run_cmd(suite_command, execute=True)
         record["commands"].append(suite_result)
+        record["suite_summary"] = load_suite_summary(suite_command)
         if suite_result["returncode"] and not args.continue_on_error:
             ledger["iterations"].append(record)
             ledger["stop_reason"] = "suite_failed"
