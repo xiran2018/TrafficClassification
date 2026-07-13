@@ -10,19 +10,19 @@ from typing import Any, Dict, List, Tuple
 DEFAULT_RESULTS = [
     (
         "vpn-app",
-        "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_bootstrap_shift_tol001_valid_macro.json",
+        "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
         0.74,
         0.65,
     ),
     (
         "tls-120",
-        "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_bootstrap_shift_tol001_valid_macro.json",
+        "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json",
         0.78,
         0.70,
     ),
     (
         "ustc-app",
-        "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_bootstrap_shift_tol001_valid_macro.json",
+        "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
         None,
         None,
     ),
@@ -59,14 +59,20 @@ def selector_summary(selected: Dict[str, Any]) -> str:
         rejected = fallback.get("rejected", {})
         rejected_strategy = rejected.get("strategy", "-")
         source = config.get("source", "base")
-        shift = fallback.get("target_shift_guard", {})
-        boot = fallback.get("bootstrap_guard", {})
+        first_rejection = {}
+        if fallback.get("rejected_candidates"):
+            first_rejection = fallback["rejected_candidates"][0]
+            rejected = first_rejection.get("rejected", rejected)
+            rejected_strategy = rejected.get("strategy", rejected_strategy)
+        carrier = first_rejection if first_rejection else fallback
+        shift = carrier.get("target_shift_guard", {})
+        boot = carrier.get("bootstrap_guard", {})
         reasons = []
-        if "max_prediction_change_rate" in fallback:
+        if "max_prediction_change_rate" in carrier:
             reasons.append(
-                f"target_change={format_float(shift.get('prediction_change_rate'))}>{format_float(fallback.get('max_prediction_change_rate'))}"
+                f"target_change={format_float(shift.get('prediction_change_rate'))}>{format_float(carrier.get('max_prediction_change_rate'))}"
             )
-        if "bootstrap_min_gain_quantile" in fallback:
+        if "bootstrap_min_gain_quantile" in carrier and carrier.get("reject_reasons", {}).get("bootstrap", True):
             reasons.append(f"boot_q={format_float(boot.get('gain_quantile'))}<0")
         if not reasons and "min_valid_gain_over_base" in fallback:
             reasons.append(
@@ -91,6 +97,8 @@ def selector_summary(selected: Dict[str, Any]) -> str:
 def guard_summary(selected: Dict[str, Any]) -> str:
     fallback = selected.get("fallback_reason")
     carrier = fallback if fallback else selected
+    if fallback and fallback.get("rejected_candidates"):
+        carrier = fallback["rejected_candidates"][0]
     boot = carrier.get("bootstrap_guard", {})
     shift = carrier.get("target_shift_guard", {})
     parts = []
