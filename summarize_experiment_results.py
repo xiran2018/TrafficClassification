@@ -15,6 +15,8 @@ DEFAULT_TARGETS = {
     "tls": (0.78, 0.70),
 }
 
+RANK_METRICS = ("accuracy", "macro_f1", "balanced", "target_margin")
+
 
 def parse_target(raw: str) -> Tuple[str, float, float]:
     parts = raw.split(":")
@@ -59,7 +61,35 @@ def iter_result_files(root: Path, patterns: Iterable[str]) -> Iterable[Path]:
             yield path
 
 
-def collect_dataset(dataset: str, patterns: List[str]) -> List[Dict[str, Any]]:
+def result_rank_key(row: Dict[str, Any], rank_metric: str = "accuracy", target: Tuple[float, float] | None = None) -> Tuple[Any, ...]:
+    acc = float(row.get("accuracy") or 0.0)
+    macro_f1 = float(row.get("macro_f1") or 0.0)
+    path = str(row.get("path") or "")
+    if rank_metric == "accuracy":
+        return (acc, macro_f1, path)
+    if rank_metric == "macro_f1":
+        return (macro_f1, acc, path)
+    if rank_metric == "balanced":
+        return ((acc + macro_f1) / 2.0, acc, macro_f1, path)
+    if rank_metric == "target_margin":
+        if target is None:
+            return ((acc + macro_f1) / 2.0, acc, macro_f1, path)
+        acc_margin = acc - target[0]
+        f1_margin = macro_f1 - target[1]
+        return (min(acc_margin, f1_margin), acc_margin + f1_margin, acc, macro_f1, path)
+    raise ValueError(f"Unknown rank_metric={rank_metric}; choose one of {', '.join(RANK_METRICS)}")
+
+
+def sort_results(rows: List[Dict[str, Any]], rank_metric: str = "accuracy", target: Tuple[float, float] | None = None) -> List[Dict[str, Any]]:
+    return sorted(rows, key=lambda row: result_rank_key(row, rank_metric, target), reverse=True)
+
+
+def collect_dataset(
+    dataset: str,
+    patterns: List[str],
+    rank_metric: str = "accuracy",
+    target: Tuple[float, float] | None = None,
+) -> List[Dict[str, Any]]:
     root = Path("reasoningDataset") / dataset
     rows = []
     if not root.exists():
@@ -81,8 +111,7 @@ def collect_dataset(dataset: str, patterns: List[str]) -> List[Dict[str, Any]]:
                 "num_flows": len(data.get("flow_y_true", [])),
             }
         )
-    rows.sort(key=lambda row: (row["accuracy"], row["macro_f1"] or -1.0, row["path"]), reverse=True)
-    return rows
+    return sort_results(rows, rank_metric, target)
 
 
 def main() -> None:
@@ -90,6 +119,7 @@ def main() -> None:
     ap.add_argument("--dataset", action="append", default=[], help="Dataset under reasoningDataset/. Can be repeated.")
     ap.add_argument("--target", action="append", default=[], help="Optional DATASET:ACC:MACRO_F1 target. Can be repeated.")
     ap.add_argument("--pattern", action="append", default=["test*.json"], help="Glob under each dataset directory. Can be repeated.")
+    ap.add_argument("--rank_metric", choices=RANK_METRICS, default="accuracy")
     ap.add_argument("--top_k", type=int, default=10)
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
@@ -102,9 +132,9 @@ def main() -> None:
 
     summary = []
     for dataset in datasets:
-        rows = collect_dataset(dataset, args.pattern)
-        best = rows[0] if rows else None
         target = targets.get(dataset)
+        rows = collect_dataset(dataset, args.pattern, args.rank_metric, target)
+        best = rows[0] if rows else None
         target_acc, target_f1 = target if target else (None, None)
         achieved = False
         if best and target:
@@ -113,6 +143,7 @@ def main() -> None:
             "dataset": dataset,
             "target_accuracy": target_acc,
             "target_macro_f1": target_f1,
+            "rank_metric": args.rank_metric,
             "achieved": achieved if target else None,
             "best": best,
             "top_results": rows[: args.top_k],
@@ -121,6 +152,7 @@ def main() -> None:
         summary.append(item)
 
         print(f"\n[{dataset}] results={len(rows)}")
+        print(f"rank_metric={args.rank_metric}")
         if target:
             status = "PASS" if achieved else "MISS"
             print(f"target acc>={target_acc:.4f} macro_f1>={target_f1:.4f}: {status}")

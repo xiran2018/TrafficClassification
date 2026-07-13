@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from recommend_next_experiment import cuda_summary
-from summarize_experiment_results import DEFAULT_TARGETS, collect_dataset, parse_target
+from summarize_experiment_results import DEFAULT_TARGETS, RANK_METRICS, collect_dataset, parse_target
 
 
 VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
@@ -108,12 +108,12 @@ def target_map(overrides: List[str]) -> Dict[str, Tuple[float, float]]:
     return targets
 
 
-def dataset_status(datasets: List[str], targets: Dict[str, Tuple[float, float]]) -> List[Dict[str, Any]]:
+def dataset_status(datasets: List[str], targets: Dict[str, Tuple[float, float]], rank_metric: str = "accuracy") -> List[Dict[str, Any]]:
     rows = []
     for dataset in datasets:
-        results = collect_dataset(dataset, ["test*.json"])
-        best = results[0] if results else None
         target = targets.get(dataset)
+        results = collect_dataset(dataset, ["test*.json"], rank_metric, target)
+        best = results[0] if results else None
         achieved = None
         if target and best:
             achieved = bool(best["accuracy"] >= target[0] and (best.get("macro_f1") or 0.0) >= target[1])
@@ -121,6 +121,7 @@ def dataset_status(datasets: List[str], targets: Dict[str, Tuple[float, float]])
             {
                 "dataset": dataset,
                 "target": None if target is None else {"accuracy": target[0], "macro_f1": target[1]},
+                "rank_metric": rank_metric,
                 "target_met": achieved,
                 "num_results": len(results),
                 "best": best,
@@ -368,6 +369,12 @@ def main() -> None:
         default="stage8_balanced",
         help="Stage-8 training hyperparameter schedule used across autonomous-loop iterations.",
     )
+    ap.add_argument(
+        "--status_rank_metric",
+        choices=RANK_METRICS,
+        default="accuracy",
+        help="Rank test JSONs for best before/after status by accuracy, macro_f1, balanced, or target_margin.",
+    )
     ap.add_argument("--suite_output_dir", default="reasoningDataset/autonomous_loop")
     ap.add_argument("--output_json", default="reasoningDataset/autonomous_loop/research_loop_ledger.json")
     args = ap.parse_args()
@@ -393,6 +400,7 @@ def main() -> None:
         "run_tag": args.run_tag,
         "run_tag_template": args.run_tag_template,
         "variant_schedule": args.variant_schedule,
+        "status_rank_metric": args.status_rank_metric,
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
@@ -401,7 +409,7 @@ def main() -> None:
     for iteration in range(1, args.max_iters + 1):
         run_tag = iteration_run_tag(args, iteration)
         variant = iteration_variant(args, iteration)
-        before = dataset_status(datasets, targets)
+        before = dataset_status(datasets, targets, args.status_rank_metric)
         commands = []
         for cmd in report_commands(args, datasets):
             result = run_cmd(cmd, execute=True)
@@ -462,7 +470,7 @@ def main() -> None:
 
         framework_after = load_framework_consistency()
         evidence_after = load_evidence_pack()
-        record["status_after"] = dataset_status(datasets, targets)
+        record["status_after"] = dataset_status(datasets, targets, args.status_rank_metric)
         record["best_delta"] = best_delta_summary(before, record["status_after"])
         record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
         record["framework_consistency_after"] = framework_after
