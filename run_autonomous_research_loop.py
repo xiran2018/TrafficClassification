@@ -24,6 +24,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "embedding_dropout_prob": 0.05,
             "window_dropout_prob": 0.1,
             "edge_attr_dropout_prob": 0.1,
+            "seed": 42,
         }
     ],
     "stage8_balanced": [
@@ -36,6 +37,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "embedding_dropout_prob": 0.05,
             "window_dropout_prob": 0.1,
             "edge_attr_dropout_prob": 0.1,
+            "seed": 42,
         },
         {
             "name": "stronger_invariance",
@@ -46,6 +48,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "embedding_dropout_prob": 0.1,
             "window_dropout_prob": 0.15,
             "edge_attr_dropout_prob": 0.15,
+            "seed": 43,
         },
         {
             "name": "higher_paired_view",
@@ -56,6 +59,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "embedding_dropout_prob": 0.05,
             "window_dropout_prob": 0.1,
             "edge_attr_dropout_prob": 0.1,
+            "seed": 44,
         },
         {
             "name": "dropout_regularized",
@@ -66,6 +70,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "embedding_dropout_prob": 0.1,
             "window_dropout_prob": 0.2,
             "edge_attr_dropout_prob": 0.2,
+            "seed": 45,
         },
     ],
 }
@@ -263,6 +268,8 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
         str(variant["window_dropout_prob"]),
         "--edge_attr_dropout_prob",
         str(variant["edge_attr_dropout_prob"]),
+        "--seed",
+        str(variant["seed"]),
         "--output_json",
         str(Path(args.suite_output_dir) / f"recommended_suite_plan_iter{iteration:02d}.json"),
     ]

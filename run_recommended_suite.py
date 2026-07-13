@@ -68,6 +68,8 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         str(args.window_dropout_prob),
         "--edge_attr_dropout_prob",
         str(args.edge_attr_dropout_prob),
+        "--seed",
+        str(args.seed),
         "--plan_json",
         str(Path("reasoningDataset") / dataset / f"recommended_experiment_plan_{args.run_tag}.json"),
     ]
@@ -162,6 +164,7 @@ def write_suite_plan(
             "tower2_epochs": args.tower2_epochs,
             "tower2_early_stop_patience": args.tower2_early_stop_patience,
             "model_types": args.model_types,
+            "seed": args.seed,
         },
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
@@ -197,6 +200,7 @@ def main() -> None:
     ap.add_argument("--embedding_dropout_prob", type=float, default=0.05)
     ap.add_argument("--window_dropout_prob", type=float, default=0.1)
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument(
         "--materialize_child_plans",
