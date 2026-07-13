@@ -1983,6 +1983,16 @@ tls-120:  same module family, expert candidate = active:threshold_switch
 ustc-app: same module family, expert candidate = active:class_precision
 ```
 
+Flow-level bootstrap uncertainty with 300 resamples:
+
+```text
+| Dataset | Accuracy 95% CI | Macro-F1 95% CI |
+|---|---:|---:|
+| vpn-app | [0.7252, 0.7685] | [0.7249, 0.7865] |
+| tls-120 | [0.7828, 0.7987] | [0.7677, 0.7832] |
+| ustc-app | [0.5000, 0.9000] | [0.4240, 0.8103] |
+```
+
 Generate the paper ablation table:
 
 ```bash

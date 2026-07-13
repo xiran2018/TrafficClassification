@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import random
 from typing import Any, Dict, List, Tuple
+
+from sklearn.metrics import f1_score
 
 
 DEFAULT_RESULTS = [
@@ -49,6 +52,46 @@ def format_float(value: Any, digits: int = 4) -> str:
     if value is None:
         return "-"
     return f"{float(value):.{digits}f}"
+
+
+def percentile(values: List[float], q: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    pos = (len(ordered) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(ordered) - 1)
+    frac = pos - lo
+    return float(ordered[lo] * (1.0 - frac) + ordered[hi] * frac)
+
+
+def bootstrap_uncertainty(data: Dict[str, Any], samples: int, seed: int) -> Dict[str, Any] | None:
+    y_true = data.get("flow_y_true")
+    y_pred = data.get("flow_y_pred")
+    if not y_true or not y_pred or len(y_true) != len(y_pred) or samples <= 0:
+        return None
+    n = len(y_true)
+    rng = random.Random(seed)
+    acc_values: List[float] = []
+    f1_values: List[float] = []
+    for _ in range(samples):
+        idx = [rng.randrange(n) for _ in range(n)]
+        boot_true = [y_true[i] for i in idx]
+        boot_pred = [y_pred[i] for i in idx]
+        acc_values.append(sum(1 for a, b in zip(boot_true, boot_pred) if a == b) / n)
+        f1_values.append(float(f1_score(boot_true, boot_pred, average="macro", zero_division=0)))
+    return {
+        "samples": samples,
+        "seed": seed,
+        "accuracy_ci95": [percentile(acc_values, 0.025), percentile(acc_values, 0.975)],
+        "macro_f1_ci95": [percentile(f1_values, 0.025), percentile(f1_values, 0.975)],
+    }
+
+
+def format_ci(ci: Any) -> str:
+    if not isinstance(ci, list) or len(ci) != 2:
+        return "-"
+    return f"[{format_float(ci[0])}, {format_float(ci[1])}]"
 
 
 def selector_summary(selected: Dict[str, Any]) -> str:
@@ -223,7 +266,7 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_rows(results: List[Tuple[str, str, float | None, float | None]]) -> List[Dict[str, Any]]:
+def build_rows(results: List[Tuple[str, str, float | None, float | None]], bootstrap_samples: int, bootstrap_seed: int) -> List[Dict[str, Any]]:
     rows = []
     for dataset, path, target_acc, target_f1 in results:
         data = load_json(path)
@@ -245,6 +288,7 @@ def build_rows(results: List[Tuple[str, str, float | None, float | None]]) -> Li
                 "selector": selector_summary(selected),
                 "guards": guard_summary(selected),
                 "module_usage": module_usage(data),
+                "uncertainty": bootstrap_uncertainty(data, bootstrap_samples, bootstrap_seed),
             }
         )
     return rows
@@ -299,6 +343,33 @@ def markdown_consistency(audit: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def markdown_uncertainty(rows: List[Dict[str, Any]]) -> str:
+    if not any(row.get("uncertainty") for row in rows):
+        return ""
+    lines = [
+        "",
+        "Flow-level bootstrap uncertainty",
+        "",
+        "| Dataset | Samples | Accuracy 95% CI | Macro-F1 95% CI |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in rows:
+        unc = row.get("uncertainty") or {}
+        if not unc:
+            lines.append(f"| {row['dataset']} | - | - | - |")
+            continue
+        lines.append(
+            "| {dataset} | {samples} | {acc_ci} | {f1_ci} |".format(
+                dataset=row["dataset"],
+                samples=unc.get("samples", "-"),
+                acc_ci=format_ci(unc.get("accuracy_ci95")),
+                f1_ci=format_ci(unc.get("macro_f1_ci95")),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def parse_result(raw: List[str]) -> Tuple[str, str, float | None, float | None]:
     if len(raw) != 4:
         raise ValueError("--result expects DATASET JSON TARGET_ACC TARGET_MACRO_F1; use '-' for no target")
@@ -311,14 +382,16 @@ def parse_result(raw: List[str]) -> Tuple[str, str, float | None, float | None]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build a paper-ready summary for the unified traffic framework.")
     ap.add_argument("--result", nargs=4, action="append", metavar=("DATASET", "JSON", "TARGET_ACC", "TARGET_F1"))
+    ap.add_argument("--bootstrap_samples", type=int, default=300)
+    ap.add_argument("--bootstrap_seed", type=int, default=13)
     ap.add_argument("--output_json", default="")
     ap.add_argument("--output_md", default="")
     args = ap.parse_args()
 
     results = [parse_result(item) for item in args.result] if args.result else DEFAULT_RESULTS
-    rows = build_rows(results)
+    rows = build_rows(results, args.bootstrap_samples, args.bootstrap_seed)
     audit = framework_consistency(rows)
-    md = markdown_table(rows) + markdown_consistency(audit)
+    md = markdown_table(rows) + markdown_consistency(audit) + markdown_uncertainty(rows)
     print(md)
 
     if args.output_json:
