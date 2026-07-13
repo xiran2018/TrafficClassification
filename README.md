@@ -1350,7 +1350,7 @@ conda run --no-capture-output -n llm-factory \
     --coherence_weight 0
 ```
 
-Tower-1 now also supports flow-aware supervised contrastive learning. Use it when retraining packet embeddings: each packet batch samples multiple packets per flow, same-flow positives receive a stronger weight than same-label positives. For the next representation-learning ablation, `--flow_proto_weight` adds a packet-to-flow prototype contrastive objective: packet embeddings are pulled toward same-flow or same-class flow prototypes and pushed away from other-class prototypes. Keep it at `0` for reproducing the current best checkpoints; start with `0.05` or `0.1` for new Tower-1 runs.
+Tower-1 now also supports flow-aware supervised contrastive learning. Use it when retraining packet embeddings: each packet batch samples multiple packets per flow, same-flow positives receive a stronger weight than same-label positives. `--flow_proto_weight` adds a packet-to-flow prototype contrastive objective: packet embeddings are pulled toward same-flow or same-class flow prototypes and pushed away from other-class prototypes. Keep it at `0` for reproducing the current best checkpoints; start with a small value such as `0.02` or `0.05` for new Tower-1 runs. Use `--init_checkpoint_dir` to continue from an existing Tower-1 adapter and packet heads.
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -1369,11 +1369,14 @@ conda run --no-capture-output -n llm-factory \
     --contrastive_weight 0.3 \
     --same_flow_positive_weight 2.0 \
     --same_label_positive_weight 1.0 \
-    --flow_proto_weight 0.1 \
+    --flow_proto_weight 0.05 \
     --flow_proto_positive same_class \
     --max_sft_length 1792 \
     --max_packet_length 1024 \
     --local_files_only
+
+# Optional for continuation:
+#   --init_checkpoint_dir checkpoints/tower1_qwen_multitask_flowaware_change_weight/step_150
 ```
 
 The same Stage 8 workflow can be launched step-by-step with the runner below. Use `--dry_run` first to audit paths. Use `--require_cuda` for long Tower-1/embedding stages so the command fails early if the `llm-factory` environment cannot see a GPU.
@@ -1469,7 +1472,36 @@ Residual fusion:
   flow macro-F1 = 0.5750
 ```
 
-Interpretation: the window-to-flow objective is implemented and gives a cleaner paper module, but this first Tower-2-only setting is not enough to beat the embedding-expert-dominant USTC best. The next stronger direction is to move the same window/flow objective into Tower-1 or tune a smaller `window_contrastive_weight` grid before full VPN/TLS verification.
+Interpretation: the window-to-flow objective is implemented and gives a cleaner paper module, but this first Tower-2-only setting is not enough to beat the embedding-expert-dominant USTC best.
+
+Tower-1 packet-to-flow prototype loss is also implemented through `--flow_proto_weight`, and Tower-1 continuation from an existing adapter is supported through `--init_checkpoint_dir`. A first USTC ablation continued the current best Tower-1 `step_150` checkpoint for 40 packet-only steps with `--flow_proto_weight 0.05`, no SFT loss, and lower learning rates. Training was stable and packet accuracy rose to `0.7750`, but downstream test metrics dropped:
+
+```text
+Tower-1 proto continuation:
+  init checkpoint: checkpoints/tower1_qwen_multitask_ustc_app_flowaware_change_weight_s200_pb8/step_150
+  output checkpoint: checkpoints/tower1_qwen_multitask_ustc_app_flowproto_continue_s40_w005
+  final training signal: pkt_cls=0.3355, supcon=0.0004, proto=0.0001, pkt_acc=0.7750
+
+Graph/seq fusion:
+  reasoningDataset/ustc-app/test_fusion_graph_seq_rawproj_flowproto_continue_s40_w005_stage8_flowaware_valid_acc.json
+  selected weights: graph=0.90, seq=0.10
+  flow accuracy = 0.5500
+  flow macro-F1 = 0.4583
+
+Flow-embedding expert:
+  reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_continue_s40_w005_message_header_ports_valid_macro.json
+  valid selected extra_trees, n_components=19
+  flow accuracy = 0.5500
+  flow macro-F1 = 0.4500
+
+Residual fusion with current best:
+  reasoningDataset/ustc-app/test_fusion_ustc_step150_base_flowproto_s40_residual.json
+  selected weights: base=0.95, proto_emb=0.05, proto_gs=0.0
+  flow accuracy = 0.6500
+  flow macro-F1 = 0.5750
+```
+
+Interpretation: the Tower-1 prototype objective is a useful framework module, but this no-SFT continuation over-optimizes packet/prototype separation and hurts downstream flow generalization. Treat it as a negative ablation. The next Tower-1 proto experiment should keep SFT enabled or use a smaller `flow_proto_weight` / fewer continuation steps, rather than using packet-only continuation.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
@@ -1570,7 +1602,7 @@ conda run --no-capture-output -n llm-factory \
     --no_progress
 ```
 
-`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-1 training uses `--local_files_only` by default in the runner, so make sure the selected Qwen checkpoint is already available in the local Hugging Face cache or pass `--no-local_files_only` intentionally. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. The runner's `fusion` stage now first calls `make_fusion_payload.py` for each selected Tower-2 model, so valid/test probability JSONs are automatically merged into the payload format required by `fuse_prediction_jsons.py`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation. Use `--flow_proto_weight` for Tower-1 packet-to-flow prototype contrastive training and `--window_contrastive_weight` for Tower-2 window-to-flow prototype contrastive training.
+`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-1 training uses `--local_files_only` by default in the runner, so make sure the selected Qwen checkpoint is already available in the local Hugging Face cache or pass `--no-local_files_only` intentionally. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. The runner's `fusion` stage now first calls `make_fusion_payload.py` for each selected Tower-2 model, so valid/test probability JSONs are automatically merged into the payload format required by `fuse_prediction_jsons.py`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation. Use `--tower1_init_checkpoint_dir` for Tower-1 continuation from an existing adapter, `--flow_proto_weight` for Tower-1 packet-to-flow prototype contrastive training, and `--window_contrastive_weight` for Tower-2 window-to-flow prototype contrastive training.
 
 The runner's `prior` stage now implements the paper-safe residual calibration path by default:
 

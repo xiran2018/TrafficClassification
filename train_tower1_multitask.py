@@ -279,6 +279,7 @@ def main() -> None:
     ap.add_argument("--sft_jsonl", nargs="*", default=[], help="packet_instruction.jsonl and packet_validity.jsonl")
     ap.add_argument("--no_sft", action="store_true", help="Train only packet cls + SupCon without generative QA loss.")
     ap.add_argument("--output_dir", required=True)
+    ap.add_argument("--init_checkpoint_dir", default="", help="Optional Tower-1 checkpoint dir containing adapter/ and tower1_heads.pt for continued training.")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--max_steps", type=int, default=0, help="Override epochs if >0.")
     ap.add_argument("--sft_batch_size", type=int, default=2)
@@ -329,17 +330,21 @@ def main() -> None:
     from models.qwen_packet_multitask import QwenPacketMultiTaskModel
 
     print(f"loading base model: {args.base_model}", flush=True)
+    init_lora_path = str(Path(args.init_checkpoint_dir) / "adapter") if args.init_checkpoint_dir else ""
     model = QwenPacketMultiTaskModel(
         base_model_name_or_path=args.base_model,
         num_classes=num_classes,
         torch_dtype=dtype,
-        create_lora=True,
+        lora_path=init_lora_path,
+        create_lora=not bool(init_lora_path),
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         projection_dim=args.projection_dim,
         local_files_only=args.local_files_only,
     )
+    if args.init_checkpoint_dir:
+        load_packet_heads(model, Path(args.init_checkpoint_dir) / "tower1_heads.pt")
     print("base model loaded", flush=True)
     if args.gradient_checkpointing:
         print("enabling gradient checkpointing", flush=True)
@@ -551,6 +556,17 @@ def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "
             ensure_ascii=False,
         )
     print(f"saved Tower-1 adapter and heads to {out}")
+
+
+def load_packet_heads(model: QwenPacketMultiTaskModel, heads_path: Path) -> None:
+    if not heads_path.exists():
+        raise FileNotFoundError(f"Missing Tower-1 heads file: {heads_path}")
+    state = torch.load(heads_path, map_location="cpu")
+    if int(state.get("num_classes", model.num_classes)) != model.num_classes:
+        raise ValueError(f"Head num_classes mismatch: checkpoint={state.get('num_classes')} current={model.num_classes}")
+    model.packet_classifier.load_state_dict(state["packet_classifier"])
+    model.projection_head.load_state_dict(state["projection_head"])
+    print(f"loaded Tower-1 packet heads from {heads_path}", flush=True)
 
 
 if __name__ == "__main__":

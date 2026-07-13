@@ -127,6 +127,8 @@ def tower1_train_cmd(args) -> List[str]:
         cmd += ["--max_steps", str(args.tower1_max_steps)]
     if args.tower1_save_steps > 0:
         cmd += ["--save_steps", str(args.tower1_save_steps)]
+    if args.tower1_init_checkpoint_dir:
+        cmd += ["--init_checkpoint_dir", args.tower1_init_checkpoint_dir]
     if args.flow_balanced_packet_batches:
         cmd += ["--flow_balanced_packet_batches", "--packets_per_flow", str(args.packets_per_flow)]
     if args.local_files_only:
@@ -492,6 +494,7 @@ def main() -> None:
     ap.add_argument("--tower1_epochs", type=int, default=2)
     ap.add_argument("--tower1_max_steps", type=int, default=0)
     ap.add_argument("--tower1_save_steps", type=int, default=0)
+    ap.add_argument("--tower1_init_checkpoint_dir", default="")
     ap.add_argument("--sft_batch_size", type=int, default=2)
     ap.add_argument("--packet_batch_size", type=int, default=16)
     ap.add_argument("--max_sft_length", type=int, default=1792)
