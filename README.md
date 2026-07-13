@@ -1984,14 +1984,17 @@ conda run --no-capture-output -n llm-factory \
     --execute \
     --continue_after_targets \
     --require_ci_targets \
+    --run_tag_template '{run_tag}_iter{iteration:02d}' \
     --max_iters 3 \
     --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
 ```
 
-The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. The final selector output is:
+Use `--run_tag_template '{run_tag}_iter{iteration:02d}'` for multi-iteration searches so each loop writes a fresh Stage-8 run instead of reusing old `skip_existing` outputs. The wrapper records the concrete per-iteration run tag in the loop ledger.
+
+The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with the current iteration's run tag, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. With the run-tag template above, the final selector output for iteration 1 is:
 
 ```text
-reasoningDataset/vpn-app/test_selector_best_plus_rawproj_flowaware_change_weight_stage8_flowaware_paired_ipport_valid_macro.json
+reasoningDataset/vpn-app/test_selector_best_plus_rawproj_flowaware_change_weight_stage8_flowaware_paired_ipport_iter01_valid_macro.json
 ```
 
 This final selector keeps the same safety gates as the paper framework: validation macro-F1 gain, bootstrap stability, and a strict VPN target-shift guard. If the paired candidate is not stable, the selector falls back to the current best base. In the Codex sandbox this remains a dry-run because CUDA is not exposed; use the real A800 environment for the embedding and long training stages.

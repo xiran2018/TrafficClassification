@@ -121,14 +121,27 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
     ]
 
 
-def suite_cmd(args, datasets: List[str], iteration: int) -> List[str]:
+def iteration_run_tag(args, iteration: int) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        return args.run_tag_template.format(
+            run_tag=args.run_tag,
+            iteration=iteration,
+            iter=iteration,
+            timestamp=timestamp,
+        )
+    except Exception as exc:
+        raise ValueError(f"Invalid --run_tag_template={args.run_tag_template!r}: {exc}") from exc
+
+
+def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str) -> List[str]:
     cmd = [
         "python",
         "run_recommended_suite.py",
         "--datasets",
         ",".join(datasets),
         "--run_tag",
-        args.run_tag,
+        run_tag,
         "--model_types",
         args.model_types,
         "--tower2_epochs",
@@ -194,6 +207,11 @@ def main() -> None:
     ap.add_argument("--allow_no_cuda", action="store_true")
     ap.add_argument("--continue_on_error", action="store_true")
     ap.add_argument("--run_tag", default="paired_ipport")
+    ap.add_argument(
+        "--run_tag_template",
+        default="{run_tag}",
+        help="Per-iteration run tag template. Use e.g. '{run_tag}_iter{iteration:02d}' to avoid reusing existing outputs.",
+    )
     ap.add_argument("--model_types", default="graph,seq")
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
@@ -219,12 +237,15 @@ def main() -> None:
         "continue_after_targets": bool(args.continue_after_targets),
         "require_framework_consistency": bool(args.require_framework_consistency),
         "require_ci_targets": bool(args.require_ci_targets),
+        "run_tag": args.run_tag,
+        "run_tag_template": args.run_tag_template,
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
     }
 
     for iteration in range(1, args.max_iters + 1):
+        run_tag = iteration_run_tag(args, iteration)
         before = dataset_status(datasets, targets)
         commands = []
         for cmd in report_commands(args, datasets):
@@ -251,6 +272,7 @@ def main() -> None:
             "framework_met_before": framework_met,
             "ci_targets_met_before": ci_targets_met,
             "ready_to_stop_before": ready_to_stop,
+            "run_tag": run_tag,
             "commands": commands,
         }
         if ready_to_stop and not args.continue_after_targets:
@@ -260,7 +282,7 @@ def main() -> None:
             write_ledger(args, ledger)
             return
 
-        suite_result = run_cmd(suite_cmd(args, datasets, iteration), execute=True)
+        suite_result = run_cmd(suite_cmd(args, datasets, iteration, run_tag), execute=True)
         record["commands"].append(suite_result)
         if suite_result["returncode"] and not args.continue_on_error:
             ledger["iterations"].append(record)
