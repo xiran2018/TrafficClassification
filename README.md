@@ -1859,6 +1859,26 @@ tls-120: acc=0.7909, macro-F1=0.7772, target acc>=0.7800 and macro-F1>=0.7000 ->
 ustc-app: acc=0.7000, macro-F1=0.6250, cross-dataset evidence on the 20-flow test split
 ```
 
+Generate the next-experiment recommendation report after each new run:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python recommend_next_experiment.py \
+    --dataset vpn-app \
+    --dataset tls-120 \
+    --dataset ustc-app \
+    --output_json reasoningDataset/next_experiment_recommendation.json \
+    --output_md reasoningDataset/next_experiment_recommendation.md
+```
+
+Current recommendation summary:
+
+```text
+vpn-app: target PASS; old-embedding paired-view probes are negative, so do not spend more CPU time on graph paired-view training. Run the documented A800 Stage-8 paired-view path with fresh `rawproj_flowaware_*` embeddings.
+tls-120: target PASS; only accept new modules when validation-gated selection and target-shift guards keep or improve the current best.
+ustc-app: evidence result; prioritize representation learning before additional probability-level fusion.
+```
+
 Generate a paper-ready framework report with selector decisions and guard evidence:
 
 ```bash
