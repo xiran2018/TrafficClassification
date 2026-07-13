@@ -1503,6 +1503,35 @@ Residual fusion with current best:
 
 Interpretation: the Tower-1 prototype objective is a useful framework module, but this no-SFT continuation over-optimizes packet/prototype separation and hurts downstream flow generalization. Treat it as a negative ablation. The next Tower-1 proto experiment should keep SFT enabled or use a smaller `flow_proto_weight` / fewer continuation steps, rather than using packet-only continuation.
 
+A follow-up conservative proto continuation kept SFT enabled and reduced `--flow_proto_weight` to `0.02` for 20 continuation steps. This was more stable than packet-only continuation, but still did not improve the current USTC best:
+
+```text
+Tower-1 SFT+proto continuation:
+  init checkpoint: checkpoints/tower1_qwen_multitask_ustc_app_flowaware_change_weight_s200_pb8/step_150
+  output checkpoint: checkpoints/tower1_qwen_multitask_ustc_app_flowproto_sft_continue_s20_w002
+  final training signal: pkt_cls=0.6632, supcon=0.0618, proto=0.0115, pkt_acc=0.6750
+
+Graph/seq fusion:
+  reasoningDataset/ustc-app/test_fusion_graph_seq_rawproj_flowproto_sft_s20_w002_stage8_flowaware_valid_acc.json
+  selected weights: graph=0.95, seq=0.05
+  flow accuracy = 0.4500
+  flow macro-F1 = 0.3167
+
+Flow-embedding expert:
+  reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_sft_s20_w002_message_header_ports_valid_macro.json
+  valid selected logreg, n_components=16, C=3.0
+  flow accuracy = 0.6000
+  flow macro-F1 = 0.5417
+
+Residual fusion with current best:
+  reasoningDataset/ustc-app/test_fusion_ustc_step150_base_flowproto_sft_s20_w002_residual.json
+  selected weights: base=0.95, proto_emb=0.05, proto_gs=0.0
+  flow accuracy = 0.6500
+  flow macro-F1 = 0.5750
+```
+
+Interpretation: even a small SFT-preserving prototype continuation is not enough to improve USTC downstream generalization. For future runs, prototype learning should be trained inside the full Tower-1 schedule with validation-aware checkpoint selection, rather than appended as a short continuation after the best checkpoint.
+
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
 ```text
