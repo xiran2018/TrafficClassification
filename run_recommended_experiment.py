@@ -11,6 +11,28 @@ from typing import Any, Dict, List
 from recommend_next_experiment import cuda_summary
 
 
+DATASET_PRESETS = {
+    "vpn-app": {
+        "num_classes": 16,
+        "label_map": "reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json",
+        "base_selector_input": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
+        "max_prediction_change_rate": 0.0,
+    },
+    "tls-120": {
+        "num_classes": 120,
+        "label_map": "reasoningDataset/tls-120/train_tower1_change_weight/label_map.json",
+        "base_selector_input": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json",
+        "max_prediction_change_rate": 0.05,
+    },
+    "ustc-app": {
+        "num_classes": 20,
+        "label_map": "reasoningDataset/ustc-app/train_tower1_flowaware_change_weight/label_map.json",
+        "base_selector_input": "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
+        "max_prediction_change_rate": 0.05,
+    },
+}
+
+
 def run(cmd: List[str], execute: bool) -> None:
     print("$ " + " ".join(shlex.quote(x) for x in cmd), flush=True)
     if execute:
@@ -57,13 +79,14 @@ def paired_prior_output_path(args) -> str:
 
 
 def default_base_selector_input(args) -> str:
-    if args.dataset == "vpn-app":
-        return "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json"
-    if args.dataset == "tls-120":
-        return "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json"
-    if args.dataset == "ustc-app":
-        return "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json"
-    return ""
+    return DATASET_PRESETS.get(args.dataset, {}).get("base_selector_input", "")
+
+
+def default_label_map(args) -> str:
+    return DATASET_PRESETS.get(args.dataset, {}).get(
+        "label_map",
+        f"reasoningDataset/{args.dataset}/train_tower1_change_weight/label_map.json",
+    )
 
 
 def final_selector_output_path(args) -> str:
@@ -106,18 +129,20 @@ def runner_base(args) -> List[str]:
 
 
 def recommendation_cmd(args) -> List[str]:
+    datasets = []
+    for dataset in [args.dataset] + list(args.extra_recommendation_dataset):
+        if dataset not in datasets:
+            datasets.append(dataset)
     cmd = [
         "python",
         "recommend_next_experiment.py",
-        "--dataset",
-        args.dataset,
         "--output_json",
         str(Path("reasoningDataset") / args.dataset / f"next_experiment_recommendation_{args.run_tag}.json"),
         "--output_md",
         str(Path("reasoningDataset") / args.dataset / f"next_experiment_recommendation_{args.run_tag}.md"),
     ]
-    for extra_dataset in args.extra_recommendation_dataset:
-        cmd += ["--dataset", extra_dataset]
+    for dataset in datasets:
+        cmd += ["--dataset", dataset]
     return cmd
 
 
@@ -135,7 +160,7 @@ def final_selector_cmd(args) -> List[str]:
         "paired",
         paired_prior_output_path(args),
         "--label_map",
-        f"reasoningDataset/{args.dataset}/train_tower1_change_weight/label_map.json",
+        args.label_map or default_label_map(args),
         "--select_metric",
         args.final_selector_metric,
         "--strategies",
@@ -311,8 +336,8 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
 def main() -> None:
     ap = argparse.ArgumentParser(description="Autopilot for the next recommended unified Stage-8 experiment.")
     ap.add_argument("--dataset", default="vpn-app")
-    ap.add_argument("--num_classes", type=int, default=16)
-    ap.add_argument("--extra_recommendation_dataset", action="append", default=["tls-120", "ustc-app"])
+    ap.add_argument("--num_classes", type=int, default=0, help="Defaults from dataset presets when 0.")
+    ap.add_argument("--extra_recommendation_dataset", action="append", default=["vpn-app", "tls-120", "ustc-app"])
     ap.add_argument("--embedding_suffix", default="rawproj_flowaware_change_weight")
     ap.add_argument("--paired_output_suffix", default="flowaware_ipport_rand_change_weight")
     ap.add_argument("--paired_embedding_suffix", default="rawproj_flowaware_ipport_rand_change_weight")
@@ -329,6 +354,7 @@ def main() -> None:
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
     ap.add_argument("--base_selector_input", default="", help="Current best probability JSON used as the first input to the final validation-gated selector.")
+    ap.add_argument("--label_map", default="", help="Label map for final selector; defaults from dataset presets.")
     ap.add_argument("--final_selector_output", default="", help="Optional output path for the final validation-gated selector.")
     ap.add_argument("--final_selector_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
     ap.add_argument("--final_selector_strategies", default="always,class_precision,reliability_fusion,threshold_switch,class_bias_calibration")
@@ -349,13 +375,23 @@ def main() -> None:
     ap.add_argument("--final_selector_bootstrap_samples", type=int, default=300)
     ap.add_argument("--final_selector_bootstrap_min_win_rate", type=float, default=0.6)
     ap.add_argument("--final_selector_bootstrap_min_gain_quantile", type=float, default=-0.001)
-    ap.add_argument("--final_selector_max_prediction_change_rate", type=float, default=0.0)
+    ap.add_argument("--final_selector_max_prediction_change_rate", type=float, default=-1.0, help="Defaults from dataset presets when <0.")
     ap.add_argument("--require_cuda_for_tower2", action="store_true")
     ap.add_argument("--execute", action="store_true", help="Actually run the recommended commands. Default prints a dry-run plan.")
     ap.add_argument("--allow_no_cuda", action="store_true", help="Allow --execute even when CUDA is unavailable; useful only for tiny CPU probes.")
     ap.add_argument("--skip_existing", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--plan_json", default="reasoningDataset/recommended_experiment_plan.json")
+    ap.add_argument("--plan_json", default="", help="Defaults to reasoningDataset/DATASET/recommended_experiment_plan_RUN_TAG.json.")
     args = ap.parse_args()
+
+    preset = DATASET_PRESETS.get(args.dataset, {})
+    if args.num_classes <= 0:
+        if "num_classes" not in preset:
+            raise SystemExit(f"--num_classes is required for dataset={args.dataset}")
+        args.num_classes = int(preset["num_classes"])
+    if args.final_selector_max_prediction_change_rate < 0:
+        args.final_selector_max_prediction_change_rate = float(preset.get("max_prediction_change_rate", 0.05))
+    if not args.plan_json:
+        args.plan_json = str(Path("reasoningDataset") / args.dataset / f"recommended_experiment_plan_{args.run_tag}.json")
 
     cuda = cuda_summary()
     stages = stage_commands(args)

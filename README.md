@@ -1883,8 +1883,7 @@ Use the autopilot wrapper to generate the exact next-run command plan. It writes
 
 ```bash
 conda run --no-capture-output -n llm-factory \
-  python run_recommended_experiment.py \
-    --plan_json reasoningDataset/recommended_experiment_plan.json
+  python run_recommended_experiment.py
 ```
 
 In the real A800 `llm-factory` shell, add `--execute` to run the full recommended VPN Stage-8 paired-view path:
@@ -1892,8 +1891,19 @@ In the real A800 `llm-factory` shell, add `--execute` to run the full recommende
 ```bash
 conda run --no-capture-output -n llm-factory \
   python run_recommended_experiment.py \
-    --execute \
-    --plan_json reasoningDataset/recommended_experiment_plan.json
+    --execute
+```
+
+The same wrapper has dataset presets for class count, label map, current best selector input, and target-shift guard. To build the corresponding plans for TLS-120 or USTC, only change `--dataset`:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_experiment.py \
+    --dataset tls-120
+
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_experiment.py \
+    --dataset ustc-app
 ```
 
 The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. The final selector output is:
