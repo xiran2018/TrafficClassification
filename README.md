@@ -1783,6 +1783,25 @@ tls-120: acc=0.7909, macro-F1=0.7769, target acc>=0.7800 and macro-F1>=0.7000 ->
 ustc-app: acc=0.7000, macro-F1=0.6250, cross-dataset evidence on the 20-flow test split
 ```
 
+Generate a paper-ready framework report with selector decisions and guard evidence:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python make_paper_framework_report.py \
+    --output_json reasoningDataset/paper_framework_report.json \
+    --output_md reasoningDataset/paper_framework_report.md
+```
+
+Current generated table:
+
+```text
+| Dataset | Accuracy | Macro-F1 | Target | Status | Flows | Selector decision | Guards |
+|---|---:|---:|---|---|---:|---|---|
+| vpn-app | 0.7488 | 0.7558 | 0.7400/0.6500 | PASS | 1672 | fallback to base; rejected reliability_fusion (target_change=0.1268>0.0800) | bootstrap win=1.00, q=0.0310; target change=0.1268, JS=0.0149 |
+| tls-120 | 0.7909 | 0.7769 | 0.7800/0.7000 | PASS | 11542 | fallback to base; rejected threshold_switch (boot_q=-0.0007<0) | bootstrap win=0.79, q=-0.0007; target change=0.0042, JS=0.0001 |
+| ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
+```
+
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
 
 ```bash
