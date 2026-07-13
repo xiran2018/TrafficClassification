@@ -1952,6 +1952,15 @@ Current generated table:
 | ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | base=active; selector=active; expert=active:class_precision; calib=evaluated; guards=boot:active,shift:active | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
 ```
 
+Framework consistency audit:
+
+```text
+status: PASS
+vpn-app:  same module family, expert candidate = gated_off:reliability_fusion
+tls-120:  same module family, expert candidate = active:threshold_switch
+ustc-app: same module family, expert candidate = active:class_precision
+```
+
 Generate the paper ablation table:
 
 ```bash

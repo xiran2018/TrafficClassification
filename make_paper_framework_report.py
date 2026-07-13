@@ -172,6 +172,57 @@ def module_usage_summary(usage: Dict[str, str]) -> str:
     )
 
 
+def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    required_active = [
+        "packet_embedding_backbone",
+        "flow_base_expert",
+        "validation_gated_selector",
+    ]
+    required_safety = [
+        "bootstrap_guard",
+        "target_shift_guard",
+    ]
+    required_candidates = [
+        "expert_switch_or_fusion",
+        "class_bias_calibration_candidate",
+    ]
+    dataset_checks = []
+    for row in rows:
+        usage = row["module_usage"]
+        failures = []
+        for name in required_active:
+            if usage.get(name) != "active":
+                failures.append(f"{name}!={usage.get(name)}")
+        for name in required_safety:
+            if usage.get(name) != "active":
+                failures.append(f"{name}!={usage.get(name)}")
+        expert_state = usage.get("expert_switch_or_fusion", "")
+        if not expert_state.startswith(("active:", "gated_off:", "identity:")):
+            failures.append(f"expert_switch_or_fusion!={expert_state}")
+        if usage.get("class_bias_calibration_candidate") not in {"evaluated", "active", "gated_off"}:
+            failures.append(f"class_bias_calibration_candidate!={usage.get('class_bias_calibration_candidate')}")
+        dataset_checks.append(
+            {
+                "dataset": row["dataset"],
+                "consistent": not failures,
+                "failures": failures,
+                "expert_state": expert_state,
+            }
+        )
+    return {
+        "consistent": all(item["consistent"] for item in dataset_checks),
+        "required_active_modules": required_active,
+        "required_safety_modules": required_safety,
+        "candidate_modules": required_candidates,
+        "dataset_checks": dataset_checks,
+        "interpretation": (
+            "All datasets pass through the same backbone, base expert, validation-gated selector, "
+            "bootstrap guard, target-shift guard, and candidate expert/calibration family. "
+            "Dataset-specific validation may activate, gate off, or leave candidate experts as identity."
+        ),
+    }
+
+
 def build_rows(results: List[Tuple[str, str, float | None, float | None]]) -> List[Dict[str, Any]]:
     rows = []
     for dataset, path, target_acc, target_f1 in results:
@@ -225,6 +276,29 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def markdown_consistency(audit: Dict[str, Any]) -> str:
+    status = "PASS" if audit["consistent"] else "CHECK"
+    lines = [
+        "",
+        f"Framework consistency audit: {status}",
+        "",
+        "| Dataset | Consistent | Expert candidate state | Notes |",
+        "|---|---|---|---|",
+    ]
+    for item in audit["dataset_checks"]:
+        notes = "same module family" if item["consistent"] else "; ".join(item["failures"])
+        lines.append(
+            "| {dataset} | {consistent} | {expert} | {notes} |".format(
+                dataset=item["dataset"],
+                consistent="yes" if item["consistent"] else "no",
+                expert=item["expert_state"],
+                notes=notes,
+            )
+        )
+    lines += ["", audit["interpretation"], ""]
+    return "\n".join(lines)
+
+
 def parse_result(raw: List[str]) -> Tuple[str, str, float | None, float | None]:
     if len(raw) != 4:
         raise ValueError("--result expects DATASET JSON TARGET_ACC TARGET_MACRO_F1; use '-' for no target")
@@ -243,13 +317,14 @@ def main() -> None:
 
     results = [parse_result(item) for item in args.result] if args.result else DEFAULT_RESULTS
     rows = build_rows(results)
-    md = markdown_table(rows)
+    audit = framework_consistency(rows)
+    md = markdown_table(rows) + markdown_consistency(audit)
     print(md)
 
     if args.output_json:
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w", encoding="utf-8") as f:
-            json.dump({"results": rows}, f, indent=2, ensure_ascii=False)
+            json.dump({"results": rows, "framework_consistency": audit}, f, indent=2, ensure_ascii=False)
     if args.output_md:
         Path(args.output_md).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output_md).write_text(md, encoding="utf-8")
