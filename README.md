@@ -1879,6 +1879,25 @@ tls-120: target PASS; only accept new modules when validation-gated selection an
 ustc-app: evidence result; prioritize representation learning before additional probability-level fusion.
 ```
 
+Use the autopilot wrapper to generate the exact next-run command plan. It writes a JSON plan and defaults to dry-run when CUDA is unavailable:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_experiment.py \
+    --plan_json reasoningDataset/recommended_experiment_plan.json
+```
+
+In the real A800 `llm-factory` shell, add `--execute` to run the full recommended VPN Stage-8 paired-view path:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_experiment.py \
+    --execute \
+    --plan_json reasoningDataset/recommended_experiment_plan.json
+```
+
+The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, and regenerates the recommendation report. In the Codex sandbox this remains a dry-run because CUDA is not exposed; use the real A800 environment for the embedding and long training stages.
+
 Generate a paper-ready framework report with selector decisions and guard evidence:
 
 ```bash
