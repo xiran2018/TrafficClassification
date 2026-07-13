@@ -49,6 +49,35 @@ def final_outputs_exist(args) -> bool:
     return (root / f"test_fusion_{model_names}_{suffix}_safe_prior_residual.json").exists()
 
 
+def paired_prior_output_path(args) -> str:
+    root = Path("reasoningDataset") / args.dataset
+    suffix = result_suffix(args.embedding_suffix, args.run_tag)
+    model_names = "_".join(selected_model_types(args))
+    return str(root / f"test_fusion_{model_names}_{suffix}_safe_prior_residual.json")
+
+
+def default_base_selector_input(args) -> str:
+    if args.dataset == "vpn-app":
+        return "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json"
+    if args.dataset == "tls-120":
+        return "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json"
+    if args.dataset == "ustc-app":
+        return "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json"
+    return ""
+
+
+def final_selector_output_path(args) -> str:
+    if args.final_selector_output:
+        return args.final_selector_output
+    root = Path("reasoningDataset") / args.dataset
+    suffix = result_suffix(args.embedding_suffix, args.run_tag)
+    return str(root / f"test_selector_best_plus_{suffix}_valid_macro.json")
+
+
+def final_selector_output_exists(args) -> bool:
+    return Path(final_selector_output_path(args)).exists()
+
+
 def selected_model_types(args) -> List[str]:
     out: List[str] = []
     for raw in args.model_types.split(","):
@@ -90,6 +119,66 @@ def recommendation_cmd(args) -> List[str]:
     for extra_dataset in args.extra_recommendation_dataset:
         cmd += ["--dataset", extra_dataset]
     return cmd
+
+
+def final_selector_cmd(args) -> List[str]:
+    base_input = args.base_selector_input or default_base_selector_input(args)
+    if not base_input:
+        raise ValueError("--base_selector_input is required for datasets without a built-in final selector default.")
+    return [
+        "python",
+        "validation_gated_selector.py",
+        "--input",
+        "base",
+        base_input,
+        "--input",
+        "paired",
+        paired_prior_output_path(args),
+        "--label_map",
+        f"reasoningDataset/{args.dataset}/train_tower1_change_weight/label_map.json",
+        "--select_metric",
+        args.final_selector_metric,
+        "--strategies",
+        args.final_selector_strategies,
+        "--alpha_grid",
+        args.final_selector_alpha_grid,
+        "--metric_margin_grid",
+        args.final_selector_metric_margin_grid,
+        "--expert_conf_grid",
+        args.final_selector_expert_conf_grid,
+        "--expert_margin_grid",
+        args.final_selector_expert_margin_grid,
+        "--base_conf_max_grid",
+        args.final_selector_base_conf_max_grid,
+        "--delta_conf_grid",
+        args.final_selector_delta_conf_grid,
+        "--delta_margin_grid",
+        args.final_selector_delta_margin_grid,
+        "--reliability_power_grid",
+        args.final_selector_reliability_power_grid,
+        "--confidence_power_grid",
+        args.final_selector_confidence_power_grid,
+        "--reliability_min_weight_grid",
+        args.final_selector_reliability_min_weight_grid,
+        "--reliability_temperature_grid",
+        args.final_selector_reliability_temperature_grid,
+        "--calibration_strength_grid",
+        args.final_selector_calibration_strength_grid,
+        "--calibration_temperature_grid",
+        args.final_selector_calibration_temperature_grid,
+        "--min_valid_gain_over_base",
+        str(args.final_selector_min_valid_gain_over_base),
+        "--bootstrap_samples",
+        str(args.final_selector_bootstrap_samples),
+        "--bootstrap_min_win_rate",
+        str(args.final_selector_bootstrap_min_win_rate),
+        "--bootstrap_min_gain_quantile",
+        str(args.final_selector_bootstrap_min_gain_quantile),
+        "--max_prediction_change_rate",
+        str(args.final_selector_max_prediction_change_rate),
+        "--output_json",
+        final_selector_output_path(args),
+    ]
 
 
 def stage_commands(args) -> List[Dict[str, Any]]:
@@ -177,6 +266,12 @@ def stage_commands(args) -> List[Dict[str, Any]]:
             "skip_if": args.skip_existing and final_outputs_exist(args),
         },
         {
+            "name": "final_selector",
+            "cmd": final_selector_cmd(args),
+            "requires_cuda": False,
+            "skip_if": args.skip_existing and final_selector_output_exists(args),
+        },
+        {
             "name": "diagnose_after",
             "cmd": recommendation_cmd(args),
             "requires_cuda": False,
@@ -194,6 +289,9 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
         "embedding_suffix": args.embedding_suffix,
         "paired_embedding_suffix": args.paired_embedding_suffix,
         "run_tag": args.run_tag,
+        "base_selector_input": args.base_selector_input or default_base_selector_input(args),
+        "paired_prior_output": paired_prior_output_path(args),
+        "final_selector_output": final_selector_output_path(args),
         "stages": [
             {
                 "name": stage["name"],
@@ -230,6 +328,28 @@ def main() -> None:
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
+    ap.add_argument("--base_selector_input", default="", help="Current best probability JSON used as the first input to the final validation-gated selector.")
+    ap.add_argument("--final_selector_output", default="", help="Optional output path for the final validation-gated selector.")
+    ap.add_argument("--final_selector_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
+    ap.add_argument("--final_selector_strategies", default="always,class_precision,reliability_fusion,threshold_switch,class_bias_calibration")
+    ap.add_argument("--final_selector_alpha_grid", default="0.5,5")
+    ap.add_argument("--final_selector_metric_margin_grid", default="0,0.05")
+    ap.add_argument("--final_selector_expert_conf_grid", default="0.3,0.85")
+    ap.add_argument("--final_selector_expert_margin_grid", default="0.05")
+    ap.add_argument("--final_selector_base_conf_max_grid", default="1")
+    ap.add_argument("--final_selector_delta_conf_grid", default="-1,0.05")
+    ap.add_argument("--final_selector_delta_margin_grid", default="-1,0.1")
+    ap.add_argument("--final_selector_reliability_power_grid", default="4")
+    ap.add_argument("--final_selector_confidence_power_grid", default="1")
+    ap.add_argument("--final_selector_reliability_min_weight_grid", default="0")
+    ap.add_argument("--final_selector_reliability_temperature_grid", default="0.5")
+    ap.add_argument("--final_selector_calibration_strength_grid", default="1.0")
+    ap.add_argument("--final_selector_calibration_temperature_grid", default="1.25")
+    ap.add_argument("--final_selector_min_valid_gain_over_base", type=float, default=0.0)
+    ap.add_argument("--final_selector_bootstrap_samples", type=int, default=300)
+    ap.add_argument("--final_selector_bootstrap_min_win_rate", type=float, default=0.6)
+    ap.add_argument("--final_selector_bootstrap_min_gain_quantile", type=float, default=-0.001)
+    ap.add_argument("--final_selector_max_prediction_change_rate", type=float, default=0.0)
     ap.add_argument("--require_cuda_for_tower2", action="store_true")
     ap.add_argument("--execute", action="store_true", help="Actually run the recommended commands. Default prints a dry-run plan.")
     ap.add_argument("--allow_no_cuda", action="store_true", help="Allow --execute even when CUDA is unavailable; useful only for tiny CPU probes.")

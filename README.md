@@ -1896,7 +1896,13 @@ conda run --no-capture-output -n llm-factory \
     --plan_json reasoningDataset/recommended_experiment_plan.json
 ```
 
-The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, and regenerates the recommendation report. In the Codex sandbox this remains a dry-run because CUDA is not exposed; use the real A800 environment for the embedding and long training stages.
+The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. The final selector output is:
+
+```text
+reasoningDataset/vpn-app/test_selector_best_plus_rawproj_flowaware_change_weight_stage8_flowaware_paired_ipport_valid_macro.json
+```
+
+This final selector keeps the same safety gates as the paper framework: validation macro-F1 gain, bootstrap stability, and a strict VPN target-shift guard. If the paired candidate is not stable, the selector falls back to the current best base. In the Codex sandbox this remains a dry-run because CUDA is not exposed; use the real A800 environment for the embedding and long training stages.
 
 Generate a paper-ready framework report with selector decisions and guard evidence:
 
