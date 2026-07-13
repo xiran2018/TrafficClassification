@@ -1921,6 +1921,8 @@ conda run --no-capture-output -n llm-factory \
     --execute
 ```
 
+The generated final-selector command carries the same robustness controls as the manual selector runs. For VPN, the dataset preset uses `--rank_metric bootstrap_gain_quantile` and `--rank_candidate_limit 256`, so the next paired-view candidate is ranked by validation bootstrap lower-bound gain before the usual validation-gain, bootstrap, and target-shift gates are applied. TLS-120 keeps `--rank_metric select_metric` by default because its current bootstrap lower bounds already pass; this is a dataset parameter choice inside the same validation-gated selector module, not a different framework.
+
 The same wrapper has dataset presets for class count, label map, current best selector input, and target-shift guard. To build the corresponding plans for TLS-120 or USTC, only change `--dataset`:
 
 ```bash

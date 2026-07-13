@@ -17,6 +17,8 @@ DATASET_PRESETS = {
         "label_map": "reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json",
         "base_selector_input": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
         "max_prediction_change_rate": 0.0,
+        "final_selector_rank_metric": "bootstrap_gain_quantile",
+        "final_selector_rank_candidate_limit": 256,
     },
     "tls-120": {
         "num_classes": 120,
@@ -163,6 +165,12 @@ def final_selector_cmd(args) -> List[str]:
         args.label_map or default_label_map(args),
         "--select_metric",
         args.final_selector_metric,
+        "--rank_metric",
+        args.final_selector_rank_metric,
+        "--rank_bootstrap_samples",
+        str(args.final_selector_rank_bootstrap_samples),
+        "--rank_candidate_limit",
+        str(args.final_selector_rank_candidate_limit),
         "--strategies",
         args.final_selector_strategies,
         "--alpha_grid",
@@ -357,6 +365,26 @@ def main() -> None:
     ap.add_argument("--label_map", default="", help="Label map for final selector; defaults from dataset presets.")
     ap.add_argument("--final_selector_output", default="", help="Optional output path for the final validation-gated selector.")
     ap.add_argument("--final_selector_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
+    ap.add_argument(
+        "--final_selector_rank_metric",
+        choices=[
+            "select_metric",
+            "accuracy",
+            "macro_f1",
+            "bootstrap_gain_quantile",
+            "bootstrap_mean_gain",
+            "bootstrap_win_rate",
+        ],
+        default="",
+        help="Candidate ranking metric for the final selector. Defaults from dataset presets, then select_metric.",
+    )
+    ap.add_argument(
+        "--final_selector_rank_bootstrap_samples",
+        type=int,
+        default=0,
+        help="Bootstrap resamples used for final-selector robust ranking. Defaults to final selector bootstrap samples.",
+    )
+    ap.add_argument("--final_selector_rank_candidate_limit", type=int, default=-1)
     ap.add_argument("--final_selector_strategies", default="always,class_precision,reliability_fusion,threshold_switch,class_bias_calibration")
     ap.add_argument("--final_selector_alpha_grid", default="0.5,5")
     ap.add_argument("--final_selector_metric_margin_grid", default="0,0.05")
@@ -390,6 +418,10 @@ def main() -> None:
         args.num_classes = int(preset["num_classes"])
     if args.final_selector_max_prediction_change_rate < 0:
         args.final_selector_max_prediction_change_rate = float(preset.get("max_prediction_change_rate", 0.05))
+    if not args.final_selector_rank_metric:
+        args.final_selector_rank_metric = str(preset.get("final_selector_rank_metric", "select_metric"))
+    if args.final_selector_rank_candidate_limit < 0:
+        args.final_selector_rank_candidate_limit = int(preset.get("final_selector_rank_candidate_limit", 256))
     if not args.plan_json:
         args.plan_json = str(Path("reasoningDataset") / args.dataset / f"recommended_experiment_plan_{args.run_tag}.json")
 
