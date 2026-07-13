@@ -1815,7 +1815,7 @@ This keeps the strongest base model dominant when the validation split is too sm
 
 For source-level expert selection, `validation_gated_selector.py` compares probability JSONs on the validation split and then chooses either a single source, a class-precision-gated source, a confidence-threshold switch, a reliability-weighted soft fusion, or a validation-set class-bias calibration candidate. The reliability fusion estimates each expert's validation precision for its predicted class with shrinkage, then weights expert probabilities by validation reliability and confidence. The class-bias calibration candidate estimates the validation true-class prior divided by the model's mean predicted prior and applies that bias to candidate probabilities.
 
-The final selector uses three safety gates: `--min_valid_gain_over_base` for deterministic validation gain, bootstrap gain stability through `--bootstrap_samples`, and an unlabeled target-shift constraint through `--max_prediction_change_rate`. The current unified report uses a small bootstrap quantile tolerance (`--bootstrap_min_gain_quantile -0.001`) so tiny but low-shift TLS gains are allowed while larger target-shift changes are still rejected. The same candidate family is evaluated on every dataset, while `--max_prediction_change_rate` is dataset-specific: VPN uses a strict no-target-change setting, TLS allows a tiny low-shift switch, and USTC allows the class-precision gate. The selector sorts candidates by validation score, skips unsafe candidates, and accepts the first candidate that passes all active guards; if none pass, it falls back to the first input. This is the same module used across datasets:
+The final selector uses three safety gates: `--min_valid_gain_over_base` for deterministic validation gain, bootstrap gain stability through `--bootstrap_samples`, and an unlabeled target-shift constraint through `--max_prediction_change_rate`. The current unified report uses a small bootstrap quantile tolerance (`--bootstrap_min_gain_quantile -0.001`) so tiny but low-shift TLS gains are allowed while larger target-shift changes are still rejected. The same candidate family is evaluated on every dataset, while `--max_prediction_change_rate` is dataset-specific: VPN uses a strict no-target-change setting, TLS allows a tiny low-shift switch, and USTC allows the class-precision gate. By default the selector sorts candidates by validation score, skips unsafe candidates, and accepts the first candidate that passes all active guards; if none pass, it falls back to the first input. For paper-grade robustness searches, `--rank_metric bootstrap_gain_quantile` can instead rank the top validation candidates by their bootstrap lower-bound gain before the same safety gates are applied. Use `--rank_candidate_limit` to keep this robust ranking practical on large candidate grids. This is the same module used across datasets:
 
 ```text
 VPN:
@@ -1838,6 +1838,33 @@ USTC:
 ```
 
 The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. The unsafe reliability-fusion ablation selected `alpha=5.0`, `reliability_power=4.0`, `confidence_power=1.0`, `temperature=0.5`; it improved validation macro-F1 but dropped target-test performance to `0.6956` accuracy / `0.6633` macro-F1. Bootstrap alone did not reject this VPN candidate because its validation gain was internally stable, but the target-shift guard rejected it because it changed too many target predictions. A broader calibration-enabled candidate search also found a lower-shift VPN threshold switch, but it still dropped to `0.7339` accuracy / `0.7241` macro-F1, so calibration remains an ablation rather than the default final path. On TLS-120, the same selector can skip unstable class-bias calibration candidates and then accept the tiny seq-switch improvement because only `0.42%` of target predictions changed. This is why the paper method should emphasize validation-gated expert selection with both validation stability and unlabeled target-shift safety, not unconditional expert switching.
+
+Robust lower-bound candidate ranking for VPN selector debugging:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python validation_gated_selector.py \
+    --input base reasoningDataset/vpn-app/test_fusion_best_prior_flow_embedding_experts_minbest90_valid_acc.json \
+    --input emb_lr reasoningDataset/vpn-app/test_flow_embedding_classifier_logreg_meta_valid_acc.json \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --select_metric macro_f1 \
+    --rank_metric bootstrap_gain_quantile \
+    --rank_bootstrap_samples 300 \
+    --rank_candidate_limit 256 \
+    --strategies always,threshold_switch \
+    --expert_conf_grid 0.3,0.85 \
+    --expert_margin_grid 0.05 \
+    --base_conf_max_grid 1 \
+    --delta_conf_grid -1 \
+    --delta_margin_grid -1 \
+    --min_valid_gain_over_base 0.08 \
+    --bootstrap_samples 300 \
+    --bootstrap_min_gain_quantile -0.001 \
+    --max_prediction_change_rate 0 \
+    --output_json reasoningDataset/vpn-app/test_selector_boot_rank_debug_valid_macro.json
+```
+
+This command is a robustness-oriented selector ablation, not the current best result. The strict VPN target-shift gate can still force fallback to the base prediction if a high-validation or high-bootstrap-gain candidate rewrites too many target predictions.
 
 Use the metric dashboard to check the current target gates across datasets:
 

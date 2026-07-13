@@ -294,6 +294,19 @@ def main() -> None:
     ap.add_argument("--input", nargs=2, action="append", metavar=("NAME", "JSON"), required=True)
     ap.add_argument("--label_map", default="")
     ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
+    ap.add_argument(
+        "--rank_metric",
+        choices=[
+            "select_metric",
+            "accuracy",
+            "macro_f1",
+            "bootstrap_gain_quantile",
+            "bootstrap_mean_gain",
+            "bootstrap_win_rate",
+        ],
+        default="select_metric",
+        help="Candidate ordering metric before safety gates. Defaults to the validation select metric.",
+    )
     ap.add_argument("--strategies", default="always,class_precision,threshold_switch")
     ap.add_argument("--alpha_grid", default="0.5,1,2,5,10")
     ap.add_argument("--metric_margin_grid", default="0,0.02,0.05,0.1")
@@ -311,6 +324,13 @@ def main() -> None:
     ap.add_argument("--output_smooth", type=float, default=0.0, help="Optional one-hot smoothing for selected predictions.")
     ap.add_argument("--min_valid_gain_over_base", type=float, default=0.0, help="Fallback to the first input unless the selected validation metric improves by at least this amount.")
     ap.add_argument("--bootstrap_samples", type=int, default=0, help="Bootstrap validation resamples for stability-gated fallback. Disabled at 0.")
+    ap.add_argument("--rank_bootstrap_samples", type=int, default=0, help="Bootstrap resamples used only for robust candidate ranking. Defaults to --bootstrap_samples.")
+    ap.add_argument(
+        "--rank_candidate_limit",
+        type=int,
+        default=256,
+        help="When bootstrap ranking is enabled, rescore only the top validation-ranked candidates. Use <=0 to rank all candidates.",
+    )
     ap.add_argument("--bootstrap_seed", type=int, default=13)
     ap.add_argument("--bootstrap_quantile", type=float, default=0.05)
     ap.add_argument("--bootstrap_min_win_rate", type=float, default=0.0, help="Fallback unless selected candidate beats base in at least this fraction of bootstrap samples.")
@@ -503,9 +523,48 @@ def main() -> None:
         candidates.append(base_candidate)
 
     original_best = max(candidates, key=lambda item: item[0])
+    rank_bootstrap_samples = args.rank_bootstrap_samples if args.rank_bootstrap_samples > 0 else args.bootstrap_samples
+    rank_cache: Dict[int, Dict[str, float]] = {}
+
+    def rank_bootstrap_summary(candidate) -> Dict[str, float]:
+        cache_key = id(candidate[1])
+        if cache_key not in rank_cache:
+            rank_cache[cache_key] = bootstrap_gain_guard(
+                y_valid_ref,
+                candidate[4],
+                base_candidate[4],
+                args.select_metric,
+                rank_bootstrap_samples,
+                args.bootstrap_seed,
+                args.bootstrap_quantile,
+            )
+        return rank_cache[cache_key]
+
+    def candidate_rank_key(candidate) -> Tuple[float, float, float, float]:
+        metrics = candidate[1]["metrics"]
+        if args.rank_metric == "select_metric":
+            primary = metrics[args.select_metric]
+        elif args.rank_metric in {"accuracy", "macro_f1"}:
+            primary = metrics[args.rank_metric]
+        elif args.rank_metric == "bootstrap_gain_quantile":
+            primary = rank_bootstrap_summary(candidate)["gain_quantile"]
+        elif args.rank_metric == "bootstrap_mean_gain":
+            primary = rank_bootstrap_summary(candidate)["mean_gain"]
+        elif args.rank_metric == "bootstrap_win_rate":
+            primary = rank_bootstrap_summary(candidate)["win_rate"]
+        else:
+            raise ValueError(args.rank_metric)
+        return (float(primary), metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+
     selected_rejections = []
     selected_candidate = None
-    for candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
+    rank_pool = candidates
+    if args.rank_metric.startswith("bootstrap_") and args.rank_candidate_limit > 0:
+        rank_pool = sorted(candidates, key=lambda item: item[0], reverse=True)[: args.rank_candidate_limit]
+        if not any(item is base_candidate for item in rank_pool):
+            rank_pool.append(base_candidate)
+    ranked_candidates = sorted(rank_pool, key=candidate_rank_key, reverse=True)
+    for candidate in ranked_candidates:
         selected_gain = candidate[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric]
         bootstrap_summary = bootstrap_gain_guard(
             y_valid_ref,
@@ -525,9 +584,13 @@ def main() -> None:
         shift_summary = target_shift_guard(candidate[5], base_candidate[5])
         shift_reject = shift_summary["prediction_change_rate"] > args.max_prediction_change_rate
         gain_reject = selected_gain < args.min_valid_gain_over_base
+        rank_summary = rank_bootstrap_summary(candidate) if args.rank_metric.startswith("bootstrap_") else None
         if gain_reject or bootstrap_reject or shift_reject:
             selected_rejections.append(
                 {
+                    "rank_metric": args.rank_metric,
+                    "rank_key": list(candidate_rank_key(candidate)),
+                    "rank_bootstrap_guard": rank_summary,
                     "selected_gain": selected_gain,
                     "min_valid_gain_over_base": args.min_valid_gain_over_base,
                     "bootstrap_guard": bootstrap_summary,
@@ -545,6 +608,10 @@ def main() -> None:
             )
             continue
         accepted_row = dict(candidate[1])
+        accepted_row["rank_metric"] = args.rank_metric
+        accepted_row["rank_key"] = list(candidate_rank_key(candidate))
+        if rank_summary is not None:
+            accepted_row["rank_bootstrap_guard"] = rank_summary
         accepted_row["bootstrap_guard"] = bootstrap_summary
         accepted_row["target_shift_guard"] = shift_summary
         if selected_rejections:
@@ -557,6 +624,8 @@ def main() -> None:
             "selected_gain": original_best[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric],
             "min_valid_gain_over_base": args.min_valid_gain_over_base,
             "rejected": original_best[1],
+            "top_ranked": ranked_candidates[0][1],
+            "top_ranked_key": list(candidate_rank_key(ranked_candidates[0])),
             "rejected_candidates": selected_rejections[:5],
         }
         selected_candidate = (
@@ -599,9 +668,12 @@ def main() -> None:
         "valid_source": selected_valid_source.astype(int).tolist(),
         "feature_config": {
             "select_metric": args.select_metric,
+            "rank_metric": args.rank_metric,
             "strategies": sorted(strategies),
             "output_smooth": args.output_smooth,
             "bootstrap_samples": args.bootstrap_samples,
+            "rank_bootstrap_samples": rank_bootstrap_samples,
+            "rank_candidate_limit": args.rank_candidate_limit,
             "bootstrap_seed": args.bootstrap_seed,
             "bootstrap_quantile": args.bootstrap_quantile,
             "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
