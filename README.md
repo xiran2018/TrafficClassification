@@ -1944,7 +1944,7 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/recommended_suite_plan.json
 ```
 
-The suite JSON records CUDA visibility, each dataset's current best test result, target-gate status, generated command, and command return code. This makes the A800 run usable as a lightweight experiment ledger for paper ablations and cross-dataset reproduction.
+The suite JSON records CUDA visibility, each dataset's current best test result, target-gate status, generated command, command return code, and a `child_plans` summary containing each dataset's plan JSON, paired-prior output, final-selector output, skipped stages, and CUDA-required stages. In dry-run mode the suite materializes these child plans by default without launching training; pass `--no-materialize_child_plans` if you only want to print the child commands. This makes the A800 run usable as a lightweight experiment ledger for paper ablations and cross-dataset reproduction.
 
 In the real A800 `llm-factory` shell, add `--execute` to run the suite sequentially:
 

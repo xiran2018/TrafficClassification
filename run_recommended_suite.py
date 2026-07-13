@@ -68,6 +68,44 @@ def dataset_cmd(args, dataset: str) -> List[str]:
     return cmd
 
 
+def cmd_value(cmd: List[str], flag: str) -> str:
+    if flag not in cmd:
+        return ""
+    idx = cmd.index(flag) + 1
+    return cmd[idx] if idx < len(cmd) else ""
+
+
+def child_plan_summary(dataset: str, cmd: List[str]) -> Dict[str, Any]:
+    plan_json = cmd_value(cmd, "--plan_json")
+    summary: Dict[str, Any] = {
+        "dataset": dataset,
+        "plan_json": plan_json,
+        "exists": bool(plan_json and Path(plan_json).exists()),
+    }
+    if not summary["exists"]:
+        return summary
+    try:
+        data = json.loads(Path(plan_json).read_text(encoding="utf-8"))
+    except Exception as exc:
+        summary["error"] = str(exc)
+        return summary
+    for key in [
+        "run_tag",
+        "embedding_suffix",
+        "paired_embedding_suffix",
+        "base_selector_input",
+        "paired_prior_output",
+        "final_selector_output",
+    ]:
+        if key in data:
+            summary[key] = data[key]
+    stages = data.get("stages", [])
+    summary["num_stages"] = len(stages)
+    summary["skipped_stages"] = [stage.get("name") for stage in stages if stage.get("skip_if")]
+    summary["required_cuda_stages"] = [stage.get("name") for stage in stages if stage.get("requires_cuda")]
+    return summary
+
+
 def dataset_status(dataset: str) -> Dict[str, Any]:
     rows = collect_dataset(dataset, ["test*.json"])
     target = DEFAULT_TARGETS.get(dataset)
@@ -95,14 +133,21 @@ def write_suite_plan(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "datasets": datasets,
         "execute": bool(args.execute),
+        "materialize_child_plans": bool(args.materialize_child_plans),
         "run_tag": args.run_tag,
         "model_types": args.model_types,
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
         "commands": [
-            {"dataset": dataset, "cmd": cmd}
+            {
+                "dataset": dataset,
+                "run_tag": args.run_tag,
+                "plan_json": cmd_value(cmd, "--plan_json"),
+                "cmd": cmd,
+            }
             for dataset, cmd in zip(datasets, commands)
         ],
+        "child_plans": [child_plan_summary(dataset, cmd) for dataset, cmd in zip(datasets, commands)],
         "command_results": command_results or [],
     }
     out = Path(args.output_json)
@@ -119,6 +164,12 @@ def main() -> None:
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument(
+        "--materialize_child_plans",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="In suite dry-run mode, run each dataset autopilot without --execute so child JSON plans are written.",
+    )
     ap.add_argument("--allow_no_cuda", action="store_true")
     ap.add_argument("--require_cuda_for_tower2", action="store_true")
     ap.add_argument("--no-skip_existing", action="store_true")
@@ -139,8 +190,9 @@ def main() -> None:
     command_results: List[Dict[str, Any]] = []
     for cmd in commands:
         dataset = cmd[cmd.index("--dataset") + 1] if "--dataset" in cmd else ""
-        returncode = run(cmd, execute=args.execute)
-        command_results.append({"dataset": dataset, "returncode": returncode, "cmd": cmd})
+        plan_json = cmd_value(cmd, "--plan_json")
+        returncode = run(cmd, execute=bool(args.execute or args.materialize_child_plans))
+        command_results.append({"dataset": dataset, "plan_json": plan_json, "returncode": returncode, "cmd": cmd})
         if returncode and not args.continue_on_error:
             write_suite_plan(args, datasets, commands, cuda, command_results)
             raise SystemExit(returncode)
