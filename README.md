@@ -381,6 +381,7 @@ python train_tower1_multitask.py \
   --cls_weight 0.1 \
   --contrastive_weight 0.3 \
   --temperature 0.07 \
+  --local_files_only \
   --lora_r 16 \
   --lora_alpha 32 \
   --log_steps 1 \
@@ -1349,7 +1350,7 @@ conda run --no-capture-output -n llm-factory \
     --coherence_weight 0
 ```
 
-Tower-1 now also supports flow-aware supervised contrastive learning. Use it when retraining packet embeddings: each packet batch samples multiple packets per flow, same-flow positives receive a stronger weight than same-label positives.
+Tower-1 now also supports flow-aware supervised contrastive learning. Use it when retraining packet embeddings: each packet batch samples multiple packets per flow, same-flow positives receive a stronger weight than same-label positives. For the next representation-learning ablation, `--flow_proto_weight` adds a packet-to-flow prototype contrastive objective: packet embeddings are pulled toward same-flow or same-class flow prototypes and pushed away from other-class prototypes. Keep it at `0` for reproducing the current best checkpoints; start with `0.05` or `0.1` for new Tower-1 runs.
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -1368,8 +1369,11 @@ conda run --no-capture-output -n llm-factory \
     --contrastive_weight 0.3 \
     --same_flow_positive_weight 2.0 \
     --same_label_positive_weight 1.0 \
+    --flow_proto_weight 0.1 \
+    --flow_proto_positive same_class \
     --max_sft_length 1792 \
-    --max_packet_length 1024
+    --max_packet_length 1024 \
+    --local_files_only
 ```
 
 The same Stage 8 workflow can be launched step-by-step with the runner below. Use `--dry_run` first to audit paths. Use `--require_cuda` for long Tower-1/embedding stages so the command fails early if the `llm-factory` environment cannot see a GPU.
@@ -1566,7 +1570,7 @@ conda run --no-capture-output -n llm-factory \
     --no_progress
 ```
 
-`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. The runner's `fusion` stage now first calls `make_fusion_payload.py` for each selected Tower-2 model, so valid/test probability JSONs are automatically merged into the payload format required by `fuse_prediction_jsons.py`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation.
+`stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-1 training uses `--local_files_only` by default in the runner, so make sure the selected Qwen checkpoint is already available in the local Hugging Face cache or pass `--no-local_files_only` intentionally. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. The runner's `fusion` stage now first calls `make_fusion_payload.py` for each selected Tower-2 model, so valid/test probability JSONs are automatically merged into the payload format required by `fuse_prediction_jsons.py`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation. Use `--flow_proto_weight` for Tower-1 packet-to-flow prototype contrastive training and `--window_contrastive_weight` for Tower-2 window-to-flow prototype contrastive training.
 
 The runner's `prior` stage now implements the paper-safe residual calibration path by default:
 
@@ -1767,6 +1771,7 @@ Flow-level Accuracy / Precision / Recall / F1
 15. Target-prior single calibration vs candidate-pool prior ensemble
 16. Full-view Tower-2 vs paired full/randomized-view consistency
 17. Tower-1 label-only SupCon vs flow-aware SupCon
-18. Flow-only SupCon vs window-to-flow prototype contrastive loss
+18. Tower-1 packet-packet SupCon vs packet-to-flow prototype contrastive loss
+19. Tower-2 flow-only SupCon vs window-to-flow prototype contrastive loss
 
 These ablations directly support the claim that Tower 1 learns protocol-aware packet semantics while Tower 2 learns flow-level packet interaction patterns.

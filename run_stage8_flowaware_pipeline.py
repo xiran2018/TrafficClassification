@@ -102,6 +102,10 @@ def tower1_train_cmd(args) -> List[str]:
         str(args.same_flow_positive_weight),
         "--same_label_positive_weight",
         str(args.same_label_positive_weight),
+        "--flow_proto_weight",
+        str(args.flow_proto_weight),
+        "--flow_proto_positive",
+        args.flow_proto_positive,
         "--temperature",
         str(args.temperature),
         "--lr",
@@ -125,6 +129,8 @@ def tower1_train_cmd(args) -> List[str]:
         cmd += ["--save_steps", str(args.tower1_save_steps)]
     if args.flow_balanced_packet_batches:
         cmd += ["--flow_balanced_packet_batches", "--packets_per_flow", str(args.packets_per_flow)]
+    if args.local_files_only:
+        cmd.append("--local_files_only")
     if args.gradient_checkpointing:
         cmd.append("--gradient_checkpointing")
     if args.no_progress:
@@ -267,6 +273,12 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         str(args.flow_contrastive_weight),
         "--flow_temperature",
         str(args.flow_temperature),
+        "--window_contrastive_weight",
+        str(args.window_contrastive_weight),
+        "--window_contrastive_temperature",
+        str(args.window_contrastive_temperature),
+        "--window_contrastive_positive",
+        args.window_contrastive_positive,
         "--aux_weight",
         "0",
         "--coherence_weight",
@@ -489,6 +501,8 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--same_flow_positive_weight", type=float, default=2.0)
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0)
+    ap.add_argument("--flow_proto_weight", type=float, default=0.0)
+    ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class")
     ap.add_argument("--flow_balanced_packet_batches", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--packets_per_flow", type=int, default=2)
     ap.add_argument("--tower1_lr", type=float, default=2e-5)
@@ -497,6 +511,7 @@ def main() -> None:
     ap.add_argument("--lora_alpha", type=int, default=32)
     ap.add_argument("--lora_dropout", type=float, default=0.05)
     ap.add_argument("--dtype", choices=["float16", "bfloat16", "float32"], default="float16")
+    ap.add_argument("--local_files_only", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--gradient_checkpointing", action="store_true")
     ap.add_argument("--embedding_mode", choices=["raw", "projected", "concat"], default="concat")
     ap.add_argument("--embedding_batch_size", type=int, default=8)
@@ -524,6 +539,9 @@ def main() -> None:
     ap.add_argument("--confusion_groups", default="vpn_app")
     ap.add_argument("--flow_contrastive_weight", type=float, default=0.03)
     ap.add_argument("--flow_temperature", type=float, default=0.07)
+    ap.add_argument("--window_contrastive_weight", type=float, default=0.0)
+    ap.add_argument("--window_contrastive_temperature", type=float, default=0.07)
+    ap.add_argument("--window_contrastive_positive", choices=["own_flow", "same_class"], default="same_class")
     ap.add_argument("--prior_strengths", default="0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2")
     ap.add_argument("--prior_gate_modes", default="none,low_margin,high_entropy,low_confidence")
     ap.add_argument("--prior_gate_thresholds", default="0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8")

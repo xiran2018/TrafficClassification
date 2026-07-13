@@ -34,6 +34,7 @@ class Tower1LossOutput:
     lm_loss: torch.Tensor
     pkt_cls_loss: torch.Tensor
     supcon_loss: torch.Tensor
+    flow_proto_loss: torch.Tensor
     packet_logits: Optional[torch.Tensor]
     packet_embeddings: Optional[torch.Tensor]
     projected_embeddings: Optional[torch.Tensor]
@@ -82,24 +83,30 @@ class QwenPacketMultiTaskModel(nn.Module):
         projection_dim: int = 256,
         dropout: float = 0.1,
         trust_remote_code: bool = True,
+        local_files_only: bool = False,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.base_model_name_or_path = base_model_name_or_path
-        self.tokenizer = AutoTokenizer.from_pretrained(base_model_name_or_path, trust_remote_code=trust_remote_code)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            base_model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.backbone = AutoModelForCausalLM.from_pretrained(
             base_model_name_or_path,
             torch_dtype=torch_dtype,
             trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
         )
         hidden_size = int(self.backbone.config.hidden_size)
 
         if lora_path:
             if PeftModel is None:
                 raise RuntimeError("peft is required to load LoRA adapters")
-            self.backbone = PeftModel.from_pretrained(self.backbone, lora_path, is_trainable=True)
+            self.backbone = PeftModel.from_pretrained(self.backbone, lora_path, is_trainable=True, local_files_only=local_files_only)
         elif create_lora:
             if get_peft_model is None or LoraConfig is None:
                 raise RuntimeError("peft is required for LoRA training. Please `pip install peft`.")
@@ -149,12 +156,15 @@ class QwenPacketMultiTaskModel(nn.Module):
         temperature: float = 0.07,
         same_flow_positive_weight: float = 0.0,
         same_label_positive_weight: float = 1.0,
+        flow_proto_weight: float = 0.0,
+        flow_proto_positive: str = "same_class",
     ) -> Tower1LossOutput:
         device = next(self.parameters()).device
         zero = torch.zeros((), device=device)
         lm_loss = zero
         pkt_cls_loss = zero
         supcon_loss = zero
+        flow_proto_loss = zero
         packet_logits = None
         packet_embeddings = None
         projected_embeddings = None
@@ -193,9 +203,26 @@ class QwenPacketMultiTaskModel(nn.Module):
                 )
             else:
                 supcon_loss = supervised_contrastive_loss(projected_embeddings, labels, temperature=temperature)
+            if flow_ids is not None and flow_proto_weight > 0:
+                flow_proto_loss = packet_to_flow_prototype_loss(
+                    projected_embeddings,
+                    labels,
+                    flow_ids.long(),
+                    temperature=temperature,
+                    positive_mode=flow_proto_positive,
+                )
 
-        loss = lm_loss + cls_weight * pkt_cls_loss + contrastive_weight * supcon_loss
-        return Tower1LossOutput(loss, lm_loss, pkt_cls_loss, supcon_loss, packet_logits, packet_embeddings, projected_embeddings)
+        loss = lm_loss + cls_weight * pkt_cls_loss + contrastive_weight * supcon_loss + flow_proto_weight * flow_proto_loss
+        return Tower1LossOutput(
+            loss,
+            lm_loss,
+            pkt_cls_loss,
+            supcon_loss,
+            flow_proto_loss,
+            packet_logits,
+            packet_embeddings,
+            projected_embeddings,
+        )
 
     def save_packet_heads(self, output_dir: str) -> None:
         torch.save(
@@ -263,3 +290,51 @@ def flow_aware_contrastive_loss(
     log_prob = logits_masked - torch.logsumexp(logits_masked, dim=1, keepdim=True)
     mean_log_prob_pos = (pos_weight * log_prob).sum(dim=1) / pos_weight.sum(dim=1).clamp(min=1e-12)
     return -mean_log_prob_pos[valid].mean()
+
+
+def packet_to_flow_prototype_loss(
+    z: torch.Tensor,
+    labels: torch.Tensor,
+    flow_ids: torch.Tensor,
+    temperature: float = 0.07,
+    positive_mode: str = "same_class",
+) -> torch.Tensor:
+    """Contrast packets against batch-local flow prototypes.
+
+    This is a flow-level companion to packet-packet SupCon: packets are pulled
+    toward their own-flow or same-class flow prototypes and pushed away from
+    different-class flow prototypes.
+    """
+    if z.size(0) <= 1:
+        return z.sum() * 0.0
+    z = F.normalize(z.float(), p=2, dim=-1)
+    labels = labels.long()
+    flow_ids = flow_ids.long()
+    unique_flows, inverse = torch.unique(flow_ids, sorted=True, return_inverse=True)
+    if unique_flows.numel() <= 1:
+        return z.sum() * 0.0
+
+    proto_sum = z.new_zeros((unique_flows.numel(), z.size(-1)))
+    proto_sum.index_add_(0, inverse, z)
+    counts = torch.bincount(inverse, minlength=unique_flows.numel()).to(z.device, z.dtype).clamp(min=1.0)
+    prototypes = F.normalize(proto_sum / counts.unsqueeze(1), p=2, dim=-1)
+
+    proto_labels = labels.new_full((unique_flows.numel(),), -1)
+    for proto_idx in range(unique_flows.numel()):
+        flow_label_values = labels[inverse == proto_idx]
+        proto_labels[proto_idx] = torch.mode(flow_label_values).values
+
+    logits = torch.matmul(z, prototypes.T) / max(float(temperature), 1e-6)
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+    proto_ids = torch.arange(unique_flows.numel(), device=z.device)
+    own_flow_mask = proto_ids.unsqueeze(0) == inverse.unsqueeze(1)
+    if positive_mode == "own_flow":
+        pos_mask = own_flow_mask
+    else:
+        pos_mask = labels.view(-1, 1).eq(proto_labels.view(1, -1)) | own_flow_mask
+    valid = pos_mask.sum(dim=1) > 0
+    if valid.sum() == 0:
+        return z.sum() * 0.0
+
+    pos_logits = logits.masked_fill(~pos_mask, -1e9)
+    return -(torch.logsumexp(pos_logits[valid], dim=1) - torch.logsumexp(logits[valid], dim=1)).mean()

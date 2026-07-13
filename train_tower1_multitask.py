@@ -293,6 +293,8 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--same_flow_positive_weight", type=float, default=0.0, help="Extra positive weight for packets from the same flow in Tower-1 SupCon. 0 keeps label-only SupCon.")
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0, help="Positive weight for same-label packets in flow-aware SupCon.")
+    ap.add_argument("--flow_proto_weight", type=float, default=0.0, help="Weight for packet-to-flow prototype contrastive loss in Tower-1.")
+    ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class", help="Positive flow prototypes for --flow_proto_weight.")
     ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
     ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
     ap.add_argument("--projection_dim", type=int, default=256)
@@ -300,6 +302,7 @@ def main() -> None:
     ap.add_argument("--lora_alpha", type=int, default=32)
     ap.add_argument("--lora_dropout", type=float, default=0.05)
     ap.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32"])
+    ap.add_argument("--local_files_only", action="store_true", help="Load the base model/tokenizer only from the local Hugging Face cache.")
     ap.add_argument("--gradient_accumulation_steps", type=int, default=1)
     ap.add_argument("--gradient_checkpointing", action="store_true")
     ap.add_argument("--log_steps", type=int, default=20)
@@ -335,6 +338,7 @@ def main() -> None:
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         projection_dim=args.projection_dim,
+        local_files_only=args.local_files_only,
     )
     print("base model loaded", flush=True)
     if args.gradient_checkpointing:
@@ -435,7 +439,7 @@ def main() -> None:
     pbar = tqdm(range(total_steps), desc="train tower1")
     opt.zero_grad(set_to_none=True)
 
-    running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
+    running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
     skipped_nonfinite = 0
     for step in pbar:
         sft_batch = next(sft_iter) if sft_iter is not None else None
@@ -451,6 +455,8 @@ def main() -> None:
             temperature=args.temperature,
             same_flow_positive_weight=args.same_flow_positive_weight,
             same_label_positive_weight=args.same_label_positive_weight,
+            flow_proto_weight=args.flow_proto_weight,
+            flow_proto_positive=args.flow_proto_positive,
         )
         if not torch.isfinite(out.loss):
             skipped_nonfinite += 1
@@ -460,7 +466,8 @@ def main() -> None:
                 f"loss={float(out.loss.detach().cpu())} "
                 f"lm={float(out.lm_loss.detach().cpu())} "
                 f"pkt_cls={float(out.pkt_cls_loss.detach().cpu())} "
-                f"supcon={float(out.supcon_loss.detach().cpu())}"
+                f"supcon={float(out.supcon_loss.detach().cpu())} "
+                f"proto={float(out.flow_proto_loss.detach().cpu())}"
             )
             if args.stop_on_nonfinite_loss:
                 raise FloatingPointError(msg)
@@ -481,6 +488,7 @@ def main() -> None:
             running["lm"] += float(out.lm_loss.detach().cpu())
             running["cls"] += float(out.pkt_cls_loss.detach().cpu())
             running["con"] += float(out.supcon_loss.detach().cpu())
+            running["proto"] += float(out.flow_proto_loss.detach().cpu())
             if sft_batch is not None:
                 running["lm_tokens"] += float(sft_batch.get("valid_label_tokens", torch.zeros(())).detach().cpu())
             if out.packet_logits is not None:
@@ -496,13 +504,14 @@ def main() -> None:
                 "lm": running["lm"] / n,
                 "pkt_cls": running["cls"] / n,
                 "supcon": running["con"] / n,
+                "proto": running["proto"] / n,
                 "pkt_acc": running["acc"] / n,
                 "lm_tokens": running["lm_tokens"] / n,
             }
             pbar.set_postfix({k: f"{v:.4f}" for k, v in msg.items()})
             tqdm.write(
                 "step={step}/{total} loss={loss:.4f} lm={lm:.4f} pkt_cls={pkt_cls:.4f} "
-                "supcon={supcon:.4f} pkt_acc={pkt_acc:.4f} lm_tokens/batch={lm_tokens:.1f} "
+                "supcon={supcon:.4f} proto={proto:.4f} pkt_acc={pkt_acc:.4f} lm_tokens/batch={lm_tokens:.1f} "
                 "skipped_nonfinite={skipped}".format(
                     step=step + 1,
                     total=total_steps,
@@ -510,7 +519,7 @@ def main() -> None:
                     **msg,
                 )
             )
-            running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
+            running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
 
         if args.save_steps and (step + 1) % args.save_steps == 0:
             save_model(model, args.output_dir, suffix=f"step_{step+1}")
@@ -533,8 +542,9 @@ def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "
                 "num_classes": model.num_classes,
                 "hidden_size": model.hidden_size,
                 "embedding_pooling": "last_token",
-                "loss": "L_QA + alpha*L_packet_cls + beta*L_supcon",
+                "loss": "L_QA + alpha*L_packet_cls + beta*L_supcon + gamma*L_flow_proto",
                 "supports_flow_aware_supcon": True,
+                "supports_flow_prototype_loss": True,
             },
             f,
             indent=2,
