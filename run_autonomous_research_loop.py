@@ -158,6 +158,29 @@ def load_framework_consistency() -> Dict[str, Any] | None:
     return data.get("framework_consistency")
 
 
+def load_evidence_pack() -> Dict[str, Any] | None:
+    path = Path("reasoningDataset/paper_evidence_pack.json")
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def ci_targets_ready(evidence: Dict[str, Any] | None, goal_datasets: List[str], required: bool) -> bool:
+    if not required:
+        return True
+    if not isinstance(evidence, dict):
+        return False
+    by_dataset = {row.get("dataset"): row for row in evidence.get("claims", [])}
+    for dataset in goal_datasets:
+        row = by_dataset.get(dataset)
+        if not row or row.get("ci_target_met") is not True:
+            return False
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Autonomous research loop for the unified traffic framework.")
     ap.add_argument("--datasets", default="vpn-app,tls-120,ustc-app")
@@ -167,6 +190,7 @@ def main() -> None:
     ap.add_argument("--execute", action="store_true", help="Run recommended experiments when goals are not met.")
     ap.add_argument("--continue_after_targets", action="store_true", help="Keep running recommended suite even if target gates already pass.")
     ap.add_argument("--require_framework_consistency", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--require_ci_targets", action="store_true", help="Stop only when goal datasets pass bootstrap CI target gates in the evidence pack.")
     ap.add_argument("--allow_no_cuda", action="store_true")
     ap.add_argument("--continue_on_error", action="store_true")
     ap.add_argument("--run_tag", default="paired_ipport")
@@ -194,6 +218,7 @@ def main() -> None:
         "execute": bool(args.execute),
         "continue_after_targets": bool(args.continue_after_targets),
         "require_framework_consistency": bool(args.require_framework_consistency),
+        "require_ci_targets": bool(args.require_ci_targets),
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
@@ -212,15 +237,19 @@ def main() -> None:
                 raise SystemExit(result["returncode"])
 
         framework = load_framework_consistency()
+        evidence = load_evidence_pack()
         goals_met = all_goals_met(before, goal_datasets)
         framework_met = framework_ready(framework, args.require_framework_consistency)
-        ready_to_stop = goals_met and framework_met
+        ci_targets_met = ci_targets_ready(evidence, goal_datasets, args.require_ci_targets)
+        ready_to_stop = goals_met and framework_met and ci_targets_met
         record: Dict[str, Any] = {
             "iteration": iteration,
             "status_before": before,
             "framework_consistency": framework,
+            "evidence_pack": evidence,
             "goals_met_before": goals_met,
             "framework_met_before": framework_met,
+            "ci_targets_met_before": ci_targets_met,
             "ready_to_stop_before": ready_to_stop,
             "commands": commands,
         }
@@ -233,17 +262,36 @@ def main() -> None:
 
         suite_result = run_cmd(suite_cmd(args, datasets, iteration), execute=True)
         record["commands"].append(suite_result)
-        record["status_after"] = dataset_status(datasets, targets)
-        record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
-        record["framework_met_after"] = framework_met
-        record["ready_to_stop_after"] = record["goals_met_after"] and framework_met
-        record["action"] = "ran_recommended_suite" if args.execute else "dry_run_recommended_suite"
-        ledger["iterations"].append(record)
-        write_ledger(args, ledger)
         if suite_result["returncode"] and not args.continue_on_error:
+            ledger["iterations"].append(record)
             ledger["stop_reason"] = "suite_failed"
             write_ledger(args, ledger)
             raise SystemExit(suite_result["returncode"])
+
+        post_report_commands = []
+        for cmd in report_commands(args, datasets):
+            result = run_cmd(cmd, execute=True)
+            post_report_commands.append(result)
+            record["commands"].append(result)
+            if result["returncode"] and not args.continue_on_error:
+                record["post_report_commands"] = post_report_commands
+                ledger["iterations"].append(record)
+                ledger["stop_reason"] = f"post_suite_command_failed:{cmd[1]}"
+                write_ledger(args, ledger)
+                raise SystemExit(result["returncode"])
+
+        framework_after = load_framework_consistency()
+        evidence_after = load_evidence_pack()
+        record["status_after"] = dataset_status(datasets, targets)
+        record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
+        record["framework_consistency_after"] = framework_after
+        record["evidence_pack_after"] = evidence_after
+        record["framework_met_after"] = framework_ready(framework_after, args.require_framework_consistency)
+        record["ci_targets_met_after"] = ci_targets_ready(evidence_after, goal_datasets, args.require_ci_targets)
+        record["ready_to_stop_after"] = record["goals_met_after"] and record["framework_met_after"] and record["ci_targets_met_after"]
+        record["action"] = "ran_recommended_suite" if args.execute else "dry_run_recommended_suite"
+        ledger["iterations"].append(record)
+        write_ledger(args, ledger)
         if record["ready_to_stop_after"] and not args.continue_after_targets:
             ledger["stop_reason"] = "targets_and_framework_met_after_iteration"
             write_ledger(args, ledger)

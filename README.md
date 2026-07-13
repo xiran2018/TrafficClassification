@@ -1936,6 +1936,16 @@ conda run --no-capture-output -n llm-factory \
 
 The framework consistency gate is enabled by default through `--require_framework_consistency`; use `--no-require_framework_consistency` only for temporary debugging runs where the paper-facing unified-framework proof is not being checked.
 
+For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics and the unified-framework audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. With the current results, TLS-120 passes this strict gate, while VPN is still `point_pass_ci_mixed` because its bootstrap accuracy lower bound is below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_autonomous_research_loop.py \
+    --require_ci_targets \
+    --max_iters 1 \
+    --output_json reasoningDataset/autonomous_loop/research_loop_ledger_ci_strict.json
+```
+
 To keep searching for higher accuracy in the real A800 environment even after the current VPN/TLS targets pass:
 
 ```bash
@@ -1943,6 +1953,7 @@ conda run --no-capture-output -n llm-factory \
   python run_autonomous_research_loop.py \
     --execute \
     --continue_after_targets \
+    --require_ci_targets \
     --max_iters 3 \
     --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
 ```
