@@ -10,19 +10,19 @@ from typing import Any, Dict, List, Tuple
 DEFAULT_RESULTS = [
     (
         "vpn-app",
-        "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_bootstrap_shift_safe_valid_macro.json",
+        "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_bootstrap_shift_tol001_valid_macro.json",
         0.74,
         0.65,
     ),
     (
         "tls-120",
-        "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_bootstrap_shift_safe_valid_macro.json",
+        "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_bootstrap_shift_tol001_valid_macro.json",
         0.78,
         0.70,
     ),
     (
         "ustc-app",
-        "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_bootstrap_shift_safe_valid_macro.json",
+        "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_bootstrap_shift_tol001_valid_macro.json",
         None,
         None,
     ),
