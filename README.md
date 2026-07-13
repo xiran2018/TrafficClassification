@@ -1712,6 +1712,57 @@ conda run --no-capture-output -n llm-factory \
 
 `stage all` runs the full order `tower1_preprocess -> tower1_train -> embeddings -> tower2_preprocess -> tower2_train -> eval -> fusion -> prior`. Tower-1 checkpoints are dataset-scoped by default, for example `checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight` and `checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight`. Tower-1 training uses `--local_files_only` by default in the runner, so make sure the selected Qwen checkpoint is already available in the local Hugging Face cache or pass `--no-local_files_only` intentionally. Tower-2 training uses validation-selected `best.pt` and supports early stopping through `--tower2_early_stop_patience` in the runner, which maps to `train_tower2.py --early_stop_patience`. The runner's `fusion` stage now first calls `make_fusion_payload.py` for each selected Tower-2 model, so valid/test probability JSONs are automatically merged into the payload format required by `fuse_prediction_jsons.py`. Use `--no-flow_balanced_packet_batches` for the Tower-1 flow-balanced sampler ablation. Use `--tower1_init_checkpoint_dir` for Tower-1 continuation from an existing adapter, `--flow_proto_weight` for Tower-1 packet-to-flow prototype contrastive training, and `--window_contrastive_weight` for Tower-2 window-to-flow prototype contrastive training.
 
+For the next representation-learning iteration, the same Stage-8 runner also supports a paired header-perturbation view. This keeps the paper framework unified: every dataset can use the same full-view classifier, an IP/port-randomized paired view, clean/augmented consistency, feature dropout, and validation-gated downstream fusion; dataset-specific validation then decides whether these modules help or collapse to the base path.
+
+```bash
+# 1) Build the paired IP/port-randomized view. Reuse the dataset-scoped Tower-1 adapter.
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower1_preprocess \
+    --output_suffix flowaware_ipport_rand_change_weight \
+    --embedding_header_policy randomize_ip_port \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage embeddings \
+    --output_suffix flowaware_ipport_rand_change_weight \
+    --embedding_suffix rawproj_flowaware_ipport_rand_change_weight \
+    --require_cuda \
+    --no_progress
+
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower2_preprocess \
+    --embedding_suffix rawproj_flowaware_ipport_rand_change_weight \
+    --no_progress
+
+# 2) Train the main full-view Tower-2 model with paired-view consistency.
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --num_classes 16 \
+    --stage tower2_train \
+    --embedding_suffix rawproj_flowaware_change_weight \
+    --paired_embedding_suffix rawproj_flowaware_ipport_rand_change_weight \
+    --paired_view_weight 0.2 \
+    --paired_consistency_weight 0.1 \
+    --consistency_weight 0.05 \
+    --meta_dropout_prob 0.1 \
+    --embedding_dropout_prob 0.05 \
+    --window_dropout_prob 0.1 \
+    --edge_attr_dropout_prob 0.1 \
+    --no_progress
+```
+
+Use the same command shape for TLS-120 and USTC by changing `--dataset`, `--num_classes`, and the suffixes. This is the preferred paper-facing experiment over additional probability-level tuning because it tests whether endpoint-invariant representations improve flow classification before the validation-gated selector stage.
+
 The runner's `prior` stage now implements the paper-safe residual calibration path by default:
 
 ```text

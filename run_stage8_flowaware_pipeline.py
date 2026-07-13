@@ -160,6 +160,8 @@ def tower1_preprocess_cmd(args, split: str) -> List[str]:
     ]
     if args.preprocess_max_flows > 0:
         cmd += ["--max_flows", str(args.preprocess_max_flows)]
+    if args.embedding_header_policy != "full":
+        cmd += ["--embedding_header_policy", args.embedding_header_policy]
     if split == "train":
         cmd.append("--write_label_map")
         if Path(source_label_map).exists():
@@ -211,7 +213,7 @@ def tower2_preprocess_cmd(args, split: str) -> List[str]:
 
 
 def tower2_train_cmd(args, model_type: str) -> List[str]:
-    return [
+    cmd = [
         py(),
         "train_tower2.py",
         "--model_type",
@@ -281,6 +283,18 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         str(args.window_contrastive_temperature),
         "--window_contrastive_positive",
         args.window_contrastive_positive,
+        "--consistency_weight",
+        str(args.consistency_weight),
+        "--meta_dropout_prob",
+        str(args.meta_dropout_prob),
+        "--meta_feature_dim",
+        str(args.meta_feature_dim),
+        "--embedding_dropout_prob",
+        str(args.embedding_dropout_prob),
+        "--window_dropout_prob",
+        str(args.window_dropout_prob),
+        "--edge_attr_dropout_prob",
+        str(args.edge_attr_dropout_prob),
         "--aux_weight",
         "0",
         "--coherence_weight",
@@ -288,6 +302,16 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         "--seed",
         str(args.seed),
     ]
+    if args.paired_embedding_suffix:
+        cmd += [
+            "--paired_view_dataset",
+            f"reasoningDataset/{args.dataset}/train_tower2_{args.paired_embedding_suffix}/{model_type}_dataset.pt",
+            "--paired_view_weight",
+            str(args.paired_view_weight),
+            "--paired_consistency_weight",
+            str(args.paired_consistency_weight),
+        ]
+    return cmd
 
 
 def tower2_eval_cmd(args, model_type: str, split: str) -> List[str]:
@@ -491,6 +515,7 @@ def main() -> None:
     ap.add_argument("--payload_prefix_len", type=int, default=128)
     ap.add_argument("--l3_prefix_len", type=int, default=512)
     ap.add_argument("--preprocess_max_flows", type=int, default=0)
+    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port", "mask_ip_port"], default="full", help="Header policy for packet-index prompts used by embedding extraction.")
     ap.add_argument("--tower1_epochs", type=int, default=2)
     ap.add_argument("--tower1_max_steps", type=int, default=0)
     ap.add_argument("--tower1_save_steps", type=int, default=0)
@@ -545,6 +570,15 @@ def main() -> None:
     ap.add_argument("--window_contrastive_weight", type=float, default=0.0)
     ap.add_argument("--window_contrastive_temperature", type=float, default=0.07)
     ap.add_argument("--window_contrastive_positive", choices=["own_flow", "same_class"], default="same_class")
+    ap.add_argument("--consistency_weight", type=float, default=0.0, help="KL consistency between clean and augmented Tower-2 flow logits.")
+    ap.add_argument("--meta_dropout_prob", type=float, default=0.0, help="Training-only dropout on trailing Tower-2 metadata features.")
+    ap.add_argument("--meta_feature_dim", type=int, default=14, help="Number of trailing metadata features in Tower-2 x.")
+    ap.add_argument("--embedding_dropout_prob", type=float, default=0.0, help="Training-only dropout on packet embedding features.")
+    ap.add_argument("--window_dropout_prob", type=float, default=0.0, help="Training-only random dropping of windows before flow aggregation.")
+    ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.0, help="Training-only dropout on graph edge attributes.")
+    ap.add_argument("--paired_embedding_suffix", default="", help="Optional second-view Tower-2 dataset suffix aligned by flow_id.")
+    ap.add_argument("--paired_view_weight", type=float, default=0.0, help="Flow CE weight for the paired view.")
+    ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired-view flow logits.")
     ap.add_argument("--prior_strengths", default="0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2")
     ap.add_argument("--prior_gate_modes", default="none,low_margin,high_entropy,low_confidence")
     ap.add_argument("--prior_gate_thresholds", default="0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8")
