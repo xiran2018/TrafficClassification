@@ -295,6 +295,12 @@ def main() -> None:
     ap.add_argument("--label_map", default="")
     ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
     ap.add_argument(
+        "--rank_select_metric",
+        choices=["accuracy", "macro_f1"],
+        default="",
+        help="Metric used inside bootstrap_* ranking. Defaults to --select_metric.",
+    )
+    ap.add_argument(
         "--rank_metric",
         choices=[
             "select_metric",
@@ -523,6 +529,7 @@ def main() -> None:
         candidates.append(base_candidate)
 
     original_best = max(candidates, key=lambda item: item[0])
+    rank_select_metric = args.rank_select_metric or args.select_metric
     rank_bootstrap_samples = args.rank_bootstrap_samples if args.rank_bootstrap_samples > 0 else args.bootstrap_samples
     rank_cache: Dict[int, Dict[str, float]] = {}
 
@@ -533,7 +540,7 @@ def main() -> None:
                 y_valid_ref,
                 candidate[4],
                 base_candidate[4],
-                args.select_metric,
+                rank_select_metric,
                 rank_bootstrap_samples,
                 args.bootstrap_seed,
                 args.bootstrap_quantile,
@@ -589,6 +596,7 @@ def main() -> None:
             selected_rejections.append(
                 {
                     "rank_metric": args.rank_metric,
+                    "rank_select_metric": rank_select_metric,
                     "rank_key": list(candidate_rank_key(candidate)),
                     "rank_bootstrap_guard": rank_summary,
                     "selected_gain": selected_gain,
@@ -609,6 +617,7 @@ def main() -> None:
             continue
         accepted_row = dict(candidate[1])
         accepted_row["rank_metric"] = args.rank_metric
+        accepted_row["rank_select_metric"] = rank_select_metric
         accepted_row["rank_key"] = list(candidate_rank_key(candidate))
         if rank_summary is not None:
             accepted_row["rank_bootstrap_guard"] = rank_summary
@@ -668,6 +677,7 @@ def main() -> None:
         "valid_source": selected_valid_source.astype(int).tolist(),
         "feature_config": {
             "select_metric": args.select_metric,
+            "rank_select_metric": rank_select_metric,
             "rank_metric": args.rank_metric,
             "strategies": sorted(strategies),
             "output_smooth": args.output_smooth,

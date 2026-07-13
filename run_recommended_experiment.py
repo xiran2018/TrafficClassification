@@ -18,6 +18,7 @@ DATASET_PRESETS = {
         "base_selector_input": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
         "max_prediction_change_rate": 0.0,
         "final_selector_rank_metric": "bootstrap_gain_quantile",
+        "final_selector_rank_select_metric": "accuracy",
         "final_selector_rank_candidate_limit": 256,
     },
     "tls-120": {
@@ -165,6 +166,8 @@ def final_selector_cmd(args) -> List[str]:
         args.label_map or default_label_map(args),
         "--select_metric",
         args.final_selector_metric,
+        "--rank_select_metric",
+        args.final_selector_rank_select_metric,
         "--rank_metric",
         args.final_selector_rank_metric,
         "--rank_bootstrap_samples",
@@ -366,6 +369,12 @@ def main() -> None:
     ap.add_argument("--final_selector_output", default="", help="Optional output path for the final validation-gated selector.")
     ap.add_argument("--final_selector_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
     ap.add_argument(
+        "--final_selector_rank_select_metric",
+        choices=["accuracy", "macro_f1"],
+        default="",
+        help="Metric used inside bootstrap_* ranking for the final selector. Defaults from dataset presets, then final selector metric.",
+    )
+    ap.add_argument(
         "--final_selector_rank_metric",
         choices=[
             "select_metric",
@@ -420,6 +429,8 @@ def main() -> None:
         args.final_selector_max_prediction_change_rate = float(preset.get("max_prediction_change_rate", 0.05))
     if not args.final_selector_rank_metric:
         args.final_selector_rank_metric = str(preset.get("final_selector_rank_metric", "select_metric"))
+    if not args.final_selector_rank_select_metric:
+        args.final_selector_rank_select_metric = str(preset.get("final_selector_rank_select_metric", args.final_selector_metric))
     if args.final_selector_rank_candidate_limit < 0:
         args.final_selector_rank_candidate_limit = int(preset.get("final_selector_rank_candidate_limit", 256))
     if not args.plan_json:
