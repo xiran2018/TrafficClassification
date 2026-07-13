@@ -22,6 +22,12 @@ DEFAULT_CASES = [
     ),
     (
         "vpn-app",
+        "calibration-enabled selector",
+        "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift005_valid_macro.json",
+        "extra candidate, still unsafe",
+    ),
+    (
+        "vpn-app",
         "safe selector",
         "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_bootstrap_shift_tol001_valid_macro.json",
         "target-shift fallback",

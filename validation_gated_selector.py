@@ -245,6 +245,22 @@ def reliability_fusion_prob(
     return normalize_prob(fused)
 
 
+def class_bias_from_validation(valid_prob: np.ndarray, y_valid: np.ndarray, alpha: float) -> np.ndarray:
+    num_classes = valid_prob.shape[1]
+    true_mass = np.bincount(y_valid, minlength=num_classes).astype(np.float64)
+    pred_mass = valid_prob.sum(axis=0).astype(np.float64)
+    true_prior = (true_mass + alpha) / (true_mass.sum() + alpha * num_classes)
+    pred_prior = (pred_mass + alpha) / (pred_mass.sum() + alpha * num_classes)
+    return np.log(np.clip(true_prior, 1e-12, None) / np.clip(pred_prior, 1e-12, None))
+
+
+def class_bias_calibrated_prob(prob: np.ndarray, bias: np.ndarray, strength: float, temperature: float) -> np.ndarray:
+    prob = normalize_prob(prob)
+    adjusted = np.power(np.clip(prob, 1e-12, None), 1.0 / max(temperature, 1e-12))
+    adjusted = adjusted * np.exp(strength * bias)[None, :]
+    return normalize_prob(adjusted)
+
+
 def threshold_switch_selector(
     base_prob: np.ndarray,
     expert_prob: np.ndarray,
@@ -290,6 +306,8 @@ def main() -> None:
     ap.add_argument("--confidence_power_grid", default="0,0.5,1,2")
     ap.add_argument("--reliability_min_weight_grid", default="0,0.02,0.05")
     ap.add_argument("--reliability_temperature_grid", default="0.5,1,2")
+    ap.add_argument("--calibration_strength_grid", default="0.25,0.5,0.75,1.0")
+    ap.add_argument("--calibration_temperature_grid", default="0.75,1,1.25")
     ap.add_argument("--output_smooth", type=float, default=0.0, help="Optional one-hot smoothing for selected predictions.")
     ap.add_argument("--min_valid_gain_over_base", type=float, default=0.0, help="Fallback to the first input unless the selected validation metric improves by at least this amount.")
     ap.add_argument("--bootstrap_samples", type=int, default=0, help="Bootstrap validation resamples for stability-gated fallback. Disabled at 0.")
@@ -325,6 +343,7 @@ def main() -> None:
 
     strategies = {x.strip() for x in args.strategies.split(",") if x.strip()}
     reports: List[Dict[str, Any]] = []
+    candidates: List[Tuple[Tuple[float, float, float], Dict[str, Any], np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
     best = None
     base_candidate = None
 
@@ -353,10 +372,12 @@ def main() -> None:
             valid_source = np.full(len(y_valid_ref), -1, dtype=np.int64)
         if test_source is None:
             test_source = np.full(len(y_test_ref), -1, dtype=np.int64)
+        candidate = (key, row, valid_source.copy(), test_source.copy(), valid_prob, test_prob)
+        candidates.append(candidate)
         if best is None or key > best[0]:
-            best = (key, row, valid_source.copy(), test_source.copy(), valid_prob, test_prob)
+            best = candidate
         if name == "always" and config.get("source") == named_payloads[0][0]:
-            base_candidate = (key, row, valid_source.copy(), test_source.copy(), valid_prob, test_prob)
+            base_candidate = candidate
 
     def add_candidate(name: str, config: Dict[str, Any], valid_source: np.ndarray, test_source: np.ndarray) -> None:
         valid_prob = selected_prob_from_sources(valid_probs, valid_source, args.output_smooth)
@@ -412,6 +433,26 @@ def main() -> None:
                                 test_prob,
                             )
 
+    if "class_bias_calibration" in strategies:
+        for source_idx, (source_name, _, _) in enumerate(named_payloads):
+            for alpha in parse_float_list(args.alpha_grid):
+                bias = class_bias_from_validation(valid_probs[source_idx], y_valid_ref, alpha)
+                for strength in parse_float_list(args.calibration_strength_grid):
+                    for temperature in parse_float_list(args.calibration_temperature_grid):
+                        valid_prob = class_bias_calibrated_prob(valid_probs[source_idx], bias, strength, temperature)
+                        test_prob = class_bias_calibrated_prob(test_probs[source_idx], bias, strength, temperature)
+                        add_prob_candidate(
+                            "class_bias_calibration",
+                            {
+                                "source": source_name,
+                                "alpha": alpha,
+                                "strength": strength,
+                                "temperature": temperature,
+                            },
+                            valid_prob,
+                            test_prob,
+                        )
+
     if "threshold_switch" in strategies and len(valid_probs) > 1:
         conf_grid = parse_float_list(args.expert_conf_grid)
         margin_grid = parse_float_list(args.expert_margin_grid)
@@ -459,61 +500,74 @@ def main() -> None:
         key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
         test_prob = selected_prob_from_sources(test_probs, test_src, args.output_smooth)
         base_candidate = (key, row, valid_src, test_src, valid_prob, test_prob)
+        candidates.append(base_candidate)
 
-    selected_gain = best[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric]
-    bootstrap_summary = bootstrap_gain_guard(
-        y_valid_ref,
-        best[4],
-        base_candidate[4],
-        args.select_metric,
-        args.bootstrap_samples,
-        args.bootstrap_seed,
-        args.bootstrap_quantile,
-    )
-    bootstrap_reject = False
-    if args.bootstrap_samples > 0:
-        bootstrap_reject = (
-            bootstrap_summary["win_rate"] < args.bootstrap_min_win_rate
-            or bootstrap_summary["gain_quantile"] < args.bootstrap_min_gain_quantile
+    original_best = max(candidates, key=lambda item: item[0])
+    selected_rejections = []
+    selected_candidate = None
+    for candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
+        selected_gain = candidate[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric]
+        bootstrap_summary = bootstrap_gain_guard(
+            y_valid_ref,
+            candidate[4],
+            base_candidate[4],
+            args.select_metric,
+            args.bootstrap_samples,
+            args.bootstrap_seed,
+            args.bootstrap_quantile,
         )
-    shift_summary = target_shift_guard(best[5], base_candidate[5])
-    shift_reject = shift_summary["prediction_change_rate"] > args.max_prediction_change_rate
-    if selected_gain < args.min_valid_gain_over_base:
+        bootstrap_reject = False
+        if args.bootstrap_samples > 0:
+            bootstrap_reject = (
+                bootstrap_summary["win_rate"] < args.bootstrap_min_win_rate
+                or bootstrap_summary["gain_quantile"] < args.bootstrap_min_gain_quantile
+            )
+        shift_summary = target_shift_guard(candidate[5], base_candidate[5])
+        shift_reject = shift_summary["prediction_change_rate"] > args.max_prediction_change_rate
+        gain_reject = selected_gain < args.min_valid_gain_over_base
+        if gain_reject or bootstrap_reject or shift_reject:
+            selected_rejections.append(
+                {
+                    "selected_gain": selected_gain,
+                    "min_valid_gain_over_base": args.min_valid_gain_over_base,
+                    "bootstrap_guard": bootstrap_summary,
+                    "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
+                    "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
+                    "target_shift_guard": shift_summary,
+                    "max_prediction_change_rate": args.max_prediction_change_rate,
+                    "rejected": candidate[1],
+                    "reject_reasons": {
+                        "gain": gain_reject,
+                        "bootstrap": bootstrap_reject,
+                        "target_shift": shift_reject,
+                    },
+                }
+            )
+            continue
+        accepted_row = dict(candidate[1])
+        accepted_row["bootstrap_guard"] = bootstrap_summary
+        accepted_row["target_shift_guard"] = shift_summary
+        if selected_rejections:
+            accepted_row["rejected_before_accept"] = selected_rejections[:5]
+        selected_candidate = (candidate[0], accepted_row, candidate[2], candidate[3], candidate[4], candidate[5])
+        break
+    if selected_candidate is None:
         fallback_row = dict(base_candidate[1])
         fallback_row["fallback_reason"] = {
-            "selected_gain": selected_gain,
+            "selected_gain": original_best[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric],
             "min_valid_gain_over_base": args.min_valid_gain_over_base,
-            "bootstrap_guard": bootstrap_summary,
-            "target_shift_guard": shift_summary,
-            "rejected": best[1],
+            "rejected": original_best[1],
+            "rejected_candidates": selected_rejections[:5],
         }
-        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
-    elif bootstrap_reject:
-        fallback_row = dict(base_candidate[1])
-        fallback_row["fallback_reason"] = {
-            "selected_gain": selected_gain,
-            "min_valid_gain_over_base": args.min_valid_gain_over_base,
-            "bootstrap_guard": bootstrap_summary,
-            "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
-            "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
-            "target_shift_guard": shift_summary,
-            "rejected": best[1],
-        }
-        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
-    elif shift_reject:
-        fallback_row = dict(base_candidate[1])
-        fallback_row["fallback_reason"] = {
-            "selected_gain": selected_gain,
-            "min_valid_gain_over_base": args.min_valid_gain_over_base,
-            "bootstrap_guard": bootstrap_summary,
-            "target_shift_guard": shift_summary,
-            "max_prediction_change_rate": args.max_prediction_change_rate,
-            "rejected": best[1],
-        }
-        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
-    else:
-        best[1]["bootstrap_guard"] = bootstrap_summary
-        best[1]["target_shift_guard"] = shift_summary
+        selected_candidate = (
+            base_candidate[0],
+            fallback_row,
+            base_candidate[2],
+            base_candidate[3],
+            base_candidate[4],
+            base_candidate[5],
+        )
+    best = selected_candidate
 
     _, selected, selected_valid_source, selected_test_source, selected_valid_prob, selected_test_prob = best
     test_pred = selected_test_prob.argmax(axis=1).astype(np.int64)
