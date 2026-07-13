@@ -608,6 +608,37 @@ def contrastive_loss(z: torch.Tensor, labels: torch.Tensor, args, confusion_weig
     )
 
 
+def window_to_flow_contrastive_loss(
+    window_embs: torch.Tensor,
+    owners: torch.Tensor,
+    flow_embs: torch.Tensor,
+    flow_labels: torch.Tensor,
+    temperature: float = 0.07,
+    positive_mode: str = "same_class",
+) -> torch.Tensor:
+    """Pull local window embeddings toward same-flow or same-class flow prototypes."""
+    if window_embs.numel() == 0 or flow_embs.numel() == 0 or owners.numel() == 0:
+        return flow_embs.sum() * 0.0
+    temperature = max(float(temperature), 1e-6)
+    owners = owners.long().clamp(min=0, max=flow_embs.size(0) - 1)
+    z_win = F.normalize(window_embs.float(), p=2, dim=-1)
+    z_flow = F.normalize(flow_embs.float(), p=2, dim=-1)
+    logits = torch.matmul(z_win, z_flow.T) / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+    flow_ids = torch.arange(flow_embs.size(0), device=flow_embs.device)
+    own_flow_mask = flow_ids.unsqueeze(0) == owners.unsqueeze(1)
+    if positive_mode == "own_flow":
+        pos_mask = own_flow_mask
+    else:
+        owner_labels = flow_labels[owners].view(-1, 1)
+        pos_mask = owner_labels.eq(flow_labels.view(1, -1)) | own_flow_mask
+    valid = pos_mask.sum(dim=1) > 0
+    if valid.sum() == 0:
+        return flow_embs.sum() * 0.0
+    pos_logits = logits.masked_fill(~pos_mask, -1e9)
+    return -(torch.logsumexp(pos_logits[valid], dim=1) - torch.logsumexp(logits[valid], dim=1)).mean()
+
+
 def train_seq(args):
     ds = SeqDataset(args.dataset)
     tr, va = split_or_external_window_dataset(ds, SeqDataset, args)
@@ -836,6 +867,15 @@ def train_seq_flow(args):
                 loss = loss + args.hierarchical_weight * F.cross_entropy(coarse_logits, class_to_coarse[y])
             if args.window_loss_weight > 0:
                 loss = loss + args.window_loss_weight * class_weighted_loss(out["logits"], window_labels, class_weight, args.label_smoothing)
+            if args.window_contrastive_weight > 0:
+                loss = loss + args.window_contrastive_weight * window_to_flow_contrastive_loss(
+                    out["embedding"],
+                    owners_t,
+                    flow_embs,
+                    y,
+                    temperature=args.window_contrastive_temperature,
+                    positive_mode=args.window_contrastive_positive,
+                )
             if args.flow_contrastive_weight > 0:
                 loss = loss + args.flow_contrastive_weight * contrastive_loss(flow_embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
@@ -1036,6 +1076,8 @@ def train_graph_flow(args):
             paired_flow_coarse_logits = []
             window_logits_all = []
             window_labels = []
+            window_embs_all = []
+            window_owners = []
             labels = []
             for group in flow_batch:
                 window_embs = []
@@ -1059,6 +1101,9 @@ def train_graph_flow(args):
                         window_embs_aug.append(out_aug["embedding"])
                         window_logits_aug.append(out_aug["logits"].squeeze(0))
                 if window_embs:
+                    active_flow_idx = len(labels)
+                    window_embs_all.extend(window_embs)
+                    window_owners.extend([active_flow_idx] * len(window_embs))
                     pooled = flow_head(torch.stack(window_embs, dim=0), window_logits=torch.stack(window_logits, dim=0))
                     flow_logits.append(pooled["logits"])
                     if pooled.get("coarse_logits") is not None:
@@ -1113,6 +1158,15 @@ def train_graph_flow(args):
                 win_logits = torch.stack(window_logits_all, dim=0)
                 win_y = torch.tensor(window_labels, dtype=torch.long, device=args.device)
                 loss = loss + args.window_loss_weight * class_weighted_loss(win_logits, win_y, class_weight, args.label_smoothing)
+            if args.window_contrastive_weight > 0 and window_embs_all:
+                loss = loss + args.window_contrastive_weight * window_to_flow_contrastive_loss(
+                    torch.stack(window_embs_all, dim=0),
+                    torch.tensor(window_owners, dtype=torch.long, device=args.device),
+                    embs,
+                    y,
+                    temperature=args.window_contrastive_temperature,
+                    positive_mode=args.window_contrastive_positive,
+                )
             if args.flow_contrastive_weight > 0:
                 loss = loss + args.flow_contrastive_weight * contrastive_loss(embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
@@ -1222,6 +1276,9 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "confusion_weight_power": args.confusion_weight_power,
         "flow_contrastive_weight": args.flow_contrastive_weight,
         "flow_temperature": args.flow_temperature,
+        "window_contrastive_weight": args.window_contrastive_weight,
+        "window_contrastive_temperature": args.window_contrastive_temperature,
+        "window_contrastive_positive": args.window_contrastive_positive,
         "flow_transformer_layers": args.flow_transformer_layers,
         "flow_transformer_heads": args.flow_transformer_heads,
         "meta_dropout_prob": args.meta_dropout_prob,
@@ -1285,6 +1342,9 @@ def main():
     ap.add_argument("--confusion_weight_power", type=float, default=1.0, help="Power applied to normalized confusion weights; >1 focuses more on the strongest confusions.")
     ap.add_argument("--flow_contrastive_weight", type=float, default=0.0, help="Weight for supervised contrastive loss over flow embeddings in --train_level flow.")
     ap.add_argument("--flow_temperature", type=float, default=0.07)
+    ap.add_argument("--window_contrastive_weight", type=float, default=0.0, help="Weight for window-to-flow prototype contrastive loss in --train_level flow.")
+    ap.add_argument("--window_contrastive_temperature", type=float, default=0.07, help="Temperature for --window_contrastive_weight.")
+    ap.add_argument("--window_contrastive_positive", choices=["own_flow", "same_class"], default="same_class", help="Positive flow prototypes for window-to-flow contrastive loss.")
     ap.add_argument("--meta_dropout_prob", type=float, default=0.0, help="Training-only dropout on the trailing metadata feature dimensions of x.")
     ap.add_argument("--meta_feature_dim", type=int, default=14, help="Number of trailing metadata feature dimensions appended by preprocess_tower2.py.")
     ap.add_argument("--embedding_dropout_prob", type=float, default=0.0, help="Training-only dropout on packet embedding dimensions; trailing metadata dimensions are controlled by --meta_dropout_prob.")
@@ -1304,6 +1364,10 @@ def main():
         print("WARNING: --train_level flow ignores aux/coherence weights; use --window_loss_weight for dual flow/window classification.")
     if args.flow_contrastive_weight > 0 and not args.balanced_flow_batches:
         print("WARNING: flow SupCon is usually more effective with --balanced_flow_batches so each batch has positive pairs.")
+    if args.window_contrastive_weight > 0 and args.train_level != "flow":
+        print("WARNING: --window_contrastive_weight is only used with --train_level flow.")
+    if args.window_contrastive_weight > 0 and not args.balanced_flow_batches and args.window_contrastive_positive == "same_class":
+        print("WARNING: same-class window-to-flow contrastive works best with --balanced_flow_batches.")
     if args.hierarchical_mode == "expert" and args.hierarchical_logit_weight > 0:
         print("WARNING: --hierarchical_mode expert already uses coarse probabilities; --hierarchical_logit_weight is ignored.")
     if args.hierarchical_mode == "logit" and args.hierarchical_logit_weight > 0 and args.hierarchical_weight <= 0:

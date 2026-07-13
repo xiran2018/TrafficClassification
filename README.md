@@ -848,7 +848,7 @@ python train_tower2.py \
 
 `--valid_dataset` uses the held-out valid split for checkpoint selection instead of taking a validation subset from the training flows.
 
-`--train_level flow` groups windows by `flow_id`, pools window embeddings with the trainable `--flow_pooling` head, and optimizes the flow label directly. `--window_loss_weight` keeps the original window classifier supervised during flow-level training. `--class_weighting effective` enables class-balanced CE. `--flow_contrastive_weight` adds supervised contrastive learning on pooled flow embeddings, and `--balanced_flow_batches` makes SupCon batches contain same-class positives. `--flow_pooling late_fusion` combines the trainable flow head with mean window logits.
+`--train_level flow` groups windows by `flow_id`, pools window embeddings with the trainable `--flow_pooling` head, and optimizes the flow label directly. `--window_loss_weight` keeps the original window classifier supervised during flow-level training. `--class_weighting effective` enables class-balanced CE. `--flow_contrastive_weight` adds supervised contrastive learning on pooled flow embeddings, and `--balanced_flow_batches` makes SupCon batches contain same-class positives. `--window_contrastive_weight` adds a window-to-flow prototype contrastive loss: each local window embedding is pulled toward its own-flow or same-class flow prototype and pushed away from different-class flow prototypes. `--flow_pooling late_fusion` combines the trainable flow head with mean window logits.
 
 `--select_metric flow_macro_f1` saves `best.pt` by validation macro-F1 instead of validation accuracy. `--hierarchical_weight` adds a coarse-label loss, while `--hierarchical_logit_weight` adds the coarse log-probability back to each fine-class logit at train/test time. `--contrastive_mode confusion` uses only configured same-group hard negatives in SupCon instead of pushing against every different class.
 
@@ -1443,7 +1443,29 @@ Tower-1 training signal:
 
 Interpretation for paper experiments: packet-level training accuracy alone is not a sufficient checkpoint-selection criterion. The final `step_200` adapter has stronger packet training accuracy, but `step_150` gives better downstream flow-level generalization on USTC. Keep downstream validation-aware checkpoint selection as part of the unified framework and report the `step_200` result as an ablation.
 
-This is not yet a strong USTC result, but it is an important ablation: when Tower-1 batches contain multiple flows, the flow-aware SupCon term becomes active and downstream validation-aware checkpoint selection improves flow-level generalization. The next USTC step should be a real flow/window-level contrastive objective, rather than only extending the last checkpoint.
+This is not yet a strong USTC result, but it is an important ablation: when Tower-1 batches contain multiple flows, the flow-aware SupCon term becomes active and downstream validation-aware checkpoint selection improves flow-level generalization.
+
+Tower-2 now also implements a flow/window-level contrastive objective through `--window_contrastive_weight`. A first USTC `step_150` ablation with `--window_contrastive_weight 0.05 --window_contrastive_positive same_class` improved the seq Tower-2 single-head test result to `0.55` accuracy / `0.4417` macro-F1, but constrained residual fusion with the current best selected only a small seq residual (`base=0.95, seq_wincon=0.05, graph_wincon=0.0`) and kept the final test result at `0.65` accuracy / `0.5750` macro-F1:
+
+```text
+Seq wincon:
+  reasoningDataset/ustc-app/test_seq_metrics_flow_rawproj_flowaware_change_weight_s200_pb8_step150_wincon.json
+  flow accuracy = 0.5500
+  flow macro-F1 = 0.4417
+
+Graph wincon:
+  reasoningDataset/ustc-app/test_graph_metrics_flow_rawproj_flowaware_change_weight_s200_pb8_step150_wincon.json
+  flow accuracy = 0.5000
+  flow macro-F1 = 0.3750
+
+Residual fusion:
+  reasoningDataset/ustc-app/test_fusion_ustc_step150_base_wincon_residual.json
+  selected weights: base=0.95, seq_wincon=0.05, graph_wincon=0.0
+  flow accuracy = 0.6500
+  flow macro-F1 = 0.5750
+```
+
+Interpretation: the window-to-flow objective is implemented and gives a cleaner paper module, but this first Tower-2-only setting is not enough to beat the embedding-expert-dominant USTC best. The next stronger direction is to move the same window/flow objective into Tower-1 or tune a smaller `window_contrastive_weight` grid before full VPN/TLS verification.
 
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
@@ -1745,5 +1767,6 @@ Flow-level Accuracy / Precision / Recall / F1
 15. Target-prior single calibration vs candidate-pool prior ensemble
 16. Full-view Tower-2 vs paired full/randomized-view consistency
 17. Tower-1 label-only SupCon vs flow-aware SupCon
+18. Flow-only SupCon vs window-to-flow prototype contrastive loss
 
 These ablations directly support the claim that Tower 1 learns protocol-aware packet semantics while Tower 2 learns flow-level packet interaction patterns.
