@@ -75,6 +75,37 @@ def all_goals_met(status: List[Dict[str, Any]], goal_datasets: List[str]) -> boo
     return True
 
 
+def best_delta_summary(before: List[Dict[str, Any]], after: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    before_map = {row["dataset"]: row for row in before}
+    rows: List[Dict[str, Any]] = []
+    for after_row in after:
+        dataset = after_row["dataset"]
+        before_best = (before_map.get(dataset) or {}).get("best")
+        after_best = after_row.get("best")
+        item: Dict[str, Any] = {
+            "dataset": dataset,
+            "before_best": before_best,
+            "after_best": after_best,
+            "best_changed": bool(
+                before_best
+                and after_best
+                and before_best.get("path") != after_best.get("path")
+            ),
+            "new_best_found": False,
+        }
+        if before_best and after_best:
+            item["delta_accuracy"] = float(after_best["accuracy"] - before_best["accuracy"])
+            item["delta_macro_f1"] = float((after_best.get("macro_f1") or 0.0) - (before_best.get("macro_f1") or 0.0))
+            item["new_best_found"] = bool(
+                item["delta_accuracy"] > 0
+                or (item["delta_accuracy"] == 0 and item["delta_macro_f1"] > 0 and item["best_changed"])
+            )
+        elif after_best and not before_best:
+            item["new_best_found"] = True
+        rows.append(item)
+    return rows
+
+
 def framework_ready(framework: Dict[str, Any] | None, required: bool) -> bool:
     if not required:
         return True
@@ -338,6 +369,7 @@ def main() -> None:
         framework_after = load_framework_consistency()
         evidence_after = load_evidence_pack()
         record["status_after"] = dataset_status(datasets, targets)
+        record["best_delta"] = best_delta_summary(before, record["status_after"])
         record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
         record["framework_consistency_after"] = framework_after
         record["evidence_pack_after"] = evidence_after
