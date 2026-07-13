@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
+from sklearn.metrics import f1_score
 from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
 
 
@@ -21,6 +22,74 @@ def compute_metrics(y_true, y_pred):
         "weighted_precision": p_weight,
         "weighted_recall": r_weight,
         "weighted_f1": f_weight,
+    }
+
+
+def metric_score(y_true: np.ndarray, y_pred: np.ndarray, metric: str) -> float:
+    if len(y_true) == 0:
+        return 0.0
+    if metric == "accuracy":
+        return float(accuracy_score(y_true.tolist(), y_pred.tolist()))
+    if metric == "macro_f1":
+        return float(f1_score(y_true.tolist(), y_pred.tolist(), average="macro", zero_division=0))
+    raise ValueError(metric)
+
+
+def bootstrap_gain_guard(
+    y_valid: np.ndarray,
+    selected_prob: np.ndarray,
+    base_prob: np.ndarray,
+    metric: str,
+    samples: int,
+    seed: int,
+    quantile: float,
+) -> Dict[str, float]:
+    selected_pred = selected_prob.argmax(axis=1).astype(np.int64)
+    base_pred = base_prob.argmax(axis=1).astype(np.int64)
+    full_gain = metric_score(y_valid, selected_pred, metric) - metric_score(y_valid, base_pred, metric)
+    if samples <= 0:
+        return {
+            "enabled": False,
+            "full_gain": full_gain,
+            "samples": 0,
+            "win_rate": 1.0 if full_gain > 0 else 0.0,
+            "mean_gain": full_gain,
+            "gain_quantile": full_gain,
+        }
+    rng = np.random.default_rng(seed)
+    gains = np.zeros(samples, dtype=np.float64)
+    n = len(y_valid)
+    for i in range(samples):
+        idx = rng.integers(0, n, size=n)
+        gains[i] = metric_score(y_valid[idx], selected_pred[idx], metric) - metric_score(y_valid[idx], base_pred[idx], metric)
+    return {
+        "enabled": True,
+        "full_gain": full_gain,
+        "samples": int(samples),
+        "win_rate": float((gains > 0).mean()),
+        "mean_gain": float(gains.mean()),
+        "gain_quantile": float(np.quantile(gains, quantile)),
+        "quantile": float(quantile),
+    }
+
+
+def target_shift_guard(selected_prob: np.ndarray, base_prob: np.ndarray) -> Dict[str, float]:
+    selected_pred = selected_prob.argmax(axis=1).astype(np.int64)
+    base_pred = base_prob.argmax(axis=1).astype(np.int64)
+    num_classes = max(selected_prob.shape[1], base_prob.shape[1])
+    selected_hist = np.bincount(selected_pred, minlength=num_classes).astype(np.float64)
+    base_hist = np.bincount(base_pred, minlength=num_classes).astype(np.float64)
+    selected_hist /= max(float(selected_hist.sum()), 1.0)
+    base_hist /= max(float(base_hist.sum()), 1.0)
+    midpoint = 0.5 * (selected_hist + base_hist)
+
+    def kl_div(p: np.ndarray, q: np.ndarray) -> float:
+        mask = p > 0
+        return float((p[mask] * np.log2(p[mask] / np.maximum(q[mask], 1e-12))).sum())
+
+    return {
+        "prediction_change_rate": float((selected_pred != base_pred).mean()) if len(selected_pred) else 0.0,
+        "prediction_js_divergence": 0.5 * kl_div(selected_hist, midpoint) + 0.5 * kl_div(base_hist, midpoint),
     }
 
 
@@ -223,6 +292,12 @@ def main() -> None:
     ap.add_argument("--reliability_temperature_grid", default="0.5,1,2")
     ap.add_argument("--output_smooth", type=float, default=0.0, help="Optional one-hot smoothing for selected predictions.")
     ap.add_argument("--min_valid_gain_over_base", type=float, default=0.0, help="Fallback to the first input unless the selected validation metric improves by at least this amount.")
+    ap.add_argument("--bootstrap_samples", type=int, default=0, help="Bootstrap validation resamples for stability-gated fallback. Disabled at 0.")
+    ap.add_argument("--bootstrap_seed", type=int, default=13)
+    ap.add_argument("--bootstrap_quantile", type=float, default=0.05)
+    ap.add_argument("--bootstrap_min_win_rate", type=float, default=0.0, help="Fallback unless selected candidate beats base in at least this fraction of bootstrap samples.")
+    ap.add_argument("--bootstrap_min_gain_quantile", type=float, default=-1.0, help="Fallback unless the bootstrap gain quantile is at least this value.")
+    ap.add_argument("--max_prediction_change_rate", type=float, default=1.0, help="Fallback if selected test predictions differ from the base input by more than this unlabeled target fraction.")
     ap.add_argument("--print_all_candidates", action="store_true", help="Print every validation selector candidate.")
     ap.add_argument("--output_json", required=True)
     args = ap.parse_args()
@@ -386,14 +461,59 @@ def main() -> None:
         base_candidate = (key, row, valid_src, test_src, valid_prob, test_prob)
 
     selected_gain = best[1]["metrics"][args.select_metric] - base_candidate[1]["metrics"][args.select_metric]
+    bootstrap_summary = bootstrap_gain_guard(
+        y_valid_ref,
+        best[4],
+        base_candidate[4],
+        args.select_metric,
+        args.bootstrap_samples,
+        args.bootstrap_seed,
+        args.bootstrap_quantile,
+    )
+    bootstrap_reject = False
+    if args.bootstrap_samples > 0:
+        bootstrap_reject = (
+            bootstrap_summary["win_rate"] < args.bootstrap_min_win_rate
+            or bootstrap_summary["gain_quantile"] < args.bootstrap_min_gain_quantile
+        )
+    shift_summary = target_shift_guard(best[5], base_candidate[5])
+    shift_reject = shift_summary["prediction_change_rate"] > args.max_prediction_change_rate
     if selected_gain < args.min_valid_gain_over_base:
         fallback_row = dict(base_candidate[1])
         fallback_row["fallback_reason"] = {
             "selected_gain": selected_gain,
             "min_valid_gain_over_base": args.min_valid_gain_over_base,
+            "bootstrap_guard": bootstrap_summary,
+            "target_shift_guard": shift_summary,
             "rejected": best[1],
         }
         best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
+    elif bootstrap_reject:
+        fallback_row = dict(base_candidate[1])
+        fallback_row["fallback_reason"] = {
+            "selected_gain": selected_gain,
+            "min_valid_gain_over_base": args.min_valid_gain_over_base,
+            "bootstrap_guard": bootstrap_summary,
+            "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
+            "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
+            "target_shift_guard": shift_summary,
+            "rejected": best[1],
+        }
+        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
+    elif shift_reject:
+        fallback_row = dict(base_candidate[1])
+        fallback_row["fallback_reason"] = {
+            "selected_gain": selected_gain,
+            "min_valid_gain_over_base": args.min_valid_gain_over_base,
+            "bootstrap_guard": bootstrap_summary,
+            "target_shift_guard": shift_summary,
+            "max_prediction_change_rate": args.max_prediction_change_rate,
+            "rejected": best[1],
+        }
+        best = (base_candidate[0], fallback_row, base_candidate[2], base_candidate[3], base_candidate[4], base_candidate[5])
+    else:
+        best[1]["bootstrap_guard"] = bootstrap_summary
+        best[1]["target_shift_guard"] = shift_summary
 
     _, selected, selected_valid_source, selected_test_source, selected_valid_prob, selected_test_prob = best
     test_pred = selected_test_prob.argmax(axis=1).astype(np.int64)
@@ -427,6 +547,12 @@ def main() -> None:
             "select_metric": args.select_metric,
             "strategies": sorted(strategies),
             "output_smooth": args.output_smooth,
+            "bootstrap_samples": args.bootstrap_samples,
+            "bootstrap_seed": args.bootstrap_seed,
+            "bootstrap_quantile": args.bootstrap_quantile,
+            "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
+            "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
+            "max_prediction_change_rate": args.max_prediction_change_rate,
         },
     }
     Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
