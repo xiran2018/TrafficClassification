@@ -110,6 +110,14 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
             "--output_md",
             "reasoningDataset/paper_ablation_report.md",
         ],
+        [
+            "python",
+            "make_paper_evidence_pack.py",
+            "--output_json",
+            "reasoningDataset/paper_evidence_pack.json",
+            "--output_md",
+            "reasoningDataset/paper_evidence_pack.md",
+        ],
     ]
 
 

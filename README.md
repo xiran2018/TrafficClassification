@@ -2028,6 +2028,23 @@ tls tolerant safe selector:        delta acc CI [-0.0011, +0.0010], delta macro-
 ustc safe selector:                delta acc CI [0.0000, +0.1500], delta macro-F1 CI [0.0000, +0.1331]
 ```
 
+Generate the compact paper evidence pack:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python make_paper_evidence_pack.py \
+    --output_json reasoningDataset/paper_evidence_pack.json \
+    --output_md reasoningDataset/paper_evidence_pack.md
+```
+
+Current evidence-pack claim status:
+
+```text
+vpn-app:  point_pass_ci_mixed  (point target passes; bootstrap acc lower bound is below 0.74)
+tls-120:  strong               (point target and bootstrap lower bounds both pass)
+ustc-app: evidence_only        (tiny 20-flow test split; framework evidence, not a strong performance claim)
+```
+
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
 
 ```bash
