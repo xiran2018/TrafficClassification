@@ -1906,6 +1906,23 @@ conda run --no-capture-output -n llm-factory \
     --dataset ustc-app
 ```
 
+To generate the unified VPN/TLS/USTC command suite in one step:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_suite.py \
+    --output_json reasoningDataset/recommended_suite_plan.json
+```
+
+In the real A800 `llm-factory` shell, add `--execute` to run the suite sequentially:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_suite.py \
+    --execute \
+    --output_json reasoningDataset/recommended_suite_plan.json
+```
+
 The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with `--run_tag paired_ipport`, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. The final selector output is:
 
 ```text
