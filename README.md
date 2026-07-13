@@ -1541,6 +1541,36 @@ selected weights: base=1.0, candidate=0.0
 
 This means the remaining USTC gap should be attacked through representation learning or dataset construction, not by repeatedly recombining the same probability JSONs.
 
+Training the packet-to-flow prototype objective inside the full Tower-1 schedule is more useful than short continuation. A 200-step USTC Tower-1 run with `--flow_proto_weight 0.02`, `packet_batch_size=8`, `packets_per_flow=2`, and checkpoints every 50 steps improved the best USTC macro-F1 when using the `step_150` embedding expert:
+
+```text
+Tower-1 full proto run:
+  output checkpoint root: checkpoints/tower1_qwen_multitask_ustc_app_flowproto_full_s200_w002
+  selected checkpoint for this ablation: step_150
+  step_150 training signal: pkt_cls=0.7289, supcon=0.1105, proto=0.0358, pkt_acc=0.6750
+  step_200 training signal: pkt_cls=0.3365, supcon=0.0242, proto=0.0028, pkt_acc=0.8000
+
+Graph/seq Tower-2 fusion from step_150 embeddings:
+  reasoningDataset/ustc-app/test_fusion_graph_seq_rawproj_flowproto_full_s200_w002_step150_stage8_flowaware_valid_acc.json
+  selected weights: graph=0.70, seq=0.30
+  flow accuracy = 0.5000
+  flow macro-F1 = 0.4117
+
+Flow-embedding expert from step_150 embeddings:
+  reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json
+  valid selected logreg, n_components=19, C=0.03
+  flow accuracy = 0.6500
+  flow macro-F1 = 0.6083
+
+Residual fusion with the previous best:
+  reasoningDataset/ustc-app/test_fusion_ustc_step150_base_flowproto_full_s200_w002_step150_residual_macro.json
+  selected weights: base=0.85, proto_emb=0.15, proto_gs=0.0
+  flow accuracy = 0.6500
+  flow macro-F1 = 0.5750
+```
+
+Interpretation: full-schedule prototype learning did not increase USTC accuracy, but it improved the best single-result macro-F1 from `0.5750` to `0.6083`. For paper framing, this supports the representation-learning claim: prototype alignment helps class-balanced behavior, while validation-gated residual fusion prevents a high-validation but split-fragile expert from overwriting the safer base prediction.
+
 The flow-aware Tower-1 preprocessing inputs have been generated for both VPN and TLS-120:
 
 ```text
