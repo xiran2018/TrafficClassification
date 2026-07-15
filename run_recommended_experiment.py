@@ -132,6 +132,18 @@ def slot_stacker_output_exists(args) -> bool:
     return Path(slot_stacker_output_path(args)).exists()
 
 
+def soft_gate_output_path(args) -> str:
+    if args.soft_gate_output:
+        return args.soft_gate_output
+    root = Path("reasoningDataset") / args.dataset
+    suffix = result_suffix(args.embedding_suffix, args.run_tag)
+    return str(root / f"test_expert_gate_unified_slot_{suffix}_valid_macro.json")
+
+
+def soft_gate_output_exists(args) -> bool:
+    return Path(soft_gate_output_path(args)).exists()
+
+
 def selected_model_types(args) -> List[str]:
     out: List[str] = []
     for raw in args.model_types.split(","):
@@ -200,6 +212,20 @@ def slot_stacker_inputs(args) -> List[tuple[str, str]]:
     return parse_named_inputs(args.slot_stacker_input) if args.slot_stacker_input else default_slot_stacker_inputs(args)
 
 
+def default_soft_gate_inputs(args) -> List[tuple[str, str]]:
+    base_input = args.base_selector_input or default_base_selector_input(args)
+    inputs = [("base", base_input)]
+    if args.enable_slot_stacker:
+        inputs.append(("slot_stacker", slot_stacker_output_path(args)))
+    else:
+        inputs.append(("paired", paired_prior_output_path(args)))
+    return [(name, path) for name, path in inputs if path]
+
+
+def soft_gate_inputs(args) -> List[tuple[str, str]]:
+    return parse_named_inputs(args.soft_gate_input) if args.soft_gate_input else default_soft_gate_inputs(args)
+
+
 def slot_stacker_cmd(args) -> List[str]:
     cmd = [
         "python",
@@ -226,6 +252,42 @@ def slot_stacker_cmd(args) -> List[str]:
     return cmd
 
 
+def soft_gate_cmd(args) -> List[str]:
+    cmd = [
+        "python",
+        "train_expert_gate.py",
+        "--label_map",
+        args.label_map or default_label_map(args),
+        "--select_metric",
+        args.soft_gate_select_metric,
+        "--hidden_dim",
+        str(args.soft_gate_hidden_dim),
+        "--dropout",
+        str(args.soft_gate_dropout),
+        "--epochs",
+        str(args.soft_gate_epochs),
+        "--lr",
+        str(args.soft_gate_lr),
+        "--weight_decay",
+        str(args.soft_gate_weight_decay),
+        "--entropy_weight",
+        str(args.soft_gate_entropy_weight),
+        "--cv_splits",
+        str(args.soft_gate_cv_splits),
+        "--seed",
+        str(args.seed),
+        "--device",
+        args.soft_gate_device,
+        "--unified_expert_slots",
+        args.final_selector_unified_expert_slots,
+        "--output_json",
+        soft_gate_output_path(args),
+    ]
+    for name, path in soft_gate_inputs(args):
+        cmd += ["--input", name, path]
+    return cmd
+
+
 def final_selector_cmd(args) -> List[str]:
     base_input = args.base_selector_input or default_base_selector_input(args)
     if not base_input:
@@ -242,6 +304,8 @@ def final_selector_cmd(args) -> List[str]:
     ]
     if args.enable_slot_stacker:
         cmd += ["--input", "slot_stacker", slot_stacker_output_path(args)]
+    if args.enable_soft_expert_gate:
+        cmd += ["--input", "soft_gate", soft_gate_output_path(args)]
     cmd += [
         "--label_map",
         args.label_map or default_label_map(args),
@@ -391,6 +455,12 @@ def stage_commands(args) -> List[Dict[str, Any]]:
             "skip_if": (not args.enable_slot_stacker) or (args.skip_existing and slot_stacker_output_exists(args)),
         },
         {
+            "name": "soft_expert_gate",
+            "cmd": soft_gate_cmd(args),
+            "requires_cuda": False,
+            "skip_if": (not args.enable_soft_expert_gate) or (args.skip_existing and soft_gate_output_exists(args)),
+        },
+        {
             "name": "final_selector",
             "cmd": final_selector_cmd(args),
             "requires_cuda": False,
@@ -438,10 +508,21 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "slot_stacker_select_metric": args.slot_stacker_select_metric,
             "slot_stacker_include_logits": args.slot_stacker_include_logits,
             "slot_stacker_include_confidence": args.slot_stacker_include_confidence,
+            "enable_soft_expert_gate": args.enable_soft_expert_gate,
+            "soft_gate_inputs": soft_gate_inputs(args) if args.enable_soft_expert_gate else [],
+            "soft_gate_output": soft_gate_output_path(args) if args.enable_soft_expert_gate else "",
+            "soft_gate_hidden_dim": args.soft_gate_hidden_dim,
+            "soft_gate_dropout": args.soft_gate_dropout,
+            "soft_gate_epochs": args.soft_gate_epochs,
+            "soft_gate_lr": args.soft_gate_lr,
+            "soft_gate_weight_decay": args.soft_gate_weight_decay,
+            "soft_gate_entropy_weight": args.soft_gate_entropy_weight,
+            "soft_gate_cv_splits": args.soft_gate_cv_splits,
         },
         "base_selector_input": args.base_selector_input or default_base_selector_input(args),
         "paired_prior_output": paired_prior_output_path(args),
         "slot_stacker_output": slot_stacker_output_path(args) if args.enable_slot_stacker else "",
+        "soft_gate_output": soft_gate_output_path(args) if args.enable_soft_expert_gate else "",
         "final_selector_output": final_selector_output_path(args),
         "stages": [
             {
@@ -561,6 +642,30 @@ def main() -> None:
     ap.add_argument("--slot_stacker_include_logits", action="store_true")
     ap.add_argument("--slot_stacker_include_confidence", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--include_paired_in_slot_stacker", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument(
+        "--enable_soft_expert_gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Train a CPU soft expert gate over the unified probability slots and pass it as soft_gate to the final selector.",
+    )
+    ap.add_argument(
+        "--soft_gate_input",
+        nargs=2,
+        action="append",
+        metavar=("NAME", "JSON"),
+        default=[],
+        help="Optional explicit inputs for train_expert_gate.py. Defaults to base plus slot_stacker, or base plus paired when the stacker is disabled.",
+    )
+    ap.add_argument("--soft_gate_output", default="", help="Optional path for the soft expert-gate probability JSON.")
+    ap.add_argument("--soft_gate_select_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
+    ap.add_argument("--soft_gate_hidden_dim", type=int, default=16)
+    ap.add_argument("--soft_gate_dropout", type=float, default=0.1)
+    ap.add_argument("--soft_gate_epochs", type=int, default=80)
+    ap.add_argument("--soft_gate_lr", type=float, default=0.01)
+    ap.add_argument("--soft_gate_weight_decay", type=float, default=0.001)
+    ap.add_argument("--soft_gate_entropy_weight", type=float, default=0.01)
+    ap.add_argument("--soft_gate_cv_splits", type=int, default=3)
+    ap.add_argument("--soft_gate_device", default="cpu")
     ap.add_argument("--require_cuda_for_tower2", action="store_true")
     ap.add_argument("--execute", action="store_true", help="Actually run the recommended commands. Default prints a dry-run plan.")
     ap.add_argument("--allow_no_cuda", action="store_true", help="Allow --execute even when CUDA is unavailable; useful only for tiny CPU probes.")
@@ -581,6 +686,8 @@ def main() -> None:
         args.final_selector_rank_select_metric = str(preset.get("final_selector_rank_select_metric", args.final_selector_metric))
     if args.final_selector_rank_candidate_limit < 0:
         args.final_selector_rank_candidate_limit = int(preset.get("final_selector_rank_candidate_limit", 256))
+    if args.final_selector_rank_bootstrap_samples <= 0:
+        args.final_selector_rank_bootstrap_samples = int(args.final_selector_bootstrap_samples)
     if not args.plan_json:
         args.plan_json = str(Path("reasoningDataset") / args.dataset / f"recommended_experiment_plan_{args.run_tag}.json")
 

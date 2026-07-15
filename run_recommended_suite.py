@@ -84,6 +84,8 @@ def dataset_cmd(args, dataset: str) -> List[str]:
     ]
     if not args.enable_slot_stacker:
         cmd.append("--no-enable_slot_stacker")
+    if not args.enable_soft_expert_gate:
+        cmd.append("--no-enable_soft_expert_gate")
     if args.execute:
         cmd.append("--execute")
     if args.allow_no_cuda:
@@ -123,6 +125,7 @@ def child_plan_summary(dataset: str, cmd: List[str]) -> Dict[str, Any]:
         "base_selector_input",
         "paired_prior_output",
         "slot_stacker_output",
+        "soft_gate_output",
         "final_selector_output",
         "experiment_config",
     ]:
@@ -182,6 +185,7 @@ def write_suite_plan(
             "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
             "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
             "enable_slot_stacker": args.enable_slot_stacker,
+            "enable_soft_expert_gate": args.enable_soft_expert_gate,
         },
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
@@ -231,6 +235,12 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Let each dataset child plan train/pass the unified-slot probability stacker.",
+    )
+    ap.add_argument(
+        "--enable_soft_expert_gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Let each dataset child plan train/pass the unified-slot soft expert gate.",
     )
     ap.add_argument("--execute", action="store_true")
     ap.add_argument(

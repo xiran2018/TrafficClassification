@@ -66,6 +66,18 @@ DEFAULT_CASES = [
         "low-shift stacker switch",
     ),
     (
+        "tls-120",
+        "soft expert gate",
+        "reasoningDataset/tls-120/test_expert_gate_base_slot_stacker_tls120_e80_seed7.json",
+        "trainable expert weighting",
+    ),
+    (
+        "tls-120",
+        "soft-gate calibrated selector",
+        "reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json",
+        "class-bias calibrated soft gate",
+    ),
+    (
         "ustc-app",
         "base residual",
         "reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_step150_stage8_flowaware_safe_prior_residual.json",

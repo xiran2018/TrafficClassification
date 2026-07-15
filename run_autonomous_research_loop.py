@@ -335,6 +335,8 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
     ]
     if not args.enable_slot_stacker:
         cmd.append("--no-enable_slot_stacker")
+    if not args.enable_soft_expert_gate:
+        cmd.append("--no-enable_soft_expert_gate")
     if args.execute:
         cmd.append("--execute")
     if args.allow_no_cuda:
@@ -541,6 +543,12 @@ def main() -> None:
         default=True,
         help="Keep the trainable unified-slot probability stacker in every recommended-suite child plan.",
     )
+    ap.add_argument(
+        "--enable_soft_expert_gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep the trainable unified-slot soft expert gate in every recommended-suite child plan.",
+    )
     ap.add_argument("--suite_output_dir", default="reasoningDataset/autonomous_loop")
     ap.add_argument("--output_json", default="reasoningDataset/autonomous_loop/research_loop_ledger.json")
     args = ap.parse_args()
@@ -570,6 +578,7 @@ def main() -> None:
         "status_rank_metric": args.status_rank_metric,
         "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
         "enable_slot_stacker": bool(args.enable_slot_stacker),
+        "enable_soft_expert_gate": bool(args.enable_soft_expert_gate),
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
