@@ -152,6 +152,15 @@ def all_goals_met(status: List[Dict[str, Any]], goal_datasets: List[str]) -> boo
     return True
 
 
+def all_paper_safe_goals_met(status: List[Dict[str, Any]], goal_datasets: List[str]) -> bool:
+    by_dataset = {row["dataset"]: row for row in status}
+    for dataset in goal_datasets:
+        row = by_dataset.get(dataset)
+        if not row or row.get("paper_safe_target_met") is not True:
+            return False
+    return True
+
+
 def best_delta_summary(before: List[Dict[str, Any]], after: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     before_map = {row["dataset"]: row for row in before}
     rows: List[Dict[str, Any]] = []
@@ -511,18 +520,21 @@ def main() -> None:
         framework = load_framework_consistency()
         evidence = load_evidence_pack()
         paper_safe_before = paper_safe_status_from_evidence(evidence, datasets, targets)
-        goals_met = all_goals_met(before, goal_datasets)
+        raw_goals_met = all_goals_met(before, goal_datasets)
+        paper_safe_goals_met = all_paper_safe_goals_met(paper_safe_before, goal_datasets)
         framework_met = framework_ready(framework, args.require_framework_consistency)
         framework_point_targets_met = framework_point_targets_ready(evidence, goal_datasets, args.require_framework_consistency)
         ci_targets_met = ci_targets_ready(evidence, goal_datasets, args.require_ci_targets)
-        ready_to_stop = goals_met and framework_met and framework_point_targets_met and ci_targets_met
+        ready_to_stop = raw_goals_met and paper_safe_goals_met and framework_met and framework_point_targets_met and ci_targets_met
         record: Dict[str, Any] = {
             "iteration": iteration,
             "status_before": before,
             "paper_safe_status_before": paper_safe_before,
             "framework_consistency": framework,
             "evidence_pack": evidence,
-            "goals_met_before": goals_met,
+            "goals_met_before": raw_goals_met,
+            "raw_goals_met_before": raw_goals_met,
+            "paper_safe_goals_met_before": paper_safe_goals_met,
             "framework_met_before": framework_met,
             "framework_point_targets_met_before": framework_point_targets_met,
             "ci_targets_met_before": ci_targets_met,
@@ -566,6 +578,8 @@ def main() -> None:
         record["paper_safe_status_after"] = paper_safe_status_from_evidence(evidence_after, datasets, targets)
         record["best_delta"] = best_delta_summary(before, record["status_after"])
         record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
+        record["raw_goals_met_after"] = record["goals_met_after"]
+        record["paper_safe_goals_met_after"] = all_paper_safe_goals_met(record["paper_safe_status_after"], goal_datasets)
         record["framework_consistency_after"] = framework_after
         record["evidence_pack_after"] = evidence_after
         record["framework_met_after"] = framework_ready(framework_after, args.require_framework_consistency)
@@ -574,7 +588,8 @@ def main() -> None:
         )
         record["ci_targets_met_after"] = ci_targets_ready(evidence_after, goal_datasets, args.require_ci_targets)
         record["ready_to_stop_after"] = (
-            record["goals_met_after"]
+            record["raw_goals_met_after"]
+            and record["paper_safe_goals_met_after"]
             and record["framework_met_after"]
             and record["framework_point_targets_met_after"]
             and record["ci_targets_met_after"]
