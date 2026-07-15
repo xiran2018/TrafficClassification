@@ -123,6 +123,7 @@ def aggregate_by_flow(
             emb_buckets[fid].append(emb_all[i])
         labels[fid] = y
     flow_true, flow_pred, out_flow_ids, flow_logits_all = [], [], [], []
+    multi_view_gates = []
     for fid, arrs in buckets.items():
         if flow_head is None or flow_eval_pooling != "checkpoint":
             pooling = "mean_logits" if flow_eval_pooling == "checkpoint" else flow_eval_pooling
@@ -131,6 +132,8 @@ def aggregate_by_flow(
             emb = torch.tensor(np.stack(emb_buckets[fid], axis=0), dtype=torch.float32, device=device)
             win_logits = torch.tensor(np.stack(arrs, axis=0), dtype=torch.float32, device=device)
             pooled = flow_head(emb, window_logits=win_logits)
+            if pooled.get("multi_view_gate") is not None:
+                multi_view_gates.append(pooled["multi_view_gate"].detach().cpu().numpy())
             logits = pooled["logits"]
             if hierarchical_mode != "expert":
                 logits = apply_hierarchical_logits(
@@ -144,7 +147,16 @@ def aggregate_by_flow(
         flow_pred.append(int(logits.argmax()))
         out_flow_ids.append(fid)
         flow_logits_all.append(np.asarray(logits, dtype=np.float32))
-    return flow_true, flow_pred, out_flow_ids, flow_logits_all
+    gate_summary = None
+    if multi_view_gates:
+        gate_arr = np.stack(multi_view_gates, axis=0)
+        gate_summary = {
+            "branches": ["mean", "max", "std", "attention"],
+            "mean": gate_arr.mean(axis=0).astype(float).tolist(),
+            "std": gate_arr.std(axis=0).astype(float).tolist(),
+            "num_flows": int(gate_arr.shape[0]),
+        }
+    return flow_true, flow_pred, out_flow_ids, flow_logits_all, gate_summary
 
 
 def softmax_np(x: np.ndarray) -> np.ndarray:
@@ -242,7 +254,7 @@ def main():
         y_true, y_pred, flow_ids, logits_all, emb_all = predict_graph(model, args.dataset, args.device)
 
     window_metrics = compute_metrics(y_true, y_pred)
-    flow_true, flow_pred, out_flow_ids, flow_logits_all = aggregate_by_flow(
+    flow_true, flow_pred, out_flow_ids, flow_logits_all, multi_view_gate_summary = aggregate_by_flow(
         y_true,
         flow_ids,
         logits_all,
@@ -262,6 +274,7 @@ def main():
         "eval_config": {
             "flow_eval_pooling": args.flow_eval_pooling,
             "flow_eval_topk": args.flow_eval_topk,
+            "multi_view_gate": multi_view_gate_summary,
         },
     }
     print(json.dumps(metrics, indent=2))

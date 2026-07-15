@@ -104,7 +104,7 @@ class FlowAggregationHead(nn.Module):
             attn = torch.sum(h * weights.unsqueeze(-1), dim=0)
             views = torch.stack([mean, maxv, std, attn], dim=0)
             gate = torch.softmax(self.multi_view_gate(torch.cat([mean, maxv, std, attn], dim=-1)), dim=-1)
-            return torch.sum(views * gate.unsqueeze(-1), dim=0)
+            return torch.sum(views * gate.unsqueeze(-1), dim=0), gate
         if self.pooling == "transformer":
             pos = sinusoidal_position_encoding(h.size(0), h.size(1), h.device, h.dtype)
             h = self.flow_encoder((h + pos).unsqueeze(0)).squeeze(0)
@@ -121,7 +121,12 @@ class FlowAggregationHead(nn.Module):
         return logits
 
     def forward(self, h: torch.Tensor, window_logits: torch.Tensor | None = None):
-        emb = self.pool(h)
+        pooled = self.pool(h)
+        gate = None
+        if isinstance(pooled, tuple):
+            emb, gate = pooled
+        else:
+            emb = pooled
         coarse_logits = self.coarse_cls(emb) if self.coarse_cls is not None else None
         if self.use_expert_heads:
             logits = self.expert_logits(emb, coarse_logits)
@@ -130,6 +135,8 @@ class FlowAggregationHead(nn.Module):
         if self.pooling == "late_fusion" and window_logits is not None:
             logits = logits + self.fusion_logit_scale * window_logits.mean(dim=0)
         out = {"embedding": emb, "logits": logits}
+        if gate is not None:
+            out["multi_view_gate"] = gate
         if coarse_logits is not None:
             out["coarse_logits"] = coarse_logits
         return out
@@ -1256,6 +1263,7 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "init_checkpoint": args.init_checkpoint,
         "train_level": args.train_level,
         "flow_pooling": args.flow_pooling,
+        "multi_view_branches": ["mean", "max", "std", "attention"] if args.flow_pooling == "multi_view" else [],
         "select_metric": args.select_metric,
         "window_loss_weight": args.window_loss_weight,
         "class_weighting": args.class_weighting,
