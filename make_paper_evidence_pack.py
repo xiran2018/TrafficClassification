@@ -169,12 +169,17 @@ def recommendation_rows(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = []
     for row in recommendation.get("datasets", []):
         best = row.get("best") or {}
+        paper_safe = row.get("paper_safe") or {}
         rows.append(
             {
                 "dataset": row["dataset"],
                 "target_met": row.get("target_met"),
-                "best_accuracy": best.get("accuracy"),
-                "best_macro_f1": best.get("macro_f1"),
+                "raw_best_accuracy": best.get("accuracy"),
+                "raw_best_macro_f1": best.get("macro_f1"),
+                "raw_best_path": best.get("path"),
+                "paper_safe_accuracy": paper_safe.get("accuracy"),
+                "paper_safe_macro_f1": paper_safe.get("macro_f1"),
+                "paper_safe_path": paper_safe.get("path"),
                 "recommendation": row.get("recommendation"),
             }
         )

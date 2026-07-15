@@ -27,6 +27,13 @@ DEFAULT_PROBES = {
 }
 
 
+DEFAULT_PAPER_SAFE_RESULTS = {
+    "vpn-app": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
+    "tls-120": "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
+    "ustc-app": "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
+}
+
+
 def cuda_summary() -> Dict[str, Any]:
     try:
         import torch
@@ -75,10 +82,26 @@ def probe_rows(dataset: str, best: Dict[str, Any] | None) -> List[Dict[str, Any]
     return rows
 
 
-def decide_recommendation(dataset: str, best: Dict[str, Any] | None, probes: List[Dict[str, Any]], target: tuple[float, float] | None, cuda: Dict[str, Any]) -> str:
-    if best is None:
+def paper_safe_overrides(raw_items: List[List[str]]) -> Dict[str, str]:
+    return {dataset: path for dataset, path in raw_items}
+
+
+def paper_safe_path(dataset: str, overrides: Dict[str, str]) -> str:
+    return overrides.get(dataset, DEFAULT_PAPER_SAFE_RESULTS.get(dataset, ""))
+
+
+def decide_recommendation(
+    dataset: str,
+    raw_best: Dict[str, Any] | None,
+    paper_safe: Dict[str, Any] | None,
+    probes: List[Dict[str, Any]],
+    target: tuple[float, float] | None,
+    cuda: Dict[str, Any],
+) -> str:
+    reference = paper_safe or raw_best
+    if reference is None:
         return "No test metric JSON was found; run the dataset pipeline through eval/fusion first."
-    target_met = bool(target and best["accuracy"] >= target[0] and (best.get("macro_f1") or 0.0) >= target[1])
+    target_met = bool(target and reference["accuracy"] >= target[0] and (reference.get("macro_f1") or 0.0) >= target[1])
     harmful_probes = [
         row for row in probes
         if row.get("status") == "available"
@@ -96,7 +119,10 @@ def decide_recommendation(dataset: str, best: Dict[str, Any] | None, probes: Lis
             "Do not spend more CPU time on graph paired-view training; run the documented A800 Stage-8 paired-view path in the real llm-factory environment."
         )
     if target_met:
-        return "Target is met; only accept new modules if validation-gated selection and target-shift guards keep or improve the current best."
+        return (
+            "Paper-safe target is met; keep raw-best probes as ablations unless validation-gated selection "
+            "and target-shift guards accept them into the framework result."
+        )
     return "Target is not met; prioritize representation learning experiments before additional probability-level fusion."
 
 
@@ -106,22 +132,26 @@ def render_markdown(report: Dict[str, Any]) -> str:
         "",
         f"CUDA available: `{report['cuda']['available']}`; devices: `{report['cuda'].get('device_count', 0)}`",
         "",
-        "| Dataset | Best Acc | Best Macro-F1 | Target | Status | Best File | Recommendation |",
-        "|---|---:|---:|---|---|---|---|",
+        "| Dataset | Raw Best Acc | Raw Best F1 | Paper-Safe Acc | Paper-Safe F1 | Target | Status | Raw Best File | Paper-Safe File | Recommendation |",
+        "|---|---:|---:|---:|---:|---|---|---|---|---|",
     ]
     for row in report["datasets"]:
         best = row.get("best") or {}
+        paper = row.get("paper_safe") or {}
         target = row.get("target")
         target_text = "-" if not target else f"{target[0]:.4f}/{target[1]:.4f}"
-        status = "PASS" if row.get("target_met") else ("MISS" if target else "evidence")
+        status = "PASS" if row.get("paper_safe_target_met") else ("MISS" if target else "evidence")
         lines.append(
-            "| {dataset} | {acc} | {f1} | {target} | {status} | {path} | {rec} |".format(
+            "| {dataset} | {raw_acc} | {raw_f1} | {paper_acc} | {paper_f1} | {target} | {status} | {raw_path} | {paper_path} | {rec} |".format(
                 dataset=row["dataset"],
-                acc=f"{best.get('accuracy', 0.0):.4f}" if best else "-",
-                f1=f"{best.get('macro_f1', 0.0):.4f}" if best else "-",
+                raw_acc=f"{best.get('accuracy', 0.0):.4f}" if best else "-",
+                raw_f1=f"{best.get('macro_f1', 0.0):.4f}" if best else "-",
+                paper_acc=f"{paper.get('accuracy', 0.0):.4f}" if paper else "-",
+                paper_f1=f"{paper.get('macro_f1', 0.0):.4f}" if paper else "-",
                 target=target_text,
                 status=status,
-                path=best.get("path", "-"),
+                raw_path=best.get("path", "-"),
+                paper_path=paper.get("path", "-"),
                 rec=row["recommendation"],
             )
         )
@@ -157,6 +187,14 @@ def main() -> None:
     ap.add_argument("--dataset", action="append", default=[], help="Dataset under reasoningDataset/. Can be repeated.")
     ap.add_argument("--pattern", action="append", default=["test*.json"], help="Glob under each dataset directory.")
     ap.add_argument("--target", action="append", default=[], help="Optional DATASET:ACC:MACRO_F1 target override.")
+    ap.add_argument(
+        "--paper_safe_result",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("DATASET", "JSON"),
+        help="Override the paper-safe framework result used for target status and recommendations.",
+    )
     ap.add_argument("--top_k", type=int, default=5)
     ap.add_argument("--output_json", default="")
     ap.add_argument("--output_md", default="")
@@ -169,23 +207,33 @@ def main() -> None:
 
     cuda = cuda_summary()
     datasets = args.dataset or ["vpn-app", "tls-120", "ustc-app"]
+    safe_overrides = paper_safe_overrides(args.paper_safe_result)
     report = {"cuda": cuda, "datasets": []}
     for dataset in datasets:
         rows = collect_dataset(dataset, args.pattern)
         best = rows[0] if rows else None
         target = targets.get(dataset)
-        probes = probe_rows(dataset, best)
-        target_met = bool(best and target and best["accuracy"] >= target[0] and (best.get("macro_f1") or 0.0) >= target[1])
+        safe_path = paper_safe_path(dataset, safe_overrides)
+        paper_safe = load_metric(safe_path) if safe_path else None
+        reference = paper_safe or best
+        probes = probe_rows(dataset, reference)
+        raw_target_met = bool(best and target and best["accuracy"] >= target[0] and (best.get("macro_f1") or 0.0) >= target[1])
+        reference_target_met = bool(
+            reference and target and reference["accuracy"] >= target[0] and (reference.get("macro_f1") or 0.0) >= target[1]
+        )
         report["datasets"].append(
             {
                 "dataset": dataset,
                 "target": target,
-                "target_met": target_met if target else None,
+                "target_met": reference_target_met if target else None,
+                "raw_target_met": raw_target_met if target else None,
+                "paper_safe_target_met": reference_target_met if target else None,
                 "best": best,
+                "paper_safe": paper_safe,
                 "top_results": rows[: args.top_k],
                 "num_results": len(rows),
                 "probes": probes,
-                "recommendation": decide_recommendation(dataset, best, probes, target, cuda),
+                "recommendation": decide_recommendation(dataset, best, paper_safe, probes, target, cuda),
             }
         )
 
