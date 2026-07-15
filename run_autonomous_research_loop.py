@@ -9,11 +9,9 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from paper_framework_defaults import DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
 from recommend_next_experiment import cuda_summary
 from summarize_experiment_results import DEFAULT_TARGETS, RANK_METRICS, collect_dataset, parse_target
-
-
-DEFAULT_UNIFIED_EXPERT_SLOTS = "base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker"
 
 
 VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
@@ -461,7 +459,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--final_selector_unified_expert_slots",
-        default=DEFAULT_UNIFIED_EXPERT_SLOTS,
+        default=DEFAULT_UNIFIED_EXPERT_SLOTS_CSV,
         help="Comma-separated expert slots required by the paper framework audit and passed to every suite child plan.",
     )
     ap.add_argument(

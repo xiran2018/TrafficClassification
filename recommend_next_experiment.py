@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+from paper_framework_defaults import DEFAULT_PAPER_SAFE_RESULTS
 from summarize_experiment_results import DEFAULT_TARGETS, collect_dataset, metric_from_payload
 
 
@@ -24,13 +25,6 @@ DEFAULT_PROBES = {
             "reasoningDataset/vpn-app/test_fusion_best_paired_seqprobe_minbase90_valid_acc.json",
         ),
     ],
-}
-
-
-DEFAULT_PAPER_SAFE_RESULTS = {
-    "vpn-app": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
-    "tls-120": "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
-    "ustc-app": "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
 }
 
 

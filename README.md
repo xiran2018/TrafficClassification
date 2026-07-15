@@ -2019,6 +2019,8 @@ The framework consistency gate is enabled by default through `--require_framewor
 
 `recommend_next_experiment.py` reports both the raw highest-scoring `test*.json` and the paper-safe framework result. This is deliberate: for TLS-120 the direct unified-slot stacker probe reaches `0.7991/0.7897`, while the guarded selector result used for paper claims is `0.7945/0.7807`. Recommendations and target status are tied to the paper-safe result, and raw-best probes should be treated as upper-bound or ablation evidence until the validation-gated selector accepts them. The recommendation JSON and evidence pack also record `raw_minus_paper_safe` accuracy/F1 deltas so this distinction is machine-checkable.
 
+The paper-safe result paths, VPN/TLS target gates, and required unified expert slots are centralized in `paper_framework_defaults.py`. Update that file first when changing the paper-facing main result; the recommendation, framework-report, autonomous-loop, and recommended-suite scripts import the shared defaults to avoid drift.
+
 For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics and the unified-framework audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. With the current results, TLS-120 passes this strict gate, while VPN is still `point_pass_ci_mixed` because its bootstrap accuracy lower bound is below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early.
 
 ```bash

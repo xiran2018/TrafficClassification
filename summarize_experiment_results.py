@@ -8,12 +8,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from sklearn.metrics import accuracy_score, f1_score
 
-
-DEFAULT_TARGETS = {
-    "vpn-app": (0.74, 0.65),
-    "tls-120": (0.78, 0.70),
-    "tls": (0.78, 0.70),
-}
+from paper_framework_defaults import DEFAULT_TARGETS
 
 RANK_METRICS = ("accuracy", "macro_f1", "balanced", "target_margin")
 

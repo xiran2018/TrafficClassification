@@ -8,17 +8,15 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
+from paper_framework_defaults import DEFAULT_PAPER_SAFE_RESULTS, DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
 from recommend_next_experiment import cuda_summary
-
-
-DEFAULT_UNIFIED_EXPERT_SLOTS = "base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker"
 
 
 DATASET_PRESETS = {
     "vpn-app": {
         "num_classes": 16,
         "label_map": "reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json",
-        "base_selector_input": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
+        "base_selector_input": DEFAULT_PAPER_SAFE_RESULTS["vpn-app"],
         "slot_stacker_inputs": [
             ("prior_base", "reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_prior_ensemble_softcap_k31_vote.json"),
             ("emb_lr", "reasoningDataset/vpn-app/test_flow_embedding_classifier_logreg_meta_valid_acc.json"),
@@ -32,7 +30,7 @@ DATASET_PRESETS = {
     "tls-120": {
         "num_classes": 120,
         "label_map": "reasoningDataset/tls-120/train_tower1_change_weight/label_map.json",
-        "base_selector_input": "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
+        "base_selector_input": DEFAULT_PAPER_SAFE_RESULTS["tls-120"],
         "slot_stacker_inputs": [
             ("graph", "reasoningDataset/tls-120/fusion_input_graph_acc_ft.json"),
             ("seq", "reasoningDataset/tls-120/fusion_input_seq_baseline.json"),
@@ -45,7 +43,7 @@ DATASET_PRESETS = {
     "ustc-app": {
         "num_classes": 20,
         "label_map": "reasoningDataset/ustc-app/train_tower1_flowaware_change_weight/label_map.json",
-        "base_selector_input": "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
+        "base_selector_input": DEFAULT_PAPER_SAFE_RESULTS["ustc-app"],
         "slot_stacker_inputs": [
             ("proto_emb", "reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json"),
         ],
@@ -532,7 +530,7 @@ def main() -> None:
     ap.add_argument("--final_selector_max_prediction_change_rate", type=float, default=-1.0, help="Defaults from dataset presets when <0.")
     ap.add_argument(
         "--final_selector_unified_expert_slots",
-        default=DEFAULT_UNIFIED_EXPERT_SLOTS,
+        default=DEFAULT_UNIFIED_EXPERT_SLOTS_CSV,
         help=(
             "Comma-separated expert slots exposed by every dataset in the final selector. "
             "Missing slots are filled as identity experts from the base input; pass an empty string to disable."

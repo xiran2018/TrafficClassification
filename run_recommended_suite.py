@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
+from paper_framework_defaults import DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
 from recommend_next_experiment import cuda_summary
 from run_recommended_experiment import DATASET_PRESETS
 from summarize_experiment_results import DEFAULT_TARGETS, collect_dataset
@@ -218,7 +219,7 @@ def main() -> None:
     ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0)
     ap.add_argument(
         "--final_selector_unified_expert_slots",
-        default="base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker",
+        default=DEFAULT_UNIFIED_EXPERT_SLOTS_CSV,
         help="Comma-separated final-selector expert slots shared by every dataset; missing slots become identity experts.",
     )
     ap.add_argument(

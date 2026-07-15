@@ -9,29 +9,7 @@ from typing import Any, Dict, List, Tuple
 
 from sklearn.metrics import f1_score
 
-
-DEFAULT_RESULTS = [
-    (
-        "vpn-app",
-        "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
-        0.74,
-        0.65,
-    ),
-    (
-        "tls-120",
-        "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
-        0.78,
-        0.70,
-    ),
-    (
-        "ustc-app",
-        "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
-        None,
-        None,
-    ),
-]
-
-DEFAULT_UNIFIED_EXPERT_SLOTS = ["base", "graph", "seq", "prior_base", "emb_lr", "emb_et", "proto_emb", "paired", "slot_stacker"]
+from paper_framework_defaults import DEFAULT_UNIFIED_EXPERT_SLOTS, default_framework_results
 
 
 def load_json(path: str) -> Dict[str, Any]:
@@ -548,7 +526,7 @@ def main() -> None:
     ap.add_argument("--output_md", default="")
     args = ap.parse_args()
 
-    results = [parse_result(item) for item in args.result] if args.result else DEFAULT_RESULTS
+    results = [parse_result(item) for item in args.result] if args.result else default_framework_results()
     required_slots = [item.strip() for item in args.required_expert_slots.split(",") if item.strip()]
     if not required_slots:
         raise SystemExit("--required_expert_slots must contain at least one slot")
