@@ -317,6 +317,34 @@ def class_weighted_loss(
     return torch.tensor(0.0, device=logits.device)
 
 
+def confidence_penalty_loss(logits: torch.Tensor, y: torch.Tensor, weight: float = 0.0) -> torch.Tensor:
+    if weight <= 0:
+        return logits.sum() * 0.0
+    valid = y >= 0
+    if not valid.any():
+        return logits.sum() * 0.0
+    selected = logits[valid].float()
+    log_prob = F.log_softmax(selected, dim=-1)
+    prob = log_prob.exp()
+    # KL(p || uniform) = sum p log p + log(C). Minimizing it discourages
+    # overconfident predictions without changing the model architecture.
+    kl_uniform = (prob * log_prob).sum(dim=-1) + math.log(max(1, selected.size(-1)))
+    return weight * kl_uniform.mean()
+
+
+def regularized_classification_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    class_weight: torch.Tensor | None,
+    args,
+) -> torch.Tensor:
+    return class_weighted_loss(logits, y, class_weight, args.label_smoothing) + confidence_penalty_loss(
+        logits,
+        y,
+        args.confidence_penalty_weight,
+    )
+
+
 def compute_class_weights(
     labels: Sequence[int],
     num_classes: int,
@@ -666,7 +694,7 @@ def train_seq(args):
             x = apply_input_augmentation(batch["x"].to(args.device), args)
             mask, y = batch["mask"].to(args.device), batch["label"].to(args.device)
             out = model(x, mask)
-            loss = class_weighted_loss(out["logits"], y, class_weight, args.label_smoothing)
+            loss = regularized_classification_loss(out["logits"], y, class_weight, args)
             loss = loss + next_aux_loss(out, {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}, args.aux_weight)
             loss = loss + coherence_loss(out, batch["coherence_label"], args.coherence_weight)
             if not loss.requires_grad:
@@ -854,7 +882,7 @@ def train_seq_flow(args):
                 flow_logits_aug = torch.stack(flow_logits_aug, dim=0)
             flow_embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
-            loss = class_weighted_loss(flow_logits, y, class_weight, args.label_smoothing)
+            loss = regularized_classification_loss(flow_logits, y, class_weight, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
@@ -881,7 +909,7 @@ def train_seq_flow(args):
                     paired_coarse = torch.stack(paired_flow_coarse_logits, dim=0) if paired_flow_coarse_logits else None
                     paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse, class_to_coarse, effective_hierarchical_logit_weight(args))
                     if args.paired_view_weight > 0:
-                        loss = loss + args.paired_view_weight * class_weighted_loss(paired_logits, y, class_weight, args.label_smoothing)
+                        loss = loss + args.paired_view_weight * regularized_classification_loss(paired_logits, y, class_weight, args)
                     if args.paired_consistency_weight > 0:
                         loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(flow_logits, paired_logits, args.consistency_temperature)
             if args.consistency_weight > 0 and isinstance(flow_logits_aug, torch.Tensor):
@@ -889,7 +917,7 @@ def train_seq_flow(args):
             if coarse_logits is not None and args.hierarchical_weight > 0:
                 loss = loss + args.hierarchical_weight * F.cross_entropy(coarse_logits, class_to_coarse[y])
             if args.window_loss_weight > 0:
-                loss = loss + args.window_loss_weight * class_weighted_loss(out["logits"], window_labels, class_weight, args.label_smoothing)
+                loss = loss + args.window_loss_weight * regularized_classification_loss(out["logits"], window_labels, class_weight, args)
             if args.window_contrastive_weight > 0:
                 loss = loss + args.window_contrastive_weight * window_to_flow_contrastive_loss(
                     out["embedding"],
@@ -1021,7 +1049,7 @@ def train_graph(args):
             edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
             y = torch.tensor([int(item.get("label", -1))], dtype=torch.long, device=args.device)
             out = model(x, edge_index, edge_attr)
-            loss = class_weighted_loss(out["logits"], y, class_weight, args.label_smoothing)
+            loss = regularized_classification_loss(out["logits"], y, class_weight, args)
             targets = {
                 "next_direction": item.get("next_direction", torch.tensor(-1)).view(1),
                 "next_length_bin": item.get("next_length_bin", torch.tensor(-1)).view(1),
@@ -1169,13 +1197,13 @@ def train_graph_flow(args):
                 paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
-            loss = class_weighted_loss(logits, y, class_weight, args.label_smoothing)
+            loss = regularized_classification_loss(logits, y, class_weight, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
             if paired_logits is not None:
                 if args.paired_view_weight > 0:
-                    loss = loss + args.paired_view_weight * class_weighted_loss(paired_logits, y, class_weight, args.label_smoothing)
+                    loss = loss + args.paired_view_weight * regularized_classification_loss(paired_logits, y, class_weight, args)
                 if args.paired_consistency_weight > 0:
                     loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(logits, paired_logits, args.consistency_temperature)
             if args.consistency_weight > 0 and flow_logits_aug:
@@ -1186,7 +1214,7 @@ def train_graph_flow(args):
             if args.window_loss_weight > 0 and window_logits_all:
                 win_logits = torch.stack(window_logits_all, dim=0)
                 win_y = torch.tensor(window_labels, dtype=torch.long, device=args.device)
-                loss = loss + args.window_loss_weight * class_weighted_loss(win_logits, win_y, class_weight, args.label_smoothing)
+                loss = loss + args.window_loss_weight * regularized_classification_loss(win_logits, win_y, class_weight, args)
             if args.window_contrastive_weight > 0 and window_embs_all:
                 loss = loss + args.window_contrastive_weight * window_to_flow_contrastive_loss(
                     torch.stack(window_embs_all, dim=0),
@@ -1291,6 +1319,7 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "class_weight_beta": args.class_weight_beta,
         "class_weight_strength": args.class_weight_strength,
         "label_smoothing": args.label_smoothing,
+        "confidence_penalty_weight": args.confidence_penalty_weight,
         "balanced_flow_batches": args.balanced_flow_batches,
         "classes_per_batch": args.classes_per_batch,
         "samples_per_class": args.samples_per_class,
@@ -1356,6 +1385,7 @@ def main():
     ap.add_argument("--class_weight_beta", type=float, default=0.9999, help="Beta used by --class_weighting effective.")
     ap.add_argument("--class_weight_strength", type=float, default=1.0, help="Interpolate class weights toward 1.0. 1 keeps full weighting, 0 disables the weighting effect.")
     ap.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing for main flow/window classification CE losses.")
+    ap.add_argument("--confidence_penalty_weight", type=float, default=0.0, help="KL-to-uniform penalty on classification logits. Positive values reduce overconfident predictions and can improve CI stability.")
     ap.add_argument("--balanced_flow_batches", action="store_true", help="Sample each flow batch from multiple classes with repeated positives, useful for flow SupCon.")
     ap.add_argument("--classes_per_batch", type=int, default=0, help="Classes per balanced flow batch. 0 derives it from batch_size / samples_per_class.")
     ap.add_argument("--samples_per_class", type=int, default=2, help="Flows per class in balanced flow batches.")

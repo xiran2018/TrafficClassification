@@ -269,6 +269,8 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         str(args.class_weight_strength),
         "--label_smoothing",
         str(args.label_smoothing),
+        "--confidence_penalty_weight",
+        str(args.confidence_penalty_weight),
         "--hierarchical_weight",
         str(args.hierarchical_weight),
         "--hierarchical_logit_weight",
@@ -571,6 +573,7 @@ def main() -> None:
     ap.add_argument("--window_loss_weight", type=float, default=0.3)
     ap.add_argument("--class_weight_strength", type=float, default=0.6)
     ap.add_argument("--label_smoothing", type=float, default=0.05)
+    ap.add_argument("--confidence_penalty_weight", type=float, default=0.0, help="KL-to-uniform confidence penalty for Tower-2 classification logits.")
     ap.add_argument("--hierarchical_weight", type=float, default=0.2)
     ap.add_argument("--hierarchical_logit_weight", type=float, default=0.5)
     ap.add_argument("--coarse_groups", default="vpn_app")

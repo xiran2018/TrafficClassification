@@ -69,6 +69,8 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         str(args.window_dropout_prob),
         "--edge_attr_dropout_prob",
         str(args.edge_attr_dropout_prob),
+        "--confidence_penalty_weight",
+        str(args.confidence_penalty_weight),
         "--seed",
         str(args.seed),
         "--flow_pooling",
@@ -171,6 +173,7 @@ def write_suite_plan(
             "embedding_dropout_prob": args.embedding_dropout_prob,
             "window_dropout_prob": args.window_dropout_prob,
             "edge_attr_dropout_prob": args.edge_attr_dropout_prob,
+            "confidence_penalty_weight": args.confidence_penalty_weight,
             "tower2_epochs": args.tower2_epochs,
             "tower2_early_stop_patience": args.tower2_early_stop_patience,
             "model_types": args.model_types,
@@ -214,6 +217,7 @@ def main() -> None:
     ap.add_argument("--embedding_dropout_prob", type=float, default=0.05)
     ap.add_argument("--window_dropout_prob", type=float, default=0.1)
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
+    ap.add_argument("--confidence_penalty_weight", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="mean")
     ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0)

@@ -327,6 +327,8 @@ def stage_commands(args) -> List[Dict[str, Any]]:
         str(args.window_dropout_prob),
         "--edge_attr_dropout_prob",
         str(args.edge_attr_dropout_prob),
+        "--confidence_penalty_weight",
+        str(args.confidence_penalty_weight),
         "--tower2_epochs",
         str(args.tower2_epochs),
         "--tower2_early_stop_patience",
@@ -420,6 +422,7 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "embedding_dropout_prob": args.embedding_dropout_prob,
             "window_dropout_prob": args.window_dropout_prob,
             "edge_attr_dropout_prob": args.edge_attr_dropout_prob,
+            "confidence_penalty_weight": args.confidence_penalty_weight,
             "tower2_epochs": args.tower2_epochs,
             "tower2_early_stop_patience": args.tower2_early_stop_patience,
             "model_types": args.model_types,
@@ -474,6 +477,7 @@ def main() -> None:
     ap.add_argument("--embedding_dropout_prob", type=float, default=0.05)
     ap.add_argument("--window_dropout_prob", type=float, default=0.1)
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
+    ap.add_argument("--confidence_penalty_weight", type=float, default=0.0)
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
