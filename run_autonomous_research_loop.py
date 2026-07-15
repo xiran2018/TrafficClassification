@@ -250,6 +250,14 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
             "--output_md",
             "reasoningDataset/paper_framework_defaults_audit.md",
         ],
+        [
+            "python",
+            "make_next_experiment_plan.py",
+            "--output_json",
+            "reasoningDataset/next_experiment_plan.json",
+            "--output_md",
+            "reasoningDataset/next_experiment_plan.md",
+        ],
     ]
 
 
@@ -369,6 +377,16 @@ def load_evidence_pack() -> Dict[str, Any] | None:
 
 def load_defaults_audit() -> Dict[str, Any] | None:
     path = Path("reasoningDataset/paper_framework_defaults_audit.json")
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def load_next_experiment_plan() -> Dict[str, Any] | None:
+    path = Path("reasoningDataset/next_experiment_plan.json")
     if not path.exists():
         return None
     try:
@@ -549,6 +567,7 @@ def main() -> None:
         framework = load_framework_consistency()
         evidence = load_evidence_pack()
         defaults_audit = load_defaults_audit()
+        next_plan = load_next_experiment_plan()
         paper_safe_before = paper_safe_status_from_evidence(evidence, datasets, targets)
         raw_goals_met = all_goals_met(before, goal_datasets)
         paper_safe_goals_met = all_paper_safe_goals_met(paper_safe_before, goal_datasets)
@@ -571,6 +590,7 @@ def main() -> None:
             "framework_consistency": framework,
             "evidence_pack": evidence,
             "paper_defaults_audit": defaults_audit,
+            "next_experiment_plan": next_plan,
             "goals_met_before": raw_goals_met,
             "raw_goals_met_before": raw_goals_met,
             "paper_safe_goals_met_before": paper_safe_goals_met,
@@ -615,6 +635,7 @@ def main() -> None:
         framework_after = load_framework_consistency()
         evidence_after = load_evidence_pack()
         defaults_audit_after = load_defaults_audit()
+        next_plan_after = load_next_experiment_plan()
         record["status_after"] = dataset_status(datasets, targets, args.status_rank_metric)
         record["paper_safe_status_after"] = paper_safe_status_from_evidence(evidence_after, datasets, targets)
         record["best_delta"] = best_delta_summary(before, record["status_after"])
@@ -624,6 +645,7 @@ def main() -> None:
         record["framework_consistency_after"] = framework_after
         record["evidence_pack_after"] = evidence_after
         record["paper_defaults_audit_after"] = defaults_audit_after
+        record["next_experiment_plan_after"] = next_plan_after
         record["framework_met_after"] = framework_ready(framework_after, args.require_framework_consistency)
         record["framework_point_targets_met_after"] = framework_point_targets_ready(
             evidence_after, goal_datasets, args.require_framework_consistency
