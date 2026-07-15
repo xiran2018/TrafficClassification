@@ -37,6 +37,49 @@ def format_ci(ci: Any, signed: bool = False) -> str:
     return f"[{fmt(ci[0], signed=signed)}, {fmt(ci[1], signed=signed)}]"
 
 
+def format_module_usage(module_usage: Any) -> str:
+    if not isinstance(module_usage, dict):
+        return "-"
+    parts = []
+    preferred = [
+        "packet_embedding_backbone",
+        "flow_base_expert",
+        "validation_gated_selector",
+        "bootstrap_guard",
+        "target_shift_guard",
+        "expert_switch_or_fusion",
+        "class_bias_calibration_candidate",
+        "base",
+        "selector",
+        "expert",
+        "calib",
+        "guards",
+        "trainable_multiview_gate",
+    ]
+    keys = preferred + [key for key in module_usage if key not in preferred]
+    for key in keys:
+        value = module_usage.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            value = ",".join(f"{sub_key}:{sub_value}" for sub_key, sub_value in value.items())
+        parts.append(f"{key}={value}")
+    return "; ".join(parts) if parts else "-"
+
+
+def format_selector(selector: Any) -> str:
+    if isinstance(selector, str):
+        return selector
+    if not isinstance(selector, dict):
+        return "-"
+    strategy = selector.get("strategy") or selector.get("pool_strategy") or selector.get("kind")
+    config = selector.get("config") or {}
+    if isinstance(config, dict) and config:
+        items = ", ".join(f"{key}={value}" for key, value in config.items())
+        return f"{strategy}: {items}"
+    return str(strategy) if strategy else "-"
+
+
 def claim_rows(framework: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = []
     for row in framework.get("results", []):
@@ -74,6 +117,7 @@ def claim_rows(framework: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "accuracy_ci95": acc_ci,
                 "macro_f1_ci95": f1_ci,
                 "module_usage": row.get("module_usage"),
+                "multi_view_gate": row.get("multi_view_gate"),
                 "selector": row.get("selector"),
                 "num_flows": row.get("num_flows"),
             }
@@ -209,6 +253,47 @@ def render_markdown(pack: Dict[str, Any]) -> str:
                 f1_ci=format_ci(row["macro_f1_ci95"]),
             )
         )
+    lines += [
+        "",
+        "## Unified Module Usage",
+        "",
+        "| Dataset | Module family evidence | Selector decision |",
+        "|---|---|---|",
+    ]
+    for row in pack["claims"]:
+        lines.append(
+            "| {dataset} | {modules} | {selector} |".format(
+                dataset=row["dataset"],
+                modules=format_module_usage(row.get("module_usage")),
+                selector=format_selector(row.get("selector")),
+            )
+        )
+    gated_claims = [row for row in pack["claims"] if row.get("multi_view_gate")]
+    if gated_claims:
+        lines += [
+            "",
+            "## Trainable Multi-View Gates",
+            "",
+            "| Dataset | Dominant branch | Effective branches | Norm. entropy | Mean weights: mean/max/std/attention |",
+            "|---|---|---:|---:|---|",
+        ]
+        for row in gated_claims:
+            gate = row["multi_view_gate"]
+            branches = gate.get("branches") or []
+            means = gate.get("mean") or []
+            weight_by_branch = {branch: value for branch, value in zip(branches, means)}
+            ordered = [weight_by_branch.get(branch) for branch in ["mean", "max", "std", "attention"]]
+            weights = "/".join(fmt(value) for value in ordered)
+            lines.append(
+                "| {dataset} | {branch} ({weight}) | {eff} | {entropy} | {weights} |".format(
+                    dataset=row["dataset"],
+                    branch=gate.get("dominant_branch", "-"),
+                    weight=fmt(gate.get("dominant_weight")),
+                    eff=fmt(gate.get("effective_branches_mean")),
+                    entropy=fmt(gate.get("normalized_entropy_mean")),
+                    weights=weights,
+                )
+            )
     lines += [
         "",
         "## Ablation Effects",

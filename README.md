@@ -2074,7 +2074,7 @@ tls tolerant safe selector:        delta acc CI [-0.0011, +0.0010], delta macro-
 ustc safe selector:                delta acc CI [0.0000, +0.1500], delta macro-F1 CI [0.0000, +0.1331]
 ```
 
-Generate the compact paper evidence pack:
+Generate the compact paper evidence pack. It carries the framework report's unified module usage, selector, guard, CI, and multi-view gate evidence into one JSON/Markdown artifact:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
