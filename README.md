@@ -2021,6 +2021,15 @@ The framework consistency gate is enabled by default through `--require_framewor
 
 The paper-safe result paths, VPN/TLS target gates, and required unified expert slots are centralized in `paper_framework_defaults.py`. Update that file first when changing the paper-facing main result; the recommendation, framework-report, autonomous-loop, and recommended-suite scripts import the shared defaults to avoid drift.
 
+After changing paper-facing defaults, run the audit below before regenerating reports. It checks that the configured paper-safe JSON files exist, meet their target gates where targets are defined, and expose the required unified expert slots directly or through identity-compatible legacy mapping:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python audit_paper_framework_defaults.py \
+    --output_json reasoningDataset/paper_framework_defaults_audit.json \
+    --output_md reasoningDataset/paper_framework_defaults_audit.md
+```
+
 For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics and the unified-framework audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. With the current results, TLS-120 passes this strict gate, while VPN is still `point_pass_ci_mixed` because its bootstrap accuracy lower bound is below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early.
 
 ```bash
