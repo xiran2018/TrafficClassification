@@ -242,6 +242,14 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
             "--output_md",
             "reasoningDataset/paper_evidence_pack.md",
         ],
+        [
+            "python",
+            "audit_paper_framework_defaults.py",
+            "--output_json",
+            "reasoningDataset/paper_framework_defaults_audit.json",
+            "--output_md",
+            "reasoningDataset/paper_framework_defaults_audit.md",
+        ],
     ]
 
 
@@ -359,6 +367,22 @@ def load_evidence_pack() -> Dict[str, Any] | None:
         return {"error": str(exc)}
 
 
+def load_defaults_audit() -> Dict[str, Any] | None:
+    path = Path("reasoningDataset/paper_framework_defaults_audit.json")
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def defaults_audit_ready(audit: Dict[str, Any] | None, required: bool) -> bool:
+    if not required:
+        return True
+    return bool(isinstance(audit, dict) and audit.get("ok") is True)
+
+
 def ci_targets_ready(evidence: Dict[str, Any] | None, goal_datasets: List[str], required: bool) -> bool:
     if not required:
         return True
@@ -433,6 +457,12 @@ def main() -> None:
     ap.add_argument("--execute", action="store_true", help="Run recommended experiments when goals are not met.")
     ap.add_argument("--continue_after_targets", action="store_true", help="Keep running recommended suite even if target gates already pass.")
     ap.add_argument("--require_framework_consistency", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument(
+        "--require_paper_defaults_audit",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Stop only when centralized paper-safe defaults still pass target and unified-slot audits.",
+    )
     ap.add_argument("--require_ci_targets", action="store_true", help="Stop only when goal datasets pass bootstrap CI target gates in the evidence pack.")
     ap.add_argument("--allow_no_cuda", action="store_true")
     ap.add_argument("--continue_on_error", action="store_true")
@@ -489,6 +519,7 @@ def main() -> None:
         "execute": bool(args.execute),
         "continue_after_targets": bool(args.continue_after_targets),
         "require_framework_consistency": bool(args.require_framework_consistency),
+        "require_paper_defaults_audit": bool(args.require_paper_defaults_audit),
         "require_ci_targets": bool(args.require_ci_targets),
         "run_tag": args.run_tag,
         "run_tag_template": args.run_tag_template,
@@ -517,24 +548,35 @@ def main() -> None:
 
         framework = load_framework_consistency()
         evidence = load_evidence_pack()
+        defaults_audit = load_defaults_audit()
         paper_safe_before = paper_safe_status_from_evidence(evidence, datasets, targets)
         raw_goals_met = all_goals_met(before, goal_datasets)
         paper_safe_goals_met = all_paper_safe_goals_met(paper_safe_before, goal_datasets)
         framework_met = framework_ready(framework, args.require_framework_consistency)
         framework_point_targets_met = framework_point_targets_ready(evidence, goal_datasets, args.require_framework_consistency)
+        defaults_audit_met = defaults_audit_ready(defaults_audit, args.require_paper_defaults_audit)
         ci_targets_met = ci_targets_ready(evidence, goal_datasets, args.require_ci_targets)
-        ready_to_stop = raw_goals_met and paper_safe_goals_met and framework_met and framework_point_targets_met and ci_targets_met
+        ready_to_stop = (
+            raw_goals_met
+            and paper_safe_goals_met
+            and framework_met
+            and framework_point_targets_met
+            and defaults_audit_met
+            and ci_targets_met
+        )
         record: Dict[str, Any] = {
             "iteration": iteration,
             "status_before": before,
             "paper_safe_status_before": paper_safe_before,
             "framework_consistency": framework,
             "evidence_pack": evidence,
+            "paper_defaults_audit": defaults_audit,
             "goals_met_before": raw_goals_met,
             "raw_goals_met_before": raw_goals_met,
             "paper_safe_goals_met_before": paper_safe_goals_met,
             "framework_met_before": framework_met,
             "framework_point_targets_met_before": framework_point_targets_met,
+            "paper_defaults_audit_met_before": defaults_audit_met,
             "ci_targets_met_before": ci_targets_met,
             "ready_to_stop_before": ready_to_stop,
             "run_tag": run_tag,
@@ -572,6 +614,7 @@ def main() -> None:
 
         framework_after = load_framework_consistency()
         evidence_after = load_evidence_pack()
+        defaults_audit_after = load_defaults_audit()
         record["status_after"] = dataset_status(datasets, targets, args.status_rank_metric)
         record["paper_safe_status_after"] = paper_safe_status_from_evidence(evidence_after, datasets, targets)
         record["best_delta"] = best_delta_summary(before, record["status_after"])
@@ -580,9 +623,13 @@ def main() -> None:
         record["paper_safe_goals_met_after"] = all_paper_safe_goals_met(record["paper_safe_status_after"], goal_datasets)
         record["framework_consistency_after"] = framework_after
         record["evidence_pack_after"] = evidence_after
+        record["paper_defaults_audit_after"] = defaults_audit_after
         record["framework_met_after"] = framework_ready(framework_after, args.require_framework_consistency)
         record["framework_point_targets_met_after"] = framework_point_targets_ready(
             evidence_after, goal_datasets, args.require_framework_consistency
+        )
+        record["paper_defaults_audit_met_after"] = defaults_audit_ready(
+            defaults_audit_after, args.require_paper_defaults_audit
         )
         record["ci_targets_met_after"] = ci_targets_ready(evidence_after, goal_datasets, args.require_ci_targets)
         record["ready_to_stop_after"] = (
@@ -590,6 +637,7 @@ def main() -> None:
             and record["paper_safe_goals_met_after"]
             and record["framework_met_after"]
             and record["framework_point_targets_met_after"]
+            and record["paper_defaults_audit_met_after"]
             and record["ci_targets_met_after"]
         )
         record["action"] = "ran_recommended_suite" if args.execute else "dry_run_recommended_suite"

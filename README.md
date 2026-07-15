@@ -2006,7 +2006,7 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/recommended_suite_plan.json
 ```
 
-For the full autonomous research loop, use the wrapper below. It first regenerates the recommendation, framework, and ablation reports, checks the VPN/TLS target gates, and stops only when the current results satisfy both the metric goals and the unified-framework consistency audit. If the gates are not met, or if `--continue_after_targets` is set, it calls the recommended suite and records a loop ledger:
+For the full autonomous research loop, use the wrapper below. It first regenerates the recommendation, framework, ablation, evidence-pack, and paper-defaults audit reports, checks the VPN/TLS target gates, and stops only when the current results satisfy the metric goals, the unified-framework consistency audit, and the centralized paper-safe defaults audit. If the gates are not met, or if `--continue_after_targets` is set, it calls the recommended suite and records a loop ledger:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -2015,13 +2015,13 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
 ```
 
-The framework consistency gate is enabled by default through `--require_framework_consistency`; use `--no-require_framework_consistency` only for temporary debugging runs where the paper-facing unified-framework proof is not being checked. The loop now passes the same `--final_selector_unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker` list to both the recommended suite and the framework report. The report treats missing dataset-specific experts as identity candidates only when the slot names still match this required list, so a dataset that silently skips the unified selector/slot-stacker interface will fail the paper-facing consistency audit. The loop also requires the evidence-pack framework claims themselves to pass point targets before stopping, which prevents an unconstrained probe JSON from satisfying the metric gate while the paper-safe framework result is weaker. `--no-enable_slot_stacker` should be reserved for explicit ablation loops.
+The framework consistency gate is enabled by default through `--require_framework_consistency`; use `--no-require_framework_consistency` only for temporary debugging runs where the paper-facing unified-framework proof is not being checked. The centralized defaults gate is also enabled by default through `--require_paper_defaults_audit`; use `--no-require_paper_defaults_audit` only when intentionally editing or debugging paper-facing result paths. The loop now passes the same `--final_selector_unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker` list to both the recommended suite and the framework report. The report treats missing dataset-specific experts as identity candidates only when the slot names still match this required list, so a dataset that silently skips the unified selector/slot-stacker interface will fail the paper-facing consistency audit. The loop also requires the evidence-pack framework claims and the centralized paper-safe defaults audit to pass point targets before stopping, which prevents an unconstrained probe JSON or stale default path from satisfying the metric gate while the paper-safe framework result is weaker. `--no-enable_slot_stacker` should be reserved for explicit ablation loops.
 
 `recommend_next_experiment.py` reports both the raw highest-scoring `test*.json` and the paper-safe framework result. This is deliberate: for TLS-120 the direct unified-slot stacker probe reaches `0.7991/0.7897`, while the guarded selector result used for paper claims is `0.7945/0.7807`. Recommendations and target status are tied to the paper-safe result, and raw-best probes should be treated as upper-bound or ablation evidence until the validation-gated selector accepts them. The recommendation JSON and evidence pack also record `raw_minus_paper_safe` accuracy/F1 deltas so this distinction is machine-checkable.
 
 The paper-safe result paths, VPN/TLS target gates, and required unified expert slots are centralized in `paper_framework_defaults.py`. Update that file first when changing the paper-facing main result; the recommendation, framework-report, autonomous-loop, and recommended-suite scripts import the shared defaults to avoid drift.
 
-After changing paper-facing defaults, run the audit below before regenerating reports. It checks that the configured paper-safe JSON files exist, meet their target gates where targets are defined, and expose the required unified expert slots directly or through identity-compatible legacy mapping:
+The autonomous loop runs the audit below automatically. Run it manually after changing paper-facing defaults or before updating paper tables. It checks that the configured paper-safe JSON files exist, meet their target gates where targets are defined, and expose the required unified expert slots directly or through identity-compatible legacy mapping:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -2030,7 +2030,7 @@ conda run --no-capture-output -n llm-factory \
     --output_md reasoningDataset/paper_framework_defaults_audit.md
 ```
 
-For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics and the unified-framework audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. With the current results, TLS-120 passes this strict gate, while VPN is still `point_pass_ci_mixed` because its bootstrap accuracy lower bound is below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early.
+For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics, the unified-framework audit, and the centralized paper-safe defaults audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. With the current results, TLS-120 passes this strict gate, while VPN is still `point_pass_ci_mixed` because its bootstrap accuracy lower bound is below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early.
 
 ```bash
 conda run --no-capture-output -n llm-factory \
