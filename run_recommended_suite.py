@@ -214,7 +214,7 @@ def main() -> None:
     ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0)
     ap.add_argument(
         "--final_selector_unified_expert_slots",
-        default="base,graph,seq,prior_base,emb_lr,emb_et,paired",
+        default="base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired",
         help="Comma-separated final-selector expert slots shared by every dataset; missing slots become identity experts.",
     )
     ap.add_argument("--execute", action="store_true")

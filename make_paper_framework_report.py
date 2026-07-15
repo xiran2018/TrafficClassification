@@ -31,6 +31,8 @@ DEFAULT_RESULTS = [
     ),
 ]
 
+DEFAULT_UNIFIED_EXPERT_SLOTS = ["base", "graph", "seq", "prior_base", "emb_lr", "emb_et", "proto_emb", "paired"]
+
 
 def load_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -193,17 +195,50 @@ def selector_slot_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
     feature_config = data.get("feature_config") or {}
     slots = feature_config.get("unified_expert_slots") or []
     status = feature_config.get("input_slot_status") or []
+    mode = "recorded"
+    if not slots and not status:
+        inputs = data.get("inputs") or []
+        if not inputs:
+            return None
+        slots = DEFAULT_UNIFIED_EXPERT_SLOTS
+        names = {row.get("name") for row in inputs}
+        base_input = next((row for row in inputs if row.get("name") == "base"), inputs[0])
+        status = []
+        for slot in slots:
+            match = next((row for row in inputs if row.get("name") == slot), None)
+            if match:
+                status.append({"name": slot, "path": match.get("path"), "status": "provided"})
+            else:
+                status.append(
+                    {
+                        "name": slot,
+                        "path": base_input.get("path"),
+                        "status": "identity_from_base",
+                        "source": base_input.get("name", "base"),
+                    }
+                )
+        for row in inputs:
+            name = row.get("name")
+            if name not in names:
+                continue
+            if name not in slots:
+                status.append({"name": name, "path": row.get("path"), "status": "extra_provided"})
+        mode = "inferred_identity_compatible"
     if not slots or not isinstance(status, list):
         return None
     provided = [row.get("name") for row in status if row.get("status") in {"provided", "extra_provided"}]
     identity = [row.get("name") for row in status if row.get("status") == "identity_from_base"]
+    extra = [row.get("name") for row in status if row.get("status") == "extra_provided"]
     return {
+        "mode": mode,
         "slots": slots,
         "provided": provided,
         "identity_from_base": identity,
+        "extra_provided": extra,
         "num_slots": len(slots),
         "num_provided": len(provided),
         "num_identity": len(identity),
+        "num_extra": len(extra),
     }
 
 
@@ -229,9 +264,10 @@ def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
     slot_summary = selector_slot_summary(data)
     if slot_summary:
         usage["selector_expert_slots"] = (
-            f"configured:{slot_summary['num_slots']};"
+            f"{slot_summary['mode']}:{slot_summary['num_slots']};"
             f"provided:{slot_summary['num_provided']};"
-            f"identity:{slot_summary['num_identity']}"
+            f"identity:{slot_summary['num_identity']};"
+            f"extra:{slot_summary['num_extra']}"
         )
     if "class_bias_calibration" in strategies:
         usage["class_bias_calibration_candidate"] = "evaluated"
@@ -319,7 +355,7 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
     slot_uniform = len(set(configured_slot_sets)) <= 1 if configured_slot_sets else None
     return {
-        "consistent": all(item["consistent"] for item in dataset_checks),
+        "consistent": all(item["consistent"] for item in dataset_checks) and slot_uniform is not False,
         "required_active_modules": required_active,
         "required_safety_modules": required_safety,
         "candidate_modules": required_candidates,

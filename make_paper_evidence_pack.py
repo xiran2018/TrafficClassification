@@ -275,17 +275,19 @@ def render_markdown(pack: Dict[str, Any]) -> str:
             "",
             "## Unified Expert Slots",
             "",
-            "| Dataset | Slots | Provided | Identity-from-base |",
-            "|---|---|---|---|",
+            "| Dataset | Mode | Slots | Provided | Identity-from-base | Extra |",
+            "|---|---|---|---|---|---|",
         ]
         for row in slot_claims:
             summary = row["selector_slot_summary"]
             lines.append(
-                "| {dataset} | {slots} | {provided} | {identity} |".format(
+                "| {dataset} | {mode} | {slots} | {provided} | {identity} | {extra} |".format(
                     dataset=row["dataset"],
+                    mode=summary.get("mode", "-"),
                     slots=", ".join(summary.get("slots") or []),
                     provided=", ".join(summary.get("provided") or []),
                     identity=", ".join(summary.get("identity_from_base") or []),
+                    extra=", ".join(summary.get("extra_provided") or []),
                 )
             )
     gated_claims = [row for row in pack["claims"] if row.get("multi_view_gate")]

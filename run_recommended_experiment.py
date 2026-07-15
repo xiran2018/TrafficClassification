@@ -11,7 +11,7 @@ from typing import Any, Dict, List
 from recommend_next_experiment import cuda_summary
 
 
-DEFAULT_UNIFIED_EXPERT_SLOTS = "base,graph,seq,prior_base,emb_lr,emb_et,paired"
+DEFAULT_UNIFIED_EXPERT_SLOTS = "base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired"
 
 
 DATASET_PRESETS = {
