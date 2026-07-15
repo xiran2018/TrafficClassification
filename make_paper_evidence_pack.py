@@ -170,6 +170,7 @@ def recommendation_rows(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
     for row in recommendation.get("datasets", []):
         best = row.get("best") or {}
         paper_safe = row.get("paper_safe") or {}
+        delta = row.get("raw_vs_paper_safe_delta") or {}
         rows.append(
             {
                 "dataset": row["dataset"],
@@ -180,6 +181,9 @@ def recommendation_rows(recommendation: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "paper_safe_accuracy": paper_safe.get("accuracy"),
                 "paper_safe_macro_f1": paper_safe.get("macro_f1"),
                 "paper_safe_path": paper_safe.get("path"),
+                "raw_minus_paper_safe_accuracy": delta.get("delta_accuracy"),
+                "raw_minus_paper_safe_macro_f1": delta.get("delta_macro_f1"),
+                "raw_and_paper_safe_same_path": delta.get("same_path"),
                 "recommendation": row.get("recommendation"),
             }
         )
@@ -338,6 +342,26 @@ def render_markdown(pack: Dict[str, Any]) -> str:
                 dacc_ci=format_ci(row["delta_accuracy_ci95"], signed=True),
                 df1_ci=format_ci(row["delta_macro_f1_ci95"], signed=True),
                 effect=row["effect"],
+            )
+        )
+    lines += [
+        "",
+        "## Raw Best vs Paper-Safe Result",
+        "",
+        "| Dataset | Raw Best Acc | Raw Best F1 | Paper-Safe Acc | Paper-Safe F1 | Raw-Paper Acc | Raw-Paper F1 | Same Path |",
+        "|---|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in pack["recommendations"]:
+        lines.append(
+            "| {dataset} | {raw_acc} | {raw_f1} | {safe_acc} | {safe_f1} | {dacc} | {df1} | {same} |".format(
+                dataset=row["dataset"],
+                raw_acc=fmt(row.get("raw_best_accuracy")),
+                raw_f1=fmt(row.get("raw_best_macro_f1")),
+                safe_acc=fmt(row.get("paper_safe_accuracy")),
+                safe_f1=fmt(row.get("paper_safe_macro_f1")),
+                dacc=fmt(row.get("raw_minus_paper_safe_accuracy"), signed=True),
+                df1=fmt(row.get("raw_minus_paper_safe_macro_f1"), signed=True),
+                same=row.get("raw_and_paper_safe_same_path"),
             )
         )
     lines += ["", "## Next-Step Recommendations", ""]

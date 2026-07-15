@@ -90,6 +90,24 @@ def paper_safe_path(dataset: str, overrides: Dict[str, str]) -> str:
     return overrides.get(dataset, DEFAULT_PAPER_SAFE_RESULTS.get(dataset, ""))
 
 
+def raw_vs_paper_delta(raw_best: Dict[str, Any] | None, paper_safe: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not raw_best or not paper_safe:
+        return None
+    raw_acc = raw_best.get("accuracy")
+    safe_acc = paper_safe.get("accuracy")
+    raw_f1 = raw_best.get("macro_f1")
+    safe_f1 = paper_safe.get("macro_f1")
+    if raw_acc is None or safe_acc is None:
+        return None
+    return {
+        "delta_accuracy": float(raw_acc) - float(safe_acc),
+        "delta_macro_f1": None if raw_f1 is None or safe_f1 is None else float(raw_f1) - float(safe_f1),
+        "raw_path": raw_best.get("path"),
+        "paper_safe_path": paper_safe.get("path"),
+        "same_path": raw_best.get("path") == paper_safe.get("path"),
+    }
+
+
 def decide_recommendation(
     dataset: str,
     raw_best: Dict[str, Any] | None,
@@ -132,22 +150,25 @@ def render_markdown(report: Dict[str, Any]) -> str:
         "",
         f"CUDA available: `{report['cuda']['available']}`; devices: `{report['cuda'].get('device_count', 0)}`",
         "",
-        "| Dataset | Raw Best Acc | Raw Best F1 | Paper-Safe Acc | Paper-Safe F1 | Target | Status | Raw Best File | Paper-Safe File | Recommendation |",
-        "|---|---:|---:|---:|---:|---|---|---|---|---|",
+        "| Dataset | Raw Best Acc | Raw Best F1 | Paper-Safe Acc | Paper-Safe F1 | Raw-Paper Acc | Raw-Paper F1 | Target | Status | Raw Best File | Paper-Safe File | Recommendation |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---|---|---|---|",
     ]
     for row in report["datasets"]:
         best = row.get("best") or {}
         paper = row.get("paper_safe") or {}
+        delta = row.get("raw_vs_paper_safe_delta") or {}
         target = row.get("target")
         target_text = "-" if not target else f"{target[0]:.4f}/{target[1]:.4f}"
         status = "PASS" if row.get("paper_safe_target_met") else ("MISS" if target else "evidence")
         lines.append(
-            "| {dataset} | {raw_acc} | {raw_f1} | {paper_acc} | {paper_f1} | {target} | {status} | {raw_path} | {paper_path} | {rec} |".format(
+            "| {dataset} | {raw_acc} | {raw_f1} | {paper_acc} | {paper_f1} | {dacc} | {df1} | {target} | {status} | {raw_path} | {paper_path} | {rec} |".format(
                 dataset=row["dataset"],
                 raw_acc=f"{best.get('accuracy', 0.0):.4f}" if best else "-",
                 raw_f1=f"{best.get('macro_f1', 0.0):.4f}" if best else "-",
                 paper_acc=f"{paper.get('accuracy', 0.0):.4f}" if paper else "-",
                 paper_f1=f"{paper.get('macro_f1', 0.0):.4f}" if paper else "-",
+                dacc=f"{delta.get('delta_accuracy', 0.0):+.4f}" if delta else "-",
+                df1=f"{delta.get('delta_macro_f1', 0.0):+.4f}" if delta and delta.get("delta_macro_f1") is not None else "-",
                 target=target_text,
                 status=status,
                 raw_path=best.get("path", "-"),
@@ -230,6 +251,7 @@ def main() -> None:
                 "paper_safe_target_met": reference_target_met if target else None,
                 "best": best,
                 "paper_safe": paper_safe,
+                "raw_vs_paper_safe_delta": raw_vs_paper_delta(best, paper_safe),
                 "top_results": rows[: args.top_k],
                 "num_results": len(rows),
                 "probes": probes,
