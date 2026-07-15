@@ -289,6 +289,50 @@ def parse_float_list(text: str) -> List[float]:
     return [float(x) for x in text.split(",") if x.strip()]
 
 
+def parse_name_list(text: str) -> List[str]:
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
+def apply_unified_expert_slots(
+    inputs: List[Tuple[str, Dict[str, Any], str]],
+    slots: List[str],
+) -> Tuple[List[Tuple[str, Dict[str, Any], str]], List[Dict[str, Any]]]:
+    if not slots:
+        return inputs, [{"name": name, "path": path, "status": "provided"} for name, _, path in inputs]
+    seen = set()
+    duplicates = []
+    by_name: Dict[str, Tuple[str, Dict[str, Any], str]] = {}
+    for item in inputs:
+        name = item[0]
+        if name in seen:
+            duplicates.append(name)
+        seen.add(name)
+        by_name[name] = item
+    if duplicates:
+        raise ValueError(f"Duplicate selector input names are not allowed with --unified_expert_slots: {duplicates}")
+    if not inputs:
+        raise ValueError("At least one selector input is required.")
+    base_item = by_name.get(slots[0], inputs[0])
+    unified: List[Tuple[str, Dict[str, Any], str]] = []
+    status: List[Dict[str, Any]] = []
+    used = set()
+    for slot in slots:
+        if slot in by_name:
+            name, data, path = by_name[slot]
+            unified.append((name, data, path))
+            status.append({"name": slot, "path": path, "status": "provided"})
+            used.add(slot)
+        else:
+            _, data, path = base_item
+            unified.append((slot, data, path))
+            status.append({"name": slot, "path": path, "status": "identity_from_base", "source": base_item[0]})
+    for name, data, path in inputs:
+        if name not in used and name not in slots:
+            unified.append((name, data, path))
+            status.append({"name": name, "path": path, "status": "extra_provided"})
+    return unified, status
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Validation-gated expert selection for probability JSONs.")
     ap.add_argument("--input", nargs=2, action="append", metavar=("NAME", "JSON"), required=True)
@@ -342,11 +386,21 @@ def main() -> None:
     ap.add_argument("--bootstrap_min_win_rate", type=float, default=0.0, help="Fallback unless selected candidate beats base in at least this fraction of bootstrap samples.")
     ap.add_argument("--bootstrap_min_gain_quantile", type=float, default=-1.0, help="Fallback unless the bootstrap gain quantile is at least this value.")
     ap.add_argument("--max_prediction_change_rate", type=float, default=1.0, help="Fallback if selected test predictions differ from the base input by more than this unlabeled target fraction.")
+    ap.add_argument(
+        "--unified_expert_slots",
+        default="",
+        help=(
+            "Comma-separated expert slots that every dataset should expose to the selector. "
+            "Missing slots are filled with the first/base input as identity experts and recorded in feature_config."
+        ),
+    )
     ap.add_argument("--print_all_candidates", action="store_true", help="Print every validation selector candidate.")
     ap.add_argument("--output_json", required=True)
     args = ap.parse_args()
 
     named_payloads = [(name, load_payload(path), path) for name, path in args.input]
+    unified_expert_slots = parse_name_list(args.unified_expert_slots)
+    named_payloads, input_slot_status = apply_unified_expert_slots(named_payloads, unified_expert_slots)
     valid_common = sorted(set.intersection(*(set(map(str, data["valid_flow_ids"])) for _, data, _ in named_payloads)))
     test_common = sorted(set.intersection(*(set(map(str, data["flow_ids"])) for _, data, _ in named_payloads)))
     if not valid_common or not test_common:
@@ -680,6 +734,8 @@ def main() -> None:
             "rank_select_metric": rank_select_metric,
             "rank_metric": args.rank_metric,
             "strategies": sorted(strategies),
+            "unified_expert_slots": unified_expert_slots,
+            "input_slot_status": input_slot_status,
             "output_smooth": args.output_smooth,
             "bootstrap_samples": args.bootstrap_samples,
             "rank_bootstrap_samples": rank_bootstrap_samples,

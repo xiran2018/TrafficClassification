@@ -11,6 +11,9 @@ from typing import Any, Dict, List
 from recommend_next_experiment import cuda_summary
 
 
+DEFAULT_UNIFIED_EXPERT_SLOTS = "base,graph,seq,prior_base,emb_lr,emb_et,paired"
+
+
 DATASET_PRESETS = {
     "vpn-app": {
         "num_classes": 16,
@@ -159,7 +162,7 @@ def final_selector_cmd(args) -> List[str]:
     base_input = args.base_selector_input or default_base_selector_input(args)
     if not base_input:
         raise ValueError("--base_selector_input is required for datasets without a built-in final selector default.")
-    return [
+    cmd = [
         "python",
         "validation_gated_selector.py",
         "--input",
@@ -221,6 +224,9 @@ def final_selector_cmd(args) -> List[str]:
         "--output_json",
         final_selector_output_path(args),
     ]
+    if args.final_selector_unified_expert_slots:
+        cmd += ["--unified_expert_slots", args.final_selector_unified_expert_slots]
+    return cmd
 
 
 def stage_commands(args) -> List[Dict[str, Any]]:
@@ -345,6 +351,7 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "seed": args.seed,
             "flow_pooling": args.flow_pooling,
             "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
+            "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
         },
         "base_selector_input": args.base_selector_input or default_base_selector_input(args),
         "paired_prior_output": paired_prior_output_path(args),
@@ -437,6 +444,14 @@ def main() -> None:
     ap.add_argument("--final_selector_bootstrap_min_win_rate", type=float, default=0.6)
     ap.add_argument("--final_selector_bootstrap_min_gain_quantile", type=float, default=-0.001)
     ap.add_argument("--final_selector_max_prediction_change_rate", type=float, default=-1.0, help="Defaults from dataset presets when <0.")
+    ap.add_argument(
+        "--final_selector_unified_expert_slots",
+        default=DEFAULT_UNIFIED_EXPERT_SLOTS,
+        help=(
+            "Comma-separated expert slots exposed by every dataset in the final selector. "
+            "Missing slots are filled as identity experts from the base input; pass an empty string to disable."
+        ),
+    )
     ap.add_argument("--require_cuda_for_tower2", action="store_true")
     ap.add_argument("--execute", action="store_true", help="Actually run the recommended commands. Default prints a dry-run plan.")
     ap.add_argument("--allow_no_cuda", action="store_true", help="Allow --execute even when CUDA is unavailable; useful only for tiny CPU probes.")

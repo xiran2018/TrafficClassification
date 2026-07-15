@@ -117,6 +117,7 @@ def claim_rows(framework: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "accuracy_ci95": acc_ci,
                 "macro_f1_ci95": f1_ci,
                 "module_usage": row.get("module_usage"),
+                "selector_slot_summary": row.get("selector_slot_summary"),
                 "multi_view_gate": row.get("multi_view_gate"),
                 "selector": row.get("selector"),
                 "num_flows": row.get("num_flows"),
@@ -268,6 +269,25 @@ def render_markdown(pack: Dict[str, Any]) -> str:
                 selector=format_selector(row.get("selector")),
             )
         )
+    slot_claims = [row for row in pack["claims"] if row.get("selector_slot_summary")]
+    if slot_claims:
+        lines += [
+            "",
+            "## Unified Expert Slots",
+            "",
+            "| Dataset | Slots | Provided | Identity-from-base |",
+            "|---|---|---|---|",
+        ]
+        for row in slot_claims:
+            summary = row["selector_slot_summary"]
+            lines.append(
+                "| {dataset} | {slots} | {provided} | {identity} |".format(
+                    dataset=row["dataset"],
+                    slots=", ".join(summary.get("slots") or []),
+                    provided=", ".join(summary.get("provided") or []),
+                    identity=", ".join(summary.get("identity_from_base") or []),
+                )
+            )
     gated_claims = [row for row in pack["claims"] if row.get("multi_view_gate")]
     if gated_claims:
         lines += [

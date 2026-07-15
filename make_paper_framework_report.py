@@ -189,6 +189,24 @@ def multi_view_gate_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
+def selector_slot_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
+    feature_config = data.get("feature_config") or {}
+    slots = feature_config.get("unified_expert_slots") or []
+    status = feature_config.get("input_slot_status") or []
+    if not slots or not isinstance(status, list):
+        return None
+    provided = [row.get("name") for row in status if row.get("status") in {"provided", "extra_provided"}]
+    identity = [row.get("name") for row in status if row.get("status") == "identity_from_base"]
+    return {
+        "slots": slots,
+        "provided": provided,
+        "identity_from_base": identity,
+        "num_slots": len(slots),
+        "num_provided": len(provided),
+        "num_identity": len(identity),
+    }
+
+
 def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
     selected = data.get("selected", {})
     feature_config = data.get("feature_config") or {}
@@ -206,7 +224,15 @@ def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
         "expert_switch_or_fusion": "identity",
         "class_bias_calibration_candidate": "not_configured",
         "trainable_multiview_gate": "active" if multi_view_gate_summary(data) else "not_observed",
+        "selector_expert_slots": "legacy_not_recorded",
     }
+    slot_summary = selector_slot_summary(data)
+    if slot_summary:
+        usage["selector_expert_slots"] = (
+            f"configured:{slot_summary['num_slots']};"
+            f"provided:{slot_summary['num_provided']};"
+            f"identity:{slot_summary['num_identity']}"
+        )
     if "class_bias_calibration" in strategies:
         usage["class_bias_calibration_candidate"] = "evaluated"
 
@@ -241,6 +267,7 @@ def module_usage_summary(usage: Dict[str, str]) -> str:
         f"selector={usage['validation_gated_selector']}; "
         f"expert={usage['expert_switch_or_fusion']}; "
         f"calib={usage['class_bias_calibration_candidate']}; "
+        f"slots={usage.get('selector_expert_slots', 'legacy_not_recorded')}; "
         f"mv_gate={usage.get('trainable_multiview_gate', 'not_observed')}; "
         f"guards=boot:{usage['bootstrap_guard']},shift:{usage['target_shift_guard']}"
     )
@@ -260,8 +287,10 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "expert_switch_or_fusion",
         "class_bias_calibration_candidate",
         "trainable_multiview_gate",
+        "selector_expert_slots",
     ]
     dataset_checks = []
+    configured_slot_sets = []
     for row in rows:
         usage = row["module_usage"]
         failures = []
@@ -276,23 +305,31 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             failures.append(f"expert_switch_or_fusion!={expert_state}")
         if usage.get("class_bias_calibration_candidate") not in {"evaluated", "active", "gated_off"}:
             failures.append(f"class_bias_calibration_candidate!={usage.get('class_bias_calibration_candidate')}")
+        slot_summary = row.get("selector_slot_summary")
+        if slot_summary:
+            configured_slot_sets.append(tuple(slot_summary.get("slots") or []))
         dataset_checks.append(
             {
                 "dataset": row["dataset"],
                 "consistent": not failures,
                 "failures": failures,
                 "expert_state": expert_state,
+                "selector_slot_summary": slot_summary,
             }
         )
+    slot_uniform = len(set(configured_slot_sets)) <= 1 if configured_slot_sets else None
     return {
         "consistent": all(item["consistent"] for item in dataset_checks),
         "required_active_modules": required_active,
         "required_safety_modules": required_safety,
         "candidate_modules": required_candidates,
+        "selector_slot_uniform": slot_uniform,
+        "selector_slots": list(configured_slot_sets[0]) if configured_slot_sets and slot_uniform else [],
         "dataset_checks": dataset_checks,
         "interpretation": (
             "All datasets pass through the same backbone, base expert, validation-gated selector, "
             "bootstrap guard, target-shift guard, and candidate expert/calibration family. "
+            "When unified expert slots are configured, missing dataset-specific experts are routed as identity candidates. "
             "Dataset-specific validation may activate, gate off, or leave candidate experts as identity. "
             "When multi-view pooling is evaluated, learned branch-gate weights are reported as trainable module evidence."
         ),
@@ -321,6 +358,7 @@ def build_rows(results: List[Tuple[str, str, float | None, float | None]], boots
                 "selector": selector_summary(selected),
                 "guards": guard_summary(selected),
                 "module_usage": module_usage(data),
+                "selector_slot_summary": selector_slot_summary(data),
                 "multi_view_gate": multi_view_gate_summary(data),
                 "uncertainty": bootstrap_uncertainty(data, bootstrap_samples, bootstrap_seed),
             }
