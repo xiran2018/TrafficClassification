@@ -378,6 +378,45 @@ def framework_point_targets_ready(evidence: Dict[str, Any] | None, goal_datasets
     return True
 
 
+def paper_safe_status_from_evidence(
+    evidence: Dict[str, Any] | None,
+    datasets: List[str],
+    targets: Dict[str, Tuple[float, float]],
+) -> List[Dict[str, Any]]:
+    by_claim = {}
+    by_rec = {}
+    if isinstance(evidence, dict):
+        by_claim = {row.get("dataset"): row for row in evidence.get("claims", [])}
+        by_rec = {row.get("dataset"): row for row in evidence.get("recommendations", [])}
+    rows: List[Dict[str, Any]] = []
+    for dataset in datasets:
+        claim = by_claim.get(dataset) or {}
+        rec = by_rec.get(dataset) or {}
+        target = targets.get(dataset)
+        paper_safe_accuracy = claim.get("accuracy")
+        paper_safe_macro_f1 = claim.get("macro_f1")
+        raw_best_accuracy = rec.get("raw_best_accuracy")
+        raw_best_macro_f1 = rec.get("raw_best_macro_f1")
+        rows.append(
+            {
+                "dataset": dataset,
+                "target": None if target is None else {"accuracy": target[0], "macro_f1": target[1]},
+                "paper_safe_accuracy": paper_safe_accuracy,
+                "paper_safe_macro_f1": paper_safe_macro_f1,
+                "paper_safe_target_met": claim.get("point_target_met"),
+                "ci_target_met": claim.get("ci_target_met"),
+                "claim_strength": claim.get("claim_strength"),
+                "raw_best_accuracy": raw_best_accuracy,
+                "raw_best_macro_f1": raw_best_macro_f1,
+                "raw_minus_paper_safe_accuracy": rec.get("raw_minus_paper_safe_accuracy"),
+                "raw_minus_paper_safe_macro_f1": rec.get("raw_minus_paper_safe_macro_f1"),
+                "raw_best_path": rec.get("raw_best_path"),
+                "paper_safe_path": rec.get("paper_safe_path"),
+            }
+        )
+    return rows
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Autonomous research loop for the unified traffic framework.")
     ap.add_argument("--datasets", default="vpn-app,tls-120,ustc-app")
@@ -471,6 +510,7 @@ def main() -> None:
 
         framework = load_framework_consistency()
         evidence = load_evidence_pack()
+        paper_safe_before = paper_safe_status_from_evidence(evidence, datasets, targets)
         goals_met = all_goals_met(before, goal_datasets)
         framework_met = framework_ready(framework, args.require_framework_consistency)
         framework_point_targets_met = framework_point_targets_ready(evidence, goal_datasets, args.require_framework_consistency)
@@ -479,6 +519,7 @@ def main() -> None:
         record: Dict[str, Any] = {
             "iteration": iteration,
             "status_before": before,
+            "paper_safe_status_before": paper_safe_before,
             "framework_consistency": framework,
             "evidence_pack": evidence,
             "goals_met_before": goals_met,
@@ -522,6 +563,7 @@ def main() -> None:
         framework_after = load_framework_consistency()
         evidence_after = load_evidence_pack()
         record["status_after"] = dataset_status(datasets, targets, args.status_rank_metric)
+        record["paper_safe_status_after"] = paper_safe_status_from_evidence(evidence_after, datasets, targets)
         record["best_delta"] = best_delta_summary(before, record["status_after"])
         record["goals_met_after"] = all_goals_met(record["status_after"], goal_datasets)
         record["framework_consistency_after"] = framework_after
