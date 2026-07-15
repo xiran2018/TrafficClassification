@@ -191,7 +191,7 @@ def multi_view_gate_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
-def selector_slot_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
+def selector_slot_summary(data: Dict[str, Any], required_slots: List[str]) -> Dict[str, Any] | None:
     feature_config = data.get("feature_config") or {}
     slots = feature_config.get("unified_expert_slots") or []
     status = feature_config.get("input_slot_status") or []
@@ -200,7 +200,7 @@ def selector_slot_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
         inputs = data.get("inputs") or []
         if not inputs:
             return None
-        slots = DEFAULT_UNIFIED_EXPERT_SLOTS
+        slots = required_slots
         names = {row.get("name") for row in inputs}
         base_input = next((row for row in inputs if row.get("name") == "base"), inputs[0])
         status = []
@@ -232,6 +232,7 @@ def selector_slot_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
     return {
         "mode": mode,
         "slots": slots,
+        "matches_required": list(slots) == list(required_slots),
         "provided": provided,
         "identity_from_base": identity,
         "extra_provided": extra,
@@ -242,7 +243,7 @@ def selector_slot_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
-def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
+def module_usage(data: Dict[str, Any], required_slots: List[str]) -> Dict[str, str]:
     selected = data.get("selected", {})
     feature_config = data.get("feature_config") or {}
     strategies = feature_config.get("strategies") or []
@@ -261,7 +262,7 @@ def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
         "trainable_multiview_gate": "active" if multi_view_gate_summary(data) else "not_observed",
         "selector_expert_slots": "legacy_not_recorded",
     }
-    slot_summary = selector_slot_summary(data)
+    slot_summary = selector_slot_summary(data, required_slots)
     if slot_summary:
         usage["selector_expert_slots"] = (
             f"{slot_summary['mode']}:{slot_summary['num_slots']};"
@@ -309,7 +310,7 @@ def module_usage_summary(usage: Dict[str, str]) -> str:
     )
 
 
-def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def framework_consistency(rows: List[Dict[str, Any]], required_selector_slots: List[str]) -> Dict[str, Any]:
     required_active = [
         "packet_embedding_backbone",
         "flow_base_expert",
@@ -344,6 +345,13 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         slot_summary = row.get("selector_slot_summary")
         if slot_summary:
             configured_slot_sets.append(tuple(slot_summary.get("slots") or []))
+            if slot_summary.get("matches_required") is not True:
+                failures.append(
+                    "selector_slots!=required:"
+                    + ",".join(str(item) for item in slot_summary.get("slots", []))
+                )
+        else:
+            failures.append("selector_slot_summary=missing")
         dataset_checks.append(
             {
                 "dataset": row["dataset"],
@@ -356,6 +364,7 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     slot_uniform = len(set(configured_slot_sets)) <= 1 if configured_slot_sets else None
     return {
         "consistent": all(item["consistent"] for item in dataset_checks) and slot_uniform is not False,
+        "required_selector_slots": required_selector_slots,
         "required_active_modules": required_active,
         "required_safety_modules": required_safety,
         "candidate_modules": required_candidates,
@@ -372,7 +381,12 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def build_rows(results: List[Tuple[str, str, float | None, float | None]], bootstrap_samples: int, bootstrap_seed: int) -> List[Dict[str, Any]]:
+def build_rows(
+    results: List[Tuple[str, str, float | None, float | None]],
+    bootstrap_samples: int,
+    bootstrap_seed: int,
+    required_slots: List[str],
+) -> List[Dict[str, Any]]:
     rows = []
     for dataset, path, target_acc, target_f1 in results:
         data = load_json(path)
@@ -393,8 +407,8 @@ def build_rows(results: List[Tuple[str, str, float | None, float | None]], boots
                 "num_flows": len(data.get("flow_y_true", [])),
                 "selector": selector_summary(selected),
                 "guards": guard_summary(selected),
-                "module_usage": module_usage(data),
-                "selector_slot_summary": selector_slot_summary(data),
+                "module_usage": module_usage(data, required_slots),
+                "selector_slot_summary": selector_slot_summary(data, required_slots),
                 "multi_view_gate": multi_view_gate_summary(data),
                 "uncertainty": bootstrap_uncertainty(data, bootstrap_samples, bootstrap_seed),
             }
@@ -525,13 +539,21 @@ def main() -> None:
     ap.add_argument("--result", nargs=4, action="append", metavar=("DATASET", "JSON", "TARGET_ACC", "TARGET_F1"))
     ap.add_argument("--bootstrap_samples", type=int, default=300)
     ap.add_argument("--bootstrap_seed", type=int, default=13)
+    ap.add_argument(
+        "--required_expert_slots",
+        default=",".join(DEFAULT_UNIFIED_EXPERT_SLOTS),
+        help="Comma-separated selector expert slots that every dataset must expose, directly or through identity fallback.",
+    )
     ap.add_argument("--output_json", default="")
     ap.add_argument("--output_md", default="")
     args = ap.parse_args()
 
     results = [parse_result(item) for item in args.result] if args.result else DEFAULT_RESULTS
-    rows = build_rows(results, args.bootstrap_samples, args.bootstrap_seed)
-    audit = framework_consistency(rows)
+    required_slots = [item.strip() for item in args.required_expert_slots.split(",") if item.strip()]
+    if not required_slots:
+        raise SystemExit("--required_expert_slots must contain at least one slot")
+    rows = build_rows(results, args.bootstrap_samples, args.bootstrap_seed, required_slots)
+    audit = framework_consistency(rows, required_slots)
     md = markdown_table(rows) + markdown_consistency(audit) + markdown_multiview_gates(rows) + markdown_uncertainty(rows)
     print(md)
 

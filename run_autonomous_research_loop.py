@@ -13,6 +13,9 @@ from recommend_next_experiment import cuda_summary
 from summarize_experiment_results import DEFAULT_TARGETS, RANK_METRICS, collect_dataset, parse_target
 
 
+DEFAULT_UNIFIED_EXPERT_SLOTS = "base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker"
+
+
 VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
     "none": [
         {
@@ -209,6 +212,8 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
         [
             "python",
             "make_paper_framework_report.py",
+            "--required_expert_slots",
+            args.final_selector_unified_expert_slots,
             "--output_json",
             "reasoningDataset/paper_framework_report.json",
             "--output_md",
@@ -285,9 +290,13 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
         str(variant["flow_pooling"]),
         "--multi_view_gate_entropy_weight",
         str(variant["multi_view_gate_entropy_weight"]),
+        "--final_selector_unified_expert_slots",
+        args.final_selector_unified_expert_slots,
         "--output_json",
         str(Path(args.suite_output_dir) / f"recommended_suite_plan_iter{iteration:02d}.json"),
     ]
+    if not args.enable_slot_stacker:
+        cmd.append("--no-enable_slot_stacker")
     if args.execute:
         cmd.append("--execute")
     if args.allow_no_cuda:
@@ -356,6 +365,19 @@ def ci_targets_ready(evidence: Dict[str, Any] | None, goal_datasets: List[str], 
     return True
 
 
+def framework_point_targets_ready(evidence: Dict[str, Any] | None, goal_datasets: List[str], required: bool) -> bool:
+    if not required:
+        return True
+    if not isinstance(evidence, dict):
+        return False
+    by_dataset = {row.get("dataset"): row for row in evidence.get("claims", [])}
+    for dataset in goal_datasets:
+        row = by_dataset.get(dataset)
+        if not row or row.get("point_target_met") is not True:
+            return False
+    return True
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Autonomous research loop for the unified traffic framework.")
     ap.add_argument("--datasets", default="vpn-app,tls-120,ustc-app")
@@ -389,6 +411,17 @@ def main() -> None:
         default="accuracy",
         help="Rank test JSONs for best before/after status by accuracy, macro_f1, balanced, or target_margin.",
     )
+    ap.add_argument(
+        "--final_selector_unified_expert_slots",
+        default=DEFAULT_UNIFIED_EXPERT_SLOTS,
+        help="Comma-separated expert slots required by the paper framework audit and passed to every suite child plan.",
+    )
+    ap.add_argument(
+        "--enable_slot_stacker",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep the trainable unified-slot probability stacker in every recommended-suite child plan.",
+    )
     ap.add_argument("--suite_output_dir", default="reasoningDataset/autonomous_loop")
     ap.add_argument("--output_json", default="reasoningDataset/autonomous_loop/research_loop_ledger.json")
     args = ap.parse_args()
@@ -415,6 +448,8 @@ def main() -> None:
         "run_tag_template": args.run_tag_template,
         "variant_schedule": args.variant_schedule,
         "status_rank_metric": args.status_rank_metric,
+        "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
+        "enable_slot_stacker": bool(args.enable_slot_stacker),
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
@@ -438,8 +473,9 @@ def main() -> None:
         evidence = load_evidence_pack()
         goals_met = all_goals_met(before, goal_datasets)
         framework_met = framework_ready(framework, args.require_framework_consistency)
+        framework_point_targets_met = framework_point_targets_ready(evidence, goal_datasets, args.require_framework_consistency)
         ci_targets_met = ci_targets_ready(evidence, goal_datasets, args.require_ci_targets)
-        ready_to_stop = goals_met and framework_met and ci_targets_met
+        ready_to_stop = goals_met and framework_met and framework_point_targets_met and ci_targets_met
         record: Dict[str, Any] = {
             "iteration": iteration,
             "status_before": before,
@@ -447,6 +483,7 @@ def main() -> None:
             "evidence_pack": evidence,
             "goals_met_before": goals_met,
             "framework_met_before": framework_met,
+            "framework_point_targets_met_before": framework_point_targets_met,
             "ci_targets_met_before": ci_targets_met,
             "ready_to_stop_before": ready_to_stop,
             "run_tag": run_tag,
@@ -490,8 +527,16 @@ def main() -> None:
         record["framework_consistency_after"] = framework_after
         record["evidence_pack_after"] = evidence_after
         record["framework_met_after"] = framework_ready(framework_after, args.require_framework_consistency)
+        record["framework_point_targets_met_after"] = framework_point_targets_ready(
+            evidence_after, goal_datasets, args.require_framework_consistency
+        )
         record["ci_targets_met_after"] = ci_targets_ready(evidence_after, goal_datasets, args.require_ci_targets)
-        record["ready_to_stop_after"] = record["goals_met_after"] and record["framework_met_after"] and record["ci_targets_met_after"]
+        record["ready_to_stop_after"] = (
+            record["goals_met_after"]
+            and record["framework_met_after"]
+            and record["framework_point_targets_met_after"]
+            and record["ci_targets_met_after"]
+        )
         record["action"] = "ran_recommended_suite" if args.execute else "dry_run_recommended_suite"
         ledger["iterations"].append(record)
         write_ledger(args, ledger)
