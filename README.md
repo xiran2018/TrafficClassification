@@ -2063,7 +2063,163 @@ test accuracy = 0.7398
 test macro-F1 = 0.7368
 ```
 
-Important caveat: the merged split0/1/2 Tower-2 training run reached near-perfect validation scores even after excluding split0 validation `flow_id` values. That suggests the `train_val_split_*` folders may contain near-duplicates or split artifacts under different flow IDs. Treat the multi-split result as a stability candidate and ablation until a duplicate/content-similarity audit is added. The current paper-safe VPN headline remains the stricter split0 selector result (`0.7488` accuracy / `0.7558` macro-F1), while the multi-split conservative selector is useful evidence that extra split coverage can improve robustness-oriented F1 without changing more than 3% of target predictions.
+Important caveat: the merged split0/1/2 Tower-2 training run reached near-perfect validation scores even after excluding split0 validation `flow_id` values. A content-level audit confirms why `flow_id` exclusion is insufficient: the same pcap content can appear under different split folders and therefore receives a different path-derived `flow_id`. Treat the flow-id-only multi-split result as a useful ablation, not as the paper-safe headline. The current paper-safe VPN headline remains the stricter split0 selector result (`0.7488` accuracy / `0.7558` macro-F1), while the flow-id-only multi-split conservative selector is evidence that extra split coverage can improve robustness-oriented F1 only when guarded by target-shift constraints.
+
+Run the split duplicate audit on VPN/TLS before using multi-split data as a robustness claim:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python audit_flow_split_duplicates.py \
+    --root /home/jing/download/sweet/flow-level-classification/vpn-app \
+    --include_test \
+    --output_json reasoningDataset/vpn-app/split_duplicate_audit_vpn_app.json \
+    --max_packets 64 \
+    --payload_prefix_len 64 \
+    --l3_prefix_len 256
+
+conda run --no-capture-output -n llm-factory \
+  python audit_flow_split_duplicates.py \
+    --root /home/jing/download/sweet/flow-level-classification/tls \
+    --include_test \
+    --output_json reasoningDataset/tls-120/split_duplicate_audit_tls120.json \
+    --max_packets 64 \
+    --payload_prefix_len 64 \
+    --l3_prefix_len 256 \
+    --sample_groups 5 \
+    --no_progress
+```
+
+Observed duplicate evidence:
+
+```text
+VPN audit:
+  total flows = 4833
+  parse errors = 0
+  file_sha256 duplicate groups = 551
+  file_sha256 duplicate flows = 3339
+  file_sha256 cross-partition groups = 528
+  file_sha256 cross-split-root groups = 528
+  endpoint_invariant duplicate flows = 3428
+  payload_prefix duplicate flows = 3562
+  behavior_hash duplicate flows = 3558
+
+TLS-120 audit:
+  total flows = 42637
+  parse errors = 0
+  file_sha256 duplicate groups = 10365
+  file_sha256 duplicate flows = 31095
+  file_sha256 cross-partition groups = 10365
+  file_sha256 cross-split-root groups = 10365
+  endpoint_invariant duplicate flows = 31095
+  payload_prefix duplicate flows = 31095
+  behavior_hash duplicate flows = 31098
+```
+
+For a stricter multi-split ablation, use `combine_tower2_datasets.py` with content-hash exclusion. This maps Tower-2 `flow_id` values back to `pcap_path` through `flow_embedding_index.jsonl`, computes pcap SHA256 hashes, and excludes any training window whose pcap content matches the validation index:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python combine_tower2_datasets.py \
+    --inputs \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1/graph_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split2/graph_dataset.pt \
+    --flow_embedding_indices \
+      reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+      reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_split1/flow_embedding_index.jsonl \
+      reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_split2/flow_embedding_index.jsonl \
+    --exclude_content_from_indices reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --output reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_multisplit_train012_content_excl_valid0/graph_dataset.pt
+
+conda run --no-capture-output -n llm-factory \
+  python combine_tower2_datasets.py \
+    --inputs \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1/seq_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split2/seq_dataset.pt \
+    --flow_embedding_indices \
+      reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+      reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_split1/flow_embedding_index.jsonl \
+      reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_split2/flow_embedding_index.jsonl \
+    --exclude_content_from_indices reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --output reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_multisplit_train012_content_excl_valid0/seq_dataset.pt
+```
+
+The content-clean merge removed substantial validation-overlapping content:
+
+```text
+flow-id-only merge:
+  3453 windows from 2105 flows
+
+content-clean merge:
+  2234 windows from 1404 flows
+  excluded_content_hashes = 176
+  content_excluded_windows = 1219
+  missing_content_hash_windows = 0
+```
+
+Training the same Stage-8 Tower-2 settings on the content-clean merged set gives a more honest but weaker ablation:
+
+```text
+content-clean graph:
+  reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_multisplit_train012_content_excl_valid0_stage8_probs.json
+  test accuracy = 0.6447
+  test macro-F1 = 0.5986
+
+content-clean seq:
+  reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_change_weight_multisplit_train012_content_excl_valid0_stage8_probs.json
+  test accuracy = 0.6316
+  test macro-F1 = 0.5857
+
+content-clean graph safe prior:
+  reasoningDataset/vpn-app/test_graph_rawproj_change_weight_multisplit_train012_content_excl_valid0_stage8_safe_prior.json
+  test accuracy = 0.6441
+  test macro-F1 = 0.5972
+```
+
+Selector safety check:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python validation_gated_selector.py \
+    --input base reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json \
+    --input content_clean_graph reasoningDataset/vpn-app/fusion_input_graph_rawproj_change_weight_multisplit_train012_content_excl_valid0_stage8.json \
+    --input content_clean_seq reasoningDataset/vpn-app/fusion_input_seq_rawproj_change_weight_multisplit_train012_content_excl_valid0_stage8.json \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --select_metric macro_f1 \
+    --strategies always,threshold_switch \
+    --expert_conf_grid 0.7,0.9 \
+    --expert_margin_grid 0.1,0.2 \
+    --base_conf_max_grid 1 \
+    --delta_conf_grid 0 \
+    --delta_margin_grid 0 \
+    --min_valid_gain_over_base 0 \
+    --bootstrap_samples 100 \
+    --bootstrap_min_gain_quantile -0.001 \
+    --max_prediction_change_rate 0.03 \
+    --output_json reasoningDataset/vpn-app/test_selector_best_plus_content_clean_multisplit_train012_stage8_small_valid_macro.json
+```
+
+The selector correctly falls back to the base model:
+
+```text
+selected strategy = always
+selected source = base
+test accuracy = 0.7488
+test macro-F1 = 0.7558
+
+rejected content_clean_seq:
+  valid macro-F1 gain = +0.0272
+  bootstrap 5% gain quantile = -0.0037
+  target prediction change = 0.2344
+
+rejected content_clean_graph:
+  valid macro-F1 gain = +0.0181
+  bootstrap 5% gain quantile = -0.0111
+  target prediction change = 0.2063
+```
+
+Research conclusion: the next paper-facing improvement should optimize for content-grouped cross-split stability, not single-split or duplicated multi-split accuracy. A useful next model iteration is group-aware training/validation: use content hashes or endpoint-invariant hashes as groups, keep duplicate groups inside one split, and train the unified graph/seq/statistics/expert-gate framework on these grouped splits. This turns the problem into a stronger generalization setting and is a cleaner CCF B/A story than additional probability-level tuning.
 
 Use the metric dashboard to check the current target gates across datasets:
 
