@@ -13,6 +13,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from probability_metrics import calibration_metrics
 from validation_gated_selector import apply_unified_expert_slots, parse_name_list
 
 
@@ -165,6 +166,7 @@ def main() -> None:
             valid_prob = oof_predict_proba(x_valid, y_valid_ref, c, class_weight, n_splits, args.seed, num_classes)
             valid_pred = valid_prob.argmax(axis=1)
             metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
+            metrics["calibration"] = calibration_metrics(y_valid_ref, valid_prob)
             row = {"C": c, "class_weight": class_weight, "metrics": metrics}
             reports.append(row)
             print("valid_stacker", json.dumps(row, sort_keys=True))
@@ -183,6 +185,7 @@ def main() -> None:
         test_prob[:, int(cls)] = test_prob_raw[:, col]
     y_pred = test_prob.argmax(axis=1).astype(np.int64)
     metrics = compute_metrics(y_test_ref.tolist(), y_pred.tolist())
+    metrics["calibration"] = calibration_metrics(y_test_ref, test_prob)
     print("selected_stacker", json.dumps(selected, sort_keys=True))
     print("test_stacker", json.dumps(metrics, indent=2, sort_keys=True))
 

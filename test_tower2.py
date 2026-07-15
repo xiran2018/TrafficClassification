@@ -22,6 +22,7 @@ from train_tower2 import (
 )
 from models.flow_transformer import FlowTransformerClassifier
 from models.flow_graph_transformer import FlowGraphTransformerClassifier
+from probability_metrics import calibration_metrics
 
 
 def load_model(ckpt_path: str, device: str):
@@ -206,58 +207,6 @@ def compute_metrics(y_true, y_pred):
         "weighted_precision": p_weight,
         "weighted_recall": r_weight,
         "weighted_f1": f_weight,
-    }
-
-
-def calibration_metrics(y_true, prob, num_bins: int = 15):
-    if not y_true or prob is None or len(prob) == 0:
-        return {
-            "nll": None,
-            "brier": None,
-            "ece": None,
-            "avg_confidence": None,
-            "accuracy": None,
-            "num_samples": 0,
-            "num_bins": num_bins,
-        }
-    p = np.asarray(prob, dtype=np.float64)
-    y = np.asarray(y_true, dtype=np.int64)
-    if p.ndim != 2 or p.shape[0] != y.shape[0]:
-        return {
-            "nll": None,
-            "brier": None,
-            "ece": None,
-            "avg_confidence": None,
-            "accuracy": None,
-            "num_samples": int(len(y_true)),
-            "num_bins": num_bins,
-        }
-    p = p / p.sum(axis=1, keepdims=True).clip(min=1e-12)
-    pred = p.argmax(axis=1)
-    conf = p.max(axis=1)
-    correct = pred == y
-    true_prob = p[np.arange(len(y)), y.clip(min=0, max=p.shape[1] - 1)].clip(min=1e-12)
-    onehot = np.zeros_like(p)
-    onehot[np.arange(len(y)), y.clip(min=0, max=p.shape[1] - 1)] = 1.0
-    ece = 0.0
-    bins = np.linspace(0.0, 1.0, num_bins + 1)
-    for i in range(num_bins):
-        lo, hi = bins[i], bins[i + 1]
-        if i == num_bins - 1:
-            mask = (conf >= lo) & (conf <= hi)
-        else:
-            mask = (conf >= lo) & (conf < hi)
-        if not mask.any():
-            continue
-        ece += float(mask.mean()) * abs(float(correct[mask].mean()) - float(conf[mask].mean()))
-    return {
-        "nll": float(-np.log(true_prob).mean()),
-        "brier": float(((p - onehot) ** 2).sum(axis=1).mean()),
-        "ece": float(ece),
-        "avg_confidence": float(conf.mean()),
-        "accuracy": float(correct.mean()),
-        "num_samples": int(len(y)),
-        "num_bins": int(num_bins),
     }
 
 

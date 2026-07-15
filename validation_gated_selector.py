@@ -10,6 +10,8 @@ import numpy as np
 from sklearn.metrics import f1_score
 from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
 
+from probability_metrics import calibration_metrics
+
 
 def compute_metrics(y_true, y_pred):
     p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)
@@ -443,6 +445,7 @@ def main() -> None:
             test_prob = one_hot_prob(test_prob.argmax(axis=1).astype(np.int64), test_prob.shape[1], args.output_smooth)
         valid_pred = valid_prob.argmax(axis=1).astype(np.int64)
         metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
+        metrics["calibration"] = calibration_metrics(y_valid_ref, valid_prob)
         row = {"strategy": name, "config": config, "metrics": metrics}
         reports.append(row)
         if args.print_all_candidates:
@@ -576,6 +579,7 @@ def main() -> None:
         valid_prob = selected_prob_from_sources(valid_probs, valid_src, args.output_smooth)
         valid_pred = valid_prob.argmax(axis=1).astype(np.int64)
         metrics = compute_metrics(y_valid_ref.tolist(), valid_pred.tolist())
+        metrics["calibration"] = calibration_metrics(y_valid_ref, valid_prob)
         row = {"strategy": "always", "config": {"source": named_payloads[0][0]}, "metrics": metrics}
         key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
         test_prob = selected_prob_from_sources(test_probs, test_src, args.output_smooth)
@@ -704,6 +708,7 @@ def main() -> None:
     _, selected, selected_valid_source, selected_test_source, selected_valid_prob, selected_test_prob = best
     test_pred = selected_test_prob.argmax(axis=1).astype(np.int64)
     test_metrics = compute_metrics(y_test_ref.tolist(), test_pred.tolist())
+    test_metrics["calibration"] = calibration_metrics(y_test_ref, selected_test_prob)
     print("selected_selector", json.dumps(selected, sort_keys=True))
     print("test_selector", json.dumps(test_metrics, indent=2, sort_keys=True))
 
