@@ -181,6 +181,9 @@ def multi_view_gate_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
         "mean": mean,
         "std": std,
         "num_flows": gate.get("num_flows"),
+        "entropy_mean": gate.get("entropy_mean"),
+        "normalized_entropy_mean": gate.get("normalized_entropy_mean"),
+        "effective_branches_mean": gate.get("effective_branches_mean"),
         "dominant_branch": pairs[0][0],
         "dominant_weight": float(pairs[0][1]),
     }
@@ -409,8 +412,8 @@ def markdown_multiview_gates(rows: List[Dict[str, Any]]) -> str:
         "",
         "Trainable multi-view branch gates",
         "",
-        "| Dataset | Flows | Dominant branch | Mean weights: mean/max/std/attention |",
-        "|---|---:|---|---|",
+        "| Dataset | Flows | Dominant branch | Effective branches | Norm. entropy | Mean weights: mean/max/std/attention |",
+        "|---|---:|---|---:|---:|---|",
     ]
     for row in gated:
         gate = row["multi_view_gate"]
@@ -420,11 +423,13 @@ def markdown_multiview_gates(rows: List[Dict[str, Any]]) -> str:
         ordered = [weight_by_branch.get(branch) for branch in ["mean", "max", "std", "attention"]]
         weight_text = "/".join(format_float(value) for value in ordered)
         lines.append(
-            "| {dataset} | {flows} | {branch} ({weight}) | {weights} |".format(
+            "| {dataset} | {flows} | {branch} ({weight}) | {eff} | {entropy} | {weights} |".format(
                 dataset=row["dataset"],
                 flows=gate.get("num_flows", "-"),
                 branch=gate.get("dominant_branch", "-"),
                 weight=format_float(gate.get("dominant_weight")),
+                eff=format_float(gate.get("effective_branches_mean")),
+                entropy=format_float(gate.get("normalized_entropy_mean")),
                 weights=weight_text,
             )
         )

@@ -150,10 +150,16 @@ def aggregate_by_flow(
     gate_summary = None
     if multi_view_gates:
         gate_arr = np.stack(multi_view_gates, axis=0)
+        gate_safe = np.clip(gate_arr, 1e-12, 1.0)
+        entropy = -(gate_safe * np.log(gate_safe)).sum(axis=1)
+        num_branches = gate_arr.shape[1]
         gate_summary = {
             "branches": ["mean", "max", "std", "attention"],
             "mean": gate_arr.mean(axis=0).astype(float).tolist(),
             "std": gate_arr.std(axis=0).astype(float).tolist(),
+            "entropy_mean": float(entropy.mean()),
+            "normalized_entropy_mean": float(entropy.mean() / max(np.log(num_branches), 1e-12)),
+            "effective_branches_mean": float(np.exp(entropy).mean()),
             "num_flows": int(gate_arr.shape[0]),
         }
     return flow_true, flow_pred, out_flow_ids, flow_logits_all, gate_summary
