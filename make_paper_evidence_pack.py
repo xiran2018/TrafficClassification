@@ -116,6 +116,7 @@ def claim_rows(framework: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "claim_strength": strength,
                 "accuracy_ci95": acc_ci,
                 "macro_f1_ci95": f1_ci,
+                "calibration": row.get("calibration"),
                 "module_usage": row.get("module_usage"),
                 "selector_slot_summary": row.get("selector_slot_summary"),
                 "multi_view_gate": row.get("multi_view_gate"),
@@ -344,6 +345,27 @@ def render_markdown(pack: Dict[str, Any]) -> str:
                 effect=row["effect"],
             )
         )
+    calibration_claims = [row for row in pack["claims"] if row.get("calibration")]
+    if calibration_claims:
+        lines += [
+            "",
+            "## Flow Calibration",
+            "",
+            "| Dataset | ECE | NLL | Brier | Avg Confidence | Samples |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+        for row in pack["claims"]:
+            cal = row.get("calibration") or {}
+            lines.append(
+                "| {dataset} | {ece} | {nll} | {brier} | {conf} | {samples} |".format(
+                    dataset=row["dataset"],
+                    ece=fmt(cal.get("ece")),
+                    nll=fmt(cal.get("nll")),
+                    brier=fmt(cal.get("brier")),
+                    conf=fmt(cal.get("avg_confidence")),
+                    samples=cal.get("num_samples", "-"),
+                )
+            )
     lines += [
         "",
         "## Raw Best vs Paper-Safe Result",

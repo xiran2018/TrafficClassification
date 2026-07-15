@@ -28,6 +28,17 @@ def flow_metrics(data: Dict[str, Any]) -> Tuple[float | None, float | None]:
     return None, None
 
 
+def flow_calibration(data: Dict[str, Any]) -> Dict[str, Any] | None:
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    flow = metrics.get("flow_level")
+    if not isinstance(flow, dict):
+        return None
+    calibration = flow.get("calibration")
+    return calibration if isinstance(calibration, dict) else None
+
+
 def format_float(value: Any, digits: int = 4) -> str:
     if value is None:
         return "-"
@@ -379,6 +390,7 @@ def build_rows(
                 "path": path,
                 "accuracy": acc,
                 "macro_f1": macro_f1,
+                "calibration": flow_calibration(data),
                 "target_accuracy": target_acc,
                 "target_macro_f1": target_f1,
                 "achieved": achieved,
@@ -470,6 +482,32 @@ def markdown_uncertainty(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def markdown_calibration(rows: List[Dict[str, Any]]) -> str:
+    if not any(row.get("calibration") for row in rows):
+        return ""
+    lines = [
+        "",
+        "Flow-level calibration",
+        "",
+        "| Dataset | ECE | NLL | Brier | Avg confidence | Samples |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        cal = row.get("calibration") or {}
+        lines.append(
+            "| {dataset} | {ece} | {nll} | {brier} | {conf} | {samples} |".format(
+                dataset=row["dataset"],
+                ece=format_float(cal.get("ece")),
+                nll=format_float(cal.get("nll")),
+                brier=format_float(cal.get("brier")),
+                conf=format_float(cal.get("avg_confidence")),
+                samples=cal.get("num_samples", "-"),
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def markdown_multiview_gates(rows: List[Dict[str, Any]]) -> str:
     gated = [row for row in rows if row.get("multi_view_gate")]
     if not gated:
@@ -532,7 +570,13 @@ def main() -> None:
         raise SystemExit("--required_expert_slots must contain at least one slot")
     rows = build_rows(results, args.bootstrap_samples, args.bootstrap_seed, required_slots)
     audit = framework_consistency(rows, required_slots)
-    md = markdown_table(rows) + markdown_consistency(audit) + markdown_multiview_gates(rows) + markdown_uncertainty(rows)
+    md = (
+        markdown_table(rows)
+        + markdown_consistency(audit)
+        + markdown_multiview_gates(rows)
+        + markdown_calibration(rows)
+        + markdown_uncertainty(rows)
+    )
     print(md)
 
     if args.output_json:

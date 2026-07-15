@@ -209,6 +209,58 @@ def compute_metrics(y_true, y_pred):
     }
 
 
+def calibration_metrics(y_true, prob, num_bins: int = 15):
+    if not y_true or prob is None or len(prob) == 0:
+        return {
+            "nll": None,
+            "brier": None,
+            "ece": None,
+            "avg_confidence": None,
+            "accuracy": None,
+            "num_samples": 0,
+            "num_bins": num_bins,
+        }
+    p = np.asarray(prob, dtype=np.float64)
+    y = np.asarray(y_true, dtype=np.int64)
+    if p.ndim != 2 or p.shape[0] != y.shape[0]:
+        return {
+            "nll": None,
+            "brier": None,
+            "ece": None,
+            "avg_confidence": None,
+            "accuracy": None,
+            "num_samples": int(len(y_true)),
+            "num_bins": num_bins,
+        }
+    p = p / p.sum(axis=1, keepdims=True).clip(min=1e-12)
+    pred = p.argmax(axis=1)
+    conf = p.max(axis=1)
+    correct = pred == y
+    true_prob = p[np.arange(len(y)), y.clip(min=0, max=p.shape[1] - 1)].clip(min=1e-12)
+    onehot = np.zeros_like(p)
+    onehot[np.arange(len(y)), y.clip(min=0, max=p.shape[1] - 1)] = 1.0
+    ece = 0.0
+    bins = np.linspace(0.0, 1.0, num_bins + 1)
+    for i in range(num_bins):
+        lo, hi = bins[i], bins[i + 1]
+        if i == num_bins - 1:
+            mask = (conf >= lo) & (conf <= hi)
+        else:
+            mask = (conf >= lo) & (conf < hi)
+        if not mask.any():
+            continue
+        ece += float(mask.mean()) * abs(float(correct[mask].mean()) - float(conf[mask].mean()))
+    return {
+        "nll": float(-np.log(true_prob).mean()),
+        "brier": float(((p - onehot) ** 2).sum(axis=1).mean()),
+        "ece": float(ece),
+        "avg_confidence": float(conf.mean()),
+        "accuracy": float(correct.mean()),
+        "num_samples": int(len(y)),
+        "num_bins": int(num_bins),
+    }
+
+
 def load_label_names(path: str):
     if not path:
         return None, None
@@ -259,7 +311,9 @@ def main():
     else:
         y_true, y_pred, flow_ids, logits_all, emb_all = predict_graph(model, args.dataset, args.device)
 
+    window_prob = softmax_np(np.stack(logits_all, axis=0)) if logits_all else np.zeros((0, ckpt["num_classes"]))
     window_metrics = compute_metrics(y_true, y_pred)
+    window_metrics["calibration"] = calibration_metrics(y_true, window_prob)
     flow_true, flow_pred, out_flow_ids, flow_logits_all, multi_view_gate_summary = aggregate_by_flow(
         y_true,
         flow_ids,
@@ -273,7 +327,9 @@ def main():
         flow_eval_pooling=args.flow_eval_pooling,
         flow_eval_topk=args.flow_eval_topk,
     )
+    flow_prob = softmax_np(np.stack(flow_logits_all, axis=0)) if flow_logits_all else np.zeros((0, ckpt["num_classes"]))
     flow_metrics = compute_metrics(flow_true, flow_pred)
+    flow_metrics["calibration"] = calibration_metrics(flow_true, flow_prob)
     metrics = {
         "window_level": window_metrics,
         "flow_level": flow_metrics,
@@ -296,11 +352,11 @@ def main():
                     "label_map": label_map,
                     "window_y_true": y_true,
                     "window_y_pred": y_pred,
-                    "window_prob": softmax_np(np.stack(logits_all, axis=0)).tolist() if logits_all else [],
+                    "window_prob": window_prob.tolist() if logits_all else [],
                     "window_flow_ids": flow_ids,
                     "flow_y_true": flow_true,
                     "flow_y_pred": flow_pred,
-                    "flow_prob": softmax_np(np.stack(flow_logits_all, axis=0)).tolist() if flow_logits_all else [],
+                    "flow_prob": flow_prob.tolist() if flow_logits_all else [],
                     "flow_ids": out_flow_ids,
                 },
                 f,
