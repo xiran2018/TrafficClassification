@@ -78,7 +78,7 @@ class FlowAggregationHead(nn.Module):
                 nn.Linear(hidden_dim * 4, hidden_dim),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(hidden_dim, hidden_dim),
+                nn.Linear(hidden_dim, 4),
             )
         else:
             self.multi_view_gate = None
@@ -102,7 +102,9 @@ class FlowAggregationHead(nn.Module):
             std = h.std(dim=0, unbiased=False) if h.size(0) > 1 else torch.zeros_like(mean)
             weights = torch.softmax(self.score(h).squeeze(-1), dim=0)
             attn = torch.sum(h * weights.unsqueeze(-1), dim=0)
-            return self.multi_view_gate(torch.cat([mean, maxv, std, attn], dim=-1))
+            views = torch.stack([mean, maxv, std, attn], dim=0)
+            gate = torch.softmax(self.multi_view_gate(torch.cat([mean, maxv, std, attn], dim=-1)), dim=-1)
+            return torch.sum(views * gate.unsqueeze(-1), dim=0)
         if self.pooling == "transformer":
             pos = sinusoidal_position_encoding(h.size(0), h.size(1), h.device, h.dtype)
             h = self.flow_encoder((h + pos).unsqueeze(0)).squeeze(0)

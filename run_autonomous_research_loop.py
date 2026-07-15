@@ -25,6 +25,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "window_dropout_prob": 0.1,
             "edge_attr_dropout_prob": 0.1,
             "seed": 42,
+            "flow_pooling": "mean",
         }
     ],
     "stage8_balanced": [
@@ -38,6 +39,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "window_dropout_prob": 0.1,
             "edge_attr_dropout_prob": 0.1,
             "seed": 42,
+            "flow_pooling": "mean",
         },
         {
             "name": "stronger_invariance",
@@ -49,9 +51,10 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "window_dropout_prob": 0.15,
             "edge_attr_dropout_prob": 0.15,
             "seed": 43,
+            "flow_pooling": "mean",
         },
         {
-            "name": "higher_paired_view",
+            "name": "higher_paired_view_multiview_gate",
             "paired_view_weight": 0.3,
             "paired_consistency_weight": 0.1,
             "consistency_weight": 0.05,
@@ -60,6 +63,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "window_dropout_prob": 0.1,
             "edge_attr_dropout_prob": 0.1,
             "seed": 44,
+            "flow_pooling": "multi_view",
         },
         {
             "name": "dropout_regularized",
@@ -71,6 +75,7 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "window_dropout_prob": 0.2,
             "edge_attr_dropout_prob": 0.2,
             "seed": 45,
+            "flow_pooling": "mean",
         },
     ],
 }
@@ -271,6 +276,8 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
         str(variant["edge_attr_dropout_prob"]),
         "--seed",
         str(variant["seed"]),
+        "--flow_pooling",
+        str(variant["flow_pooling"]),
         "--output_json",
         str(Path(args.suite_output_dir) / f"recommended_suite_plan_iter{iteration:02d}.json"),
     ]

@@ -129,6 +129,8 @@ def runner_base(args) -> List[str]:
         args.model_types,
         "--seed",
         str(args.seed),
+        "--flow_pooling",
+        args.flow_pooling,
         "--no_progress",
     ]
 
@@ -339,6 +341,7 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "tower2_early_stop_patience": args.tower2_early_stop_patience,
             "model_types": args.model_types,
             "seed": args.seed,
+            "flow_pooling": args.flow_pooling,
         },
         "base_selector_input": args.base_selector_input or default_base_selector_input(args),
         "paired_prior_output": paired_prior_output_path(args),
@@ -380,6 +383,7 @@ def main() -> None:
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="mean")
     ap.add_argument("--base_selector_input", default="", help="Current best probability JSON used as the first input to the final validation-gated selector.")
     ap.add_argument("--label_map", default="", help="Label map for final selector; defaults from dataset presets.")
     ap.add_argument("--final_selector_output", default="", help="Optional output path for the final validation-gated selector.")
