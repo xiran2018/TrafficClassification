@@ -257,6 +257,8 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         str(args.tower2_early_stop_patience),
         "--flow_pooling",
         args.flow_pooling,
+        "--multi_view_gate_entropy_weight",
+        str(args.multi_view_gate_entropy_weight),
         "--window_loss_weight",
         str(args.window_loss_weight),
         "--class_weighting",
@@ -565,6 +567,7 @@ def main() -> None:
     ap.add_argument("--tower2_lr", type=float, default=1e-4)
     ap.add_argument("--weight_decay", type=float, default=0.03)
     ap.add_argument("--flow_pooling", default="mean", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"])
+    ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0, help="Entropy-minimization weight for trainable multi-view flow pooling gates.")
     ap.add_argument("--window_loss_weight", type=float, default=0.3)
     ap.add_argument("--class_weight_strength", type=float, default=0.6)
     ap.add_argument("--label_smoothing", type=float, default=0.05)

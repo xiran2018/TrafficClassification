@@ -757,6 +757,14 @@ def symmetric_consistency_kl(logits_a: torch.Tensor, logits_b: torch.Tensor, tem
     )
 
 
+def multi_view_gate_entropy_loss(gates: List[torch.Tensor], weight: float) -> torch.Tensor | None:
+    if weight <= 0 or not gates:
+        return None
+    gate = torch.stack(gates, dim=0).float().clamp(min=1e-8)
+    entropy = -(gate * gate.log()).sum(dim=-1).mean()
+    return weight * entropy
+
+
 def train_seq_flow(args):
     ds = SeqDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
@@ -826,10 +834,13 @@ def train_seq_flow(args):
             flow_coarse_logits = []
             flow_embs = []
             flow_logits_aug = []
+            multi_view_gates = []
             for flow_idx in range(len(flow_batch)):
                 win_mask = owners_t == flow_idx
                 pooled = flow_head(out["embedding"][win_mask], window_logits=out["logits"][win_mask])
                 flow_logits.append(pooled["logits"])
+                if pooled.get("multi_view_gate") is not None:
+                    multi_view_gates.append(pooled["multi_view_gate"])
                 if pooled.get("coarse_logits") is not None:
                     flow_coarse_logits.append(pooled["coarse_logits"])
                 flow_embs.append(pooled["embedding"])
@@ -844,6 +855,9 @@ def train_seq_flow(args):
             flow_embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = class_weighted_loss(flow_logits, y, class_weight, args.label_smoothing)
+            gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
+            if gate_loss is not None:
+                loss = loss + gate_loss
             paired_logits = None
             if paired_windows and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0):
                 paired_batch = collate_seq(paired_windows)
@@ -1087,6 +1101,7 @@ def train_graph_flow(args):
             window_labels = []
             window_embs_all = []
             window_owners = []
+            multi_view_gates = []
             labels = []
             for group in flow_batch:
                 window_embs = []
@@ -1115,6 +1130,8 @@ def train_graph_flow(args):
                     window_owners.extend([active_flow_idx] * len(window_embs))
                     pooled = flow_head(torch.stack(window_embs, dim=0), window_logits=torch.stack(window_logits, dim=0))
                     flow_logits.append(pooled["logits"])
+                    if pooled.get("multi_view_gate") is not None:
+                        multi_view_gates.append(pooled["multi_view_gate"])
                     if pooled.get("coarse_logits") is not None:
                         flow_coarse_logits.append(pooled["coarse_logits"])
                     flow_embs.append(pooled["embedding"])
@@ -1153,6 +1170,9 @@ def train_graph_flow(args):
             embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = class_weighted_loss(logits, y, class_weight, args.label_smoothing)
+            gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
+            if gate_loss is not None:
+                loss = loss + gate_loss
             if paired_logits is not None:
                 if args.paired_view_weight > 0:
                     loss = loss + args.paired_view_weight * class_weighted_loss(paired_logits, y, class_weight, args.label_smoothing)
@@ -1264,6 +1284,7 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "train_level": args.train_level,
         "flow_pooling": args.flow_pooling,
         "multi_view_branches": ["mean", "max", "std", "attention"] if args.flow_pooling == "multi_view" else [],
+        "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
         "select_metric": args.select_metric,
         "window_loss_weight": args.window_loss_weight,
         "class_weighting": args.class_weighting,
@@ -1345,6 +1366,7 @@ def main():
     ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="attention", help="Pooling used by --train_level flow over window embeddings.")
     ap.add_argument("--flow_transformer_layers", type=int, default=1, help="Number of Transformer layers for --flow_pooling transformer.")
     ap.add_argument("--flow_transformer_heads", type=int, default=4, help="Attention heads for --flow_pooling transformer.")
+    ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0, help="Positive weight minimizes entropy of --flow_pooling multi_view gates, encouraging automatic branch down-weighting.")
     ap.add_argument("--contrastive_mode", choices=["standard", "confusion", "confusion_weighted"], default="standard", help="standard uses all non-self negatives; confusion uses configured hard negatives; confusion_weighted weights hard negatives by a confusion matrix.")
     ap.add_argument("--confusion_groups", default="vpn_app", help="Groups used by --contrastive_mode confusion. Use 'vpn_app', 'none', or semicolon groups.")
     ap.add_argument("--confusion_matrix_json", default="", help="Optional previous test/valid metrics JSON. Its flow/window y_true/y_pred arrays define weighted SupCon negatives.")

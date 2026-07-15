@@ -72,6 +72,8 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         str(args.seed),
         "--flow_pooling",
         args.flow_pooling,
+        "--multi_view_gate_entropy_weight",
+        str(args.multi_view_gate_entropy_weight),
         "--plan_json",
         str(Path("reasoningDataset") / dataset / f"recommended_experiment_plan_{args.run_tag}.json"),
     ]
@@ -168,6 +170,7 @@ def write_suite_plan(
             "model_types": args.model_types,
             "seed": args.seed,
             "flow_pooling": args.flow_pooling,
+            "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
         },
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
@@ -205,6 +208,7 @@ def main() -> None:
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="mean")
+    ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0)
     ap.add_argument("--execute", action="store_true")
     ap.add_argument(
         "--materialize_child_plans",
