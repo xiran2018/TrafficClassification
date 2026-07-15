@@ -1919,6 +1919,152 @@ conda run --no-capture-output -n llm-factory \
 
 This command is a robustness-oriented selector ablation, not the current best result. The strict VPN target-shift gate can still force fallback to the base prediction if a high-validation or high-bootstrap-gain candidate rewrites too many target predictions.
 
+VPN split1/split2 Tower-1 retrain and multi-split Tower-2 stability check:
+
+```text
+Question:
+  Are the weaker train_val_split_1 and train_val_split_2 results caused mainly by reusing a split0 Tower-1 encoder?
+
+Strict retrain answer:
+  No. Retraining Tower-1 separately on split1/split2, then re-extracting packet embeddings and retraining Tower-2, was worse than the older split-specific Tower-2 checks.
+
+Strict retrain outputs:
+  split1 safe prior:
+    reasoningDataset/vpn-app/test_fusion_graph_seq_rawproj_flowaware_change_weight_split1_retrain_stage8_flowaware_split1_retrain_t1_safe_prior_residual.json
+    test accuracy = 0.5795
+    test macro-F1 = 0.5429
+  split2 safe prior:
+    reasoningDataset/vpn-app/test_fusion_graph_seq_rawproj_flowaware_change_weight_split2_retrain_stage8_flowaware_split2_retrain_t1_safe_prior_residual.json
+    test accuracy = 0.5269
+    test macro-F1 = 0.5106
+
+Interpretation:
+  The drop is not primarily a Tower-1 encoder mismatch. The evidence points more toward split-specific distribution difficulty, near-duplicate/split-artifact issues, and small-data Tower-1 fine-tuning instability. For the paper, this should be framed as a robustness ablation, not as the final VPN result.
+```
+
+For a cross-split robustness candidate, merge the split0/split1/split2 Tower-2 training windows while excluding the split0 validation `flow_id` values from the merged training file:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python combine_tower2_datasets.py \
+    --inputs \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1/graph_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split2/graph_dataset.pt \
+    --exclude_flow_ids_from reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_multisplit_train012_excl_valid0/graph_dataset.pt
+
+conda run --no-capture-output -n llm-factory \
+  python combine_tower2_datasets.py \
+    --inputs \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1/seq_dataset.pt \
+      reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split2/seq_dataset.pt \
+    --exclude_flow_ids_from reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --output reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_multisplit_train012_excl_valid0/seq_dataset.pt
+```
+
+Train Stage-8 graph/seq Tower-2 on the merged training set, still selecting checkpoints on the original split0 validation set:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_multisplit_train012_excl_valid0/graph_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_vpn_app_rawproj_change_weight_multisplit_train012_excl_valid0_stage8 \
+    --num_classes 16 \
+    --epochs 30 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --train_level flow \
+    --flow_pooling multi_view \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --flow_contrastive_weight 0.05 \
+    --flow_temperature 0.07 \
+    --confidence_penalty_weight 0.02 \
+    --select_metric flow_macro_f1 \
+    --aux_weight 0 \
+    --coherence_weight 0
+
+conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type seq \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_multisplit_train012_excl_valid0/seq_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --output_dir checkpoints/tower2_seq_flow_vpn_app_rawproj_change_weight_multisplit_train012_excl_valid0_stage8 \
+    --num_classes 16 \
+    --epochs 30 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --train_level flow \
+    --flow_pooling multi_view \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --flow_contrastive_weight 0.05 \
+    --flow_temperature 0.07 \
+    --confidence_penalty_weight 0.02 \
+    --select_metric flow_macro_f1 \
+    --aux_weight 0 \
+    --coherence_weight 0
+```
+
+The merged Stage-8 Tower-2 candidate reached:
+
+```text
+multisplit graph:
+  reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_multisplit_train012_excl_valid0_stage8_probs.json
+  test accuracy = 0.6639
+  test macro-F1 = 0.6246
+
+multisplit seq / safe prior:
+  reasoningDataset/vpn-app/test_fusion_graph_seq_rawproj_change_weight_multisplit_train012_excl_valid0_stage8_safe_prior_residual.json
+  test accuracy = 0.6788
+  test macro-F1 = 0.6501
+```
+
+Then add it as a conservative validation-gated selector expert on top of the current best VPN result:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python validation_gated_selector.py \
+    --input base reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json \
+    --input multisplit reasoningDataset/vpn-app/test_fusion_graph_seq_rawproj_change_weight_multisplit_train012_excl_valid0_stage8_safe_prior_residual.json \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --select_metric macro_f1 \
+    --rank_select_metric accuracy \
+    --rank_metric bootstrap_gain_quantile \
+    --rank_bootstrap_samples 300 \
+    --rank_candidate_limit 256 \
+    --strategies always,threshold_switch,reliability_fusion \
+    --expert_conf_grid 0.5,0.7,0.8,0.9 \
+    --expert_margin_grid 0.05,0.1,0.2,0.3 \
+    --base_conf_max_grid 1 \
+    --delta_conf_grid 0,0.05,0.1 \
+    --delta_margin_grid 0,0.05,0.1 \
+    --min_valid_gain_over_base 0 \
+    --bootstrap_samples 300 \
+    --bootstrap_min_gain_quantile -0.001 \
+    --max_prediction_change_rate 0.03 \
+    --output_json reasoningDataset/vpn-app/test_selector_best_plus_multisplit_train012_excl_valid0_stage8_conservative_valid_macro.json
+```
+
+Current conservative selector result:
+
+```text
+selected strategy = threshold_switch
+target prediction change = 0.0293
+test accuracy = 0.7398
+test macro-F1 = 0.7368
+```
+
+Important caveat: the merged split0/1/2 Tower-2 training run reached near-perfect validation scores even after excluding split0 validation `flow_id` values. That suggests the `train_val_split_*` folders may contain near-duplicates or split artifacts under different flow IDs. Treat the multi-split result as a stability candidate and ablation until a duplicate/content-similarity audit is added. The current paper-safe VPN headline remains the stricter split0 selector result (`0.7488` accuracy / `0.7558` macro-F1), while the multi-split conservative selector is useful evidence that extra split coverage can improve robustness-oriented F1 without changing more than 3% of target predictions.
+
 Use the metric dashboard to check the current target gates across datasets:
 
 ```bash
