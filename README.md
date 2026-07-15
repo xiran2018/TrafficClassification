@@ -1234,11 +1234,11 @@ vpn-app:
   target acc>=0.7400, macro-F1>=0.6500 -> PASS
 
 tls-120:
-  result file: reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json
-  modules: graph/seq base + safe target-prior residual candidate + validation-gated selector
-  selected selector: accepts seq-switch because the 5% bootstrap gain quantile -0.0007 is within the -0.001 tolerance and target prediction change is only 0.0042
-  test accuracy = 0.7909
-  test macro-F1 = 0.7772
+  result file: reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json
+  modules: graph/seq base + unified-slot probability stacker + validation-gated selector
+  selected selector: accepts a low-shift threshold switch to the slot_stacker expert; bootstrap win_rate=0.95, 5% gain quantile=0.0001, target prediction change=0.0129
+  test accuracy = 0.7945
+  test macro-F1 = 0.7807
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
 
 ustc-app:
@@ -1815,7 +1815,7 @@ This keeps the strongest base model dominant when the validation split is too sm
 
 For source-level expert selection, `validation_gated_selector.py` compares probability JSONs on the validation split and then chooses either a single source, a class-precision-gated source, a confidence-threshold switch, a reliability-weighted soft fusion, or a validation-set class-bias calibration candidate. The reliability fusion estimates each expert's validation precision for its predicted class with shrinkage, then weights expert probabilities by validation reliability and confidence. The class-bias calibration candidate estimates the validation true-class prior divided by the model's mean predicted prior and applies that bias to candidate probabilities.
 
-The final selector uses three safety gates: `--min_valid_gain_over_base` for deterministic validation gain, bootstrap gain stability through `--bootstrap_samples`, and an unlabeled target-shift constraint through `--max_prediction_change_rate`. The current unified report uses a small bootstrap quantile tolerance (`--bootstrap_min_gain_quantile -0.001`) so tiny but low-shift TLS gains are allowed while larger target-shift changes are still rejected. The same candidate family is evaluated on every dataset, while `--max_prediction_change_rate` is dataset-specific: VPN uses a strict no-target-change setting, TLS allows a tiny low-shift switch, and USTC allows the class-precision gate. The recommended Stage-8 runner now passes `--final_selector_unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired`, so every dataset exposes the same selector expert slots; missing slots are filled from the base probabilities as identity experts and are recorded in `feature_config.input_slot_status`. For legacy best-result JSONs without slot records, the paper report marks the same mapping as `inferred_identity_compatible` instead of pretending the old run recorded it. By default the selector sorts candidates by validation score, skips unsafe candidates, and accepts the first candidate that passes all active guards; if none pass, it falls back to the first input. For paper-grade robustness searches, `--rank_metric bootstrap_gain_quantile` can instead rank the top validation candidates by their bootstrap lower-bound gain before the same safety gates are applied. `--rank_select_metric` lets this robust ranking target accuracy while the accepted selector still optimizes macro-F1. Use `--rank_candidate_limit` to keep this robust ranking practical on large candidate grids. This is the same module used across datasets:
+The final selector uses three safety gates: `--min_valid_gain_over_base` for deterministic validation gain, bootstrap gain stability through `--bootstrap_samples`, and an unlabeled target-shift constraint through `--max_prediction_change_rate`. The current unified report uses a small bootstrap quantile tolerance (`--bootstrap_min_gain_quantile -0.001`) so tiny but low-shift TLS gains are allowed while larger target-shift changes are still rejected. The same candidate family is evaluated on every dataset, while `--max_prediction_change_rate` is dataset-specific: VPN uses a strict no-target-change setting, TLS allows a tiny low-shift switch, and USTC allows the class-precision gate. The recommended Stage-8 runner now passes `--final_selector_unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker`, so every dataset exposes the same selector expert slots; missing slots are filled from the base probabilities as identity experts and are recorded in `feature_config.input_slot_status`. For legacy best-result JSONs without slot records, the paper report marks the same mapping as `inferred_identity_compatible` instead of pretending the old run recorded it. By default the selector sorts candidates by validation score, skips unsafe candidates, and accepts the first candidate that passes all active guards; if none pass, it falls back to the first input. For paper-grade robustness searches, `--rank_metric bootstrap_gain_quantile` can instead rank the top validation candidates by their bootstrap lower-bound gain before the same safety gates are applied. `--rank_select_metric` lets this robust ranking target accuracy while the accepted selector still optimizes macro-F1. Use `--rank_candidate_limit` to keep this robust ranking practical on large candidate grids. This is the same module used across datasets:
 
 ```text
 VPN:
@@ -1825,10 +1825,10 @@ VPN:
   test macro-F1 = 0.7558
 
 TLS-120:
-  safe selector file: reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json
-  selected path: accepts seq-switch because the 5% bootstrap gain quantile -0.0007 is within the -0.001 tolerance and target prediction change is only 0.0042
-  test accuracy = 0.7909
-  test macro-F1 = 0.7772
+  safe selector file: reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json
+  selected path: accepts a low-shift threshold switch to slot_stacker; bootstrap win_rate=0.95, 5% gain quantile=0.0001, target prediction change=0.0129
+  test accuracy = 0.7945
+  test macro-F1 = 0.7807
 
 USTC:
   safe selector file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json
@@ -1837,7 +1837,56 @@ USTC:
   test macro-F1 = 0.6250
 ```
 
-The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. The unsafe reliability-fusion ablation selected `alpha=5.0`, `reliability_power=4.0`, `confidence_power=1.0`, `temperature=0.5`; it improved validation macro-F1 but dropped target-test performance to `0.6956` accuracy / `0.6633` macro-F1. Bootstrap alone did not reject this VPN candidate because its validation gain was internally stable, but the target-shift guard rejected it because it changed too many target predictions. A broader calibration-enabled candidate search also found a lower-shift VPN threshold switch, but it still dropped to `0.7339` accuracy / `0.7241` macro-F1, so calibration remains an ablation rather than the default final path. On TLS-120, the same selector can skip unstable class-bias calibration candidates and then accept the tiny seq-switch improvement because only `0.42%` of target predictions changed. This is why the paper method should emphasize validation-gated expert selection with both validation stability and unlabeled target-shift safety, not unconditional expert switching.
+The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. The unsafe reliability-fusion ablation selected `alpha=5.0`, `reliability_power=4.0`, `confidence_power=1.0`, `temperature=0.5`; it improved validation macro-F1 but dropped target-test performance to `0.6956` accuracy / `0.6633` macro-F1. Bootstrap alone did not reject this VPN candidate because its validation gain was internally stable, but the target-shift guard rejected it because it changed too many target predictions. A broader calibration-enabled candidate search also found a lower-shift VPN threshold switch, but it still dropped to `0.7339` accuracy / `0.7241` macro-F1, so calibration remains an ablation rather than the default final path. On TLS-120, the unified-slot stacker reached `0.7991` accuracy / `0.7897` macro-F1 by itself; the paper-safe selector accepts a lower-shift threshold switch to that expert and improves the default guarded result to `0.7945` accuracy / `0.7807` macro-F1. This is why the paper method should emphasize validation-gated expert selection with both validation stability and unlabeled target-shift safety, not unconditional expert switching.
+
+Reproduce the TLS-120 unified-slot stacker candidate and the guarded selector result:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python train_prediction_stacker.py \
+    --input base reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json \
+    --input graph reasoningDataset/tls-120/fusion_input_graph_acc_ft.json \
+    --input seq reasoningDataset/tls-120/fusion_input_seq_baseline.json \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --c_grid 0.01,0.03 \
+    --class_weight_grid none \
+    --select_metric macro_f1 \
+    --include_confidence \
+    --unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired \
+    --output_json reasoningDataset/tls-120/test_stacker_unified_slot_tls120_confidence_valid_macro.json
+
+conda run --no-capture-output -n llm-factory \
+  python validation_gated_selector.py \
+    --input base reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json \
+    --input slot_stacker reasoningDataset/tls-120/test_stacker_unified_slot_tls120_confidence_valid_macro.json \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --select_metric macro_f1 \
+    --rank_select_metric macro_f1 \
+    --rank_metric bootstrap_gain_quantile \
+    --rank_bootstrap_samples 100 \
+    --rank_candidate_limit 64 \
+    --strategies always,threshold_switch,class_precision,reliability_fusion,class_bias_calibration \
+    --alpha_grid 0.5,5 \
+    --metric_margin_grid 0,0.05 \
+    --expert_conf_grid 0.3,0.85 \
+    --expert_margin_grid 0.05 \
+    --base_conf_max_grid 1 \
+    --delta_conf_grid=-1,0.05 \
+    --delta_margin_grid=-1,0.1 \
+    --reliability_power_grid 4 \
+    --confidence_power_grid 1 \
+    --reliability_min_weight_grid 0 \
+    --reliability_temperature_grid 0.5 \
+    --calibration_strength_grid 1.0 \
+    --calibration_temperature_grid 1.25 \
+    --min_valid_gain_over_base 0 \
+    --bootstrap_samples 100 \
+    --bootstrap_min_win_rate 0.6 \
+    --bootstrap_min_gain_quantile=-0.001 \
+    --max_prediction_change_rate 0.05 \
+    --unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker \
+    --output_json reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json
+```
 
 Robust lower-bound candidate ranking for VPN selector debugging:
 
@@ -1883,7 +1932,7 @@ Current target-gate status:
 
 ```text
 vpn-app: acc=0.7488, macro-F1=0.7558, target acc>=0.7400 and macro-F1>=0.6500 -> PASS
-tls-120: acc=0.7909, macro-F1=0.7772, target acc>=0.7800 and macro-F1>=0.7000 -> PASS
+tls-120: acc=0.7945, macro-F1=0.7807, target acc>=0.7800 and macro-F1>=0.7000 -> PASS
 ustc-app: acc=0.7000, macro-F1=0.6250, cross-dataset evidence on the 20-flow test split
 ```
 
@@ -1922,7 +1971,7 @@ conda run --no-capture-output -n llm-factory \
     --execute
 ```
 
-The generated final-selector command carries the same robustness controls as the manual selector runs. For VPN, the dataset preset uses `--select_metric macro_f1`, `--rank_select_metric accuracy`, `--rank_metric bootstrap_gain_quantile`, and `--rank_candidate_limit 256`, so the next paired-view candidate is ranked by validation accuracy bootstrap lower-bound gain while final acceptance still preserves macro-F1-oriented selector gating. TLS-120 keeps `--rank_metric select_metric` by default because its current bootstrap lower bounds already pass; this is a dataset parameter choice inside the same validation-gated selector module, not a different framework.
+The generated final-selector command carries the same robustness controls as the manual selector runs. For VPN, the dataset preset uses `--select_metric macro_f1`, `--rank_select_metric accuracy`, `--rank_metric bootstrap_gain_quantile`, and `--rank_candidate_limit 256`, so the next paired-view candidate is ranked by validation accuracy bootstrap lower-bound gain while final acceptance still preserves macro-F1-oriented selector gating. TLS-120 now also uses `--rank_metric bootstrap_gain_quantile`, but with `--rank_select_metric macro_f1` and `--rank_candidate_limit 64`, matching the unified-slot stacker result above. These are dataset parameter choices inside the same validation-gated selector module, not different frameworks.
 
 The same wrapper has dataset presets for class count, label map, current best selector input, and target-shift guard. To build the corresponding plans for TLS-120 or USTC, only change `--dataset`:
 
@@ -2015,9 +2064,9 @@ Current generated table:
 ```text
 | Dataset | Accuracy | Macro-F1 | Target | Status | Flows | Module usage | Selector decision | Guards |
 |---|---:|---:|---|---|---:|---|---|---|
-| vpn-app | 0.7488 | 0.7558 | 0.7400/0.6500 | PASS | 1672 | base=active; selector=active; expert=gated_off:reliability_fusion; calib=evaluated; slots=inferred_identity_compatible:8;provided:4;identity:4;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | fallback to base; rejected reliability_fusion (target_change=0.1268>0.0000) | bootstrap win=1.00, q=0.0310; target change=0.1268, JS=0.0149 |
-| tls-120 | 0.7909 | 0.7772 | 0.7800/0.7000 | PASS | 11542 | base=active; selector=active; expert=active:threshold_switch; calib=evaluated; slots=inferred_identity_compatible:8;provided:3;identity:5;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | threshold_switch expert=seq | bootstrap win=0.79, q=-0.0007; target change=0.0042, JS=0.0001 |
-| ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | base=active; selector=active; expert=active:class_precision; calib=evaluated; slots=inferred_identity_compatible:8;provided:2;identity:6;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
+| vpn-app | 0.7488 | 0.7558 | 0.7400/0.6500 | PASS | 1672 | base=active; selector=active; expert=gated_off:reliability_fusion; calib=evaluated; slots=inferred_identity_compatible:9;provided:4;identity:5;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | fallback to base; rejected reliability_fusion (target_change=0.1268>0.0000) | bootstrap win=1.00, q=0.0310; target change=0.1268, JS=0.0149 |
+| tls-120 | 0.7945 | 0.7807 | 0.7800/0.7000 | PASS | 11542 | base=active; selector=active; expert=active:threshold_switch; calib=evaluated; slots=recorded:9;provided:2;identity:7;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | threshold_switch expert=slot_stacker | bootstrap win=0.95, q=0.0001; target change=0.0129, JS=0.0002 |
+| ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | base=active; selector=active; expert=active:class_precision; calib=evaluated; slots=inferred_identity_compatible:9;provided:2;identity:7;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
 ```
 
 Framework consistency audit:
@@ -2060,18 +2109,22 @@ Current ablation table:
 | tls-120 | graph/seq base | 0.7909 | 0.0000 | 0.7769 | 0.0000 | graph=0.65, seq=0.35 | strong base |
 | tls-120 | strict safe selector | 0.7909 | 0.0000 | 0.7769 | 0.0000 | fallback; reject threshold_switch | strict bootstrap fallback |
 | tls-120 | tolerant safe selector | 0.7909 | 0.0000 | 0.7772 | +0.0003 | threshold_switch:seq | low-shift seq switch |
+| tls-120 | unified-slot stacker | 0.7991 | +0.0082 | 0.7897 | +0.0128 | - | trainable slot stacker upper/probe |
+| tls-120 | guarded slot-stacker selector | 0.7945 | +0.0036 | 0.7807 | +0.0038 | threshold_switch:slot_stacker | low-shift stacker switch |
 | ustc-app | base residual | 0.6500 | 0.0000 | 0.5750 | 0.0000 | base=0.91, prior=0.09 | base |
 | ustc-app | proto embedding expert | 0.6500 | 0.0000 | 0.6083 | +0.0333 | - | Tower-1 prototype |
 | ustc-app | safe selector | 0.7000 | +0.0500 | 0.6250 | +0.0500 | class_precision:a=0.5 | class-precision gate |
 ```
 
-Paired bootstrap delta vs each dataset baseline with 300 resamples:
+Paired bootstrap delta vs each dataset baseline with 100 resamples for the latest CPU-feasible ablation table:
 
 ```text
-vpn unsafe reliability fusion:     delta acc CI [-0.0676, -0.0395], delta macro-F1 CI [-0.1125, -0.0735]
-vpn calibration-enabled selector:  delta acc CI [-0.0206, -0.0090], delta macro-F1 CI [-0.0449, -0.0182]
-tls tolerant safe selector:        delta acc CI [-0.0011, +0.0010], delta macro-F1 CI [-0.0010, +0.0012]
-ustc safe selector:                delta acc CI [0.0000, +0.1500], delta macro-F1 CI [0.0000, +0.1331]
+vpn unsafe reliability fusion:     delta acc CI [-0.0658, -0.0389], delta macro-F1 CI [-0.1119, -0.0702]
+vpn calibration-enabled selector:  delta acc CI [-0.0207, -0.0093], delta macro-F1 CI [-0.0447, -0.0158]
+tls tolerant safe selector:        delta acc CI [-0.0012, +0.0010], delta macro-F1 CI [-0.0010, +0.0012]
+tls unified-slot stacker:          delta acc CI [+0.0034, +0.0124], delta macro-F1 CI [+0.0071, +0.0171]
+tls guarded slot-stacker selector: delta acc CI [+0.0015, +0.0055], delta macro-F1 CI [+0.0016, +0.0057]
+ustc safe selector:                delta acc CI [0.0000, +0.1500], delta macro-F1 CI [0.0000, +0.1345]
 ```
 
 Generate the compact paper evidence pack. It carries the framework report's unified module usage, unified expert-slot coverage, selector, guard, CI, and multi-view gate evidence into one JSON/Markdown artifact:

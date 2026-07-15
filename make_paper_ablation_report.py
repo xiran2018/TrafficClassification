@@ -54,6 +54,18 @@ DEFAULT_CASES = [
         "low-shift seq switch",
     ),
     (
+        "tls-120",
+        "unified-slot stacker",
+        "reasoningDataset/tls-120/test_stacker_unified_slot_tls120_confidence_valid_macro.json",
+        "trainable slot stacker upper/probe",
+    ),
+    (
+        "tls-120",
+        "guarded slot-stacker selector",
+        "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
+        "low-shift stacker switch",
+    ),
+    (
         "ustc-app",
         "base residual",
         "reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_step150_stage8_flowaware_safe_prior_residual.json",

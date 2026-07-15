@@ -13,6 +13,8 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from validation_gated_selector import apply_unified_expert_slots, parse_name_list
+
 
 def compute_metrics(y_true, y_pred):
     p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)
@@ -116,11 +118,18 @@ def main() -> None:
     ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
     ap.add_argument("--include_logits", action="store_true")
     ap.add_argument("--include_confidence", action="store_true")
+    ap.add_argument(
+        "--unified_expert_slots",
+        default="",
+        help="Comma-separated expert slots for a fixed cross-dataset stacker input. Missing slots are base identity experts.",
+    )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
 
     named_payloads = [(name, load_prob_payload(path), path) for name, path in args.input]
+    unified_expert_slots = parse_name_list(args.unified_expert_slots)
+    named_payloads, input_slot_status = apply_unified_expert_slots(named_payloads, unified_expert_slots)
     valid_common = sorted(set.intersection(*(set(map(str, data["valid_flow_ids"])) for _, data, _ in named_payloads)))
     test_common = sorted(set.intersection(*(set(map(str, data["flow_ids"])) for _, data, _ in named_payloads)))
     if not valid_common or not test_common:
@@ -202,6 +211,8 @@ def main() -> None:
                 "include_logits": args.include_logits,
                 "include_confidence": args.include_confidence,
                 "select_metric": args.select_metric,
+                "unified_expert_slots": unified_expert_slots,
+                "input_slot_status": input_slot_status,
             },
         }
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)

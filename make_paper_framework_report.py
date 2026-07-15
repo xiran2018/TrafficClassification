@@ -19,7 +19,7 @@ DEFAULT_RESULTS = [
     ),
     (
         "tls-120",
-        "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json",
+        "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
         0.78,
         0.70,
     ),
@@ -31,7 +31,7 @@ DEFAULT_RESULTS = [
     ),
 ]
 
-DEFAULT_UNIFIED_EXPERT_SLOTS = ["base", "graph", "seq", "prior_base", "emb_lr", "emb_et", "proto_emb", "paired"]
+DEFAULT_UNIFIED_EXPERT_SLOTS = ["base", "graph", "seq", "prior_base", "emb_lr", "emb_et", "proto_emb", "paired", "slot_stacker"]
 
 
 def load_json(path: str) -> Dict[str, Any]:
