@@ -389,6 +389,18 @@ def main() -> None:
     ap.add_argument("--bootstrap_min_gain_quantile", type=float, default=-1.0, help="Fallback unless the bootstrap gain quantile is at least this value.")
     ap.add_argument("--max_prediction_change_rate", type=float, default=1.0, help="Fallback if selected test predictions differ from the base input by more than this unlabeled target fraction.")
     ap.add_argument(
+        "--calibration_penalty_weight",
+        type=float,
+        default=0.0,
+        help="Subtract weight * calibration metric from candidate ranking scores. Default 0 preserves historical ranking.",
+    )
+    ap.add_argument(
+        "--calibration_penalty_metric",
+        choices=["ece", "nll", "brier"],
+        default="ece",
+        help="Calibration metric used by --calibration_penalty_weight.",
+    )
+    ap.add_argument(
         "--unified_expert_slots",
         default="",
         help=(
@@ -605,21 +617,46 @@ def main() -> None:
             )
         return rank_cache[cache_key]
 
-    def candidate_rank_key(candidate) -> Tuple[float, float, float, float]:
+    def candidate_rank_key(candidate) -> Tuple[float, float, float, float, float]:
+        primary = candidate_rank_primary(candidate)
+        penalty = candidate_calibration_penalty(candidate)
+        score = primary - args.calibration_penalty_weight * penalty
+        metrics = candidate[1]["metrics"]
+        return (float(score), float(primary), metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+
+    def candidate_rank_primary(candidate) -> float:
         metrics = candidate[1]["metrics"]
         if args.rank_metric == "select_metric":
-            primary = metrics[args.select_metric]
+            return float(metrics[args.select_metric])
         elif args.rank_metric in {"accuracy", "macro_f1"}:
-            primary = metrics[args.rank_metric]
+            return float(metrics[args.rank_metric])
         elif args.rank_metric == "bootstrap_gain_quantile":
-            primary = rank_bootstrap_summary(candidate)["gain_quantile"]
+            return float(rank_bootstrap_summary(candidate)["gain_quantile"])
         elif args.rank_metric == "bootstrap_mean_gain":
-            primary = rank_bootstrap_summary(candidate)["mean_gain"]
+            return float(rank_bootstrap_summary(candidate)["mean_gain"])
         elif args.rank_metric == "bootstrap_win_rate":
-            primary = rank_bootstrap_summary(candidate)["win_rate"]
-        else:
-            raise ValueError(args.rank_metric)
-        return (float(primary), metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+            return float(rank_bootstrap_summary(candidate)["win_rate"])
+        raise ValueError(args.rank_metric)
+
+    def candidate_calibration_penalty(candidate) -> float:
+        calibration = candidate[1]["metrics"].get("calibration") or {}
+        value = calibration.get(args.calibration_penalty_metric)
+        if value is None:
+            return 0.0
+        return float(value)
+
+    def candidate_rank_details(candidate) -> Dict[str, float | str]:
+        primary = candidate_rank_primary(candidate)
+        penalty = candidate_calibration_penalty(candidate)
+        return {
+            "rank_metric": args.rank_metric,
+            "rank_select_metric": rank_select_metric,
+            "primary": float(primary),
+            "calibration_penalty_metric": args.calibration_penalty_metric,
+            "calibration_penalty": float(penalty),
+            "calibration_penalty_weight": float(args.calibration_penalty_weight),
+            "score": float(primary - args.calibration_penalty_weight * penalty),
+        }
 
     selected_rejections = []
     selected_candidate = None
@@ -655,6 +692,7 @@ def main() -> None:
                 {
                     "rank_metric": args.rank_metric,
                     "rank_select_metric": rank_select_metric,
+                    "rank_details": candidate_rank_details(candidate),
                     "rank_key": list(candidate_rank_key(candidate)),
                     "rank_bootstrap_guard": rank_summary,
                     "selected_gain": selected_gain,
@@ -676,6 +714,7 @@ def main() -> None:
         accepted_row = dict(candidate[1])
         accepted_row["rank_metric"] = args.rank_metric
         accepted_row["rank_select_metric"] = rank_select_metric
+        accepted_row["rank_details"] = candidate_rank_details(candidate)
         accepted_row["rank_key"] = list(candidate_rank_key(candidate))
         if rank_summary is not None:
             accepted_row["rank_bootstrap_guard"] = rank_summary
@@ -692,6 +731,7 @@ def main() -> None:
             "min_valid_gain_over_base": args.min_valid_gain_over_base,
             "rejected": original_best[1],
             "top_ranked": ranked_candidates[0][1],
+            "top_ranked_rank_details": candidate_rank_details(ranked_candidates[0]),
             "top_ranked_key": list(candidate_rank_key(ranked_candidates[0])),
             "rejected_candidates": selected_rejections[:5],
         }
@@ -750,6 +790,8 @@ def main() -> None:
             "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
             "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
             "max_prediction_change_rate": args.max_prediction_change_rate,
+            "calibration_penalty_weight": args.calibration_penalty_weight,
+            "calibration_penalty_metric": args.calibration_penalty_metric,
         },
     }
     Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
