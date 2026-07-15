@@ -79,6 +79,8 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         "--plan_json",
         str(Path("reasoningDataset") / dataset / f"recommended_experiment_plan_{args.run_tag}.json"),
     ]
+    if not args.enable_slot_stacker:
+        cmd.append("--no-enable_slot_stacker")
     if args.execute:
         cmd.append("--execute")
     if args.allow_no_cuda:
@@ -117,6 +119,7 @@ def child_plan_summary(dataset: str, cmd: List[str]) -> Dict[str, Any]:
         "paired_embedding_suffix",
         "base_selector_input",
         "paired_prior_output",
+        "slot_stacker_output",
         "final_selector_output",
         "experiment_config",
     ]:
@@ -174,6 +177,7 @@ def write_suite_plan(
             "flow_pooling": args.flow_pooling,
             "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
             "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
+            "enable_slot_stacker": args.enable_slot_stacker,
         },
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
@@ -216,6 +220,12 @@ def main() -> None:
         "--final_selector_unified_expert_slots",
         default="base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker",
         help="Comma-separated final-selector expert slots shared by every dataset; missing slots become identity experts.",
+    )
+    ap.add_argument(
+        "--enable_slot_stacker",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Let each dataset child plan train/pass the unified-slot probability stacker.",
     )
     ap.add_argument("--execute", action="store_true")
     ap.add_argument(

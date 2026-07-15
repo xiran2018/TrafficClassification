@@ -1973,6 +1973,8 @@ conda run --no-capture-output -n llm-factory \
 
 The generated final-selector command carries the same robustness controls as the manual selector runs. For VPN, the dataset preset uses `--select_metric macro_f1`, `--rank_select_metric accuracy`, `--rank_metric bootstrap_gain_quantile`, and `--rank_candidate_limit 256`, so the next paired-view candidate is ranked by validation accuracy bootstrap lower-bound gain while final acceptance still preserves macro-F1-oriented selector gating. TLS-120 now also uses `--rank_metric bootstrap_gain_quantile`, but with `--rank_select_metric macro_f1` and `--rank_candidate_limit 64`, matching the unified-slot stacker result above. These are dataset parameter choices inside the same validation-gated selector module, not different frameworks.
 
+The recommended experiment runner now includes a CPU `slot_stacker` stage between `paired_prior` and `final_selector`. It trains `train_prediction_stacker.py` over the same unified expert slots, using dataset preset inputs plus the current paired candidate, then passes the result to `validation_gated_selector.py` as the `slot_stacker` expert. This makes the TLS-120 stacker improvement part of the automatic cross-dataset framework instead of a one-off manual probe. Use `--no-enable_slot_stacker` only for ablations that intentionally remove this trainable candidate.
+
 The same wrapper has dataset presets for class count, label map, current best selector input, and target-shift guard. To build the corresponding plans for TLS-120 or USTC, only change `--dataset`:
 
 ```bash
@@ -1993,7 +1995,7 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/recommended_suite_plan.json
 ```
 
-The suite JSON records CUDA visibility, each dataset's current best test result, target-gate status, generated command, command return code, and a `child_plans` summary containing each dataset's plan JSON, paired-prior output, final-selector output, skipped stages, and CUDA-required stages. In dry-run mode the suite materializes these child plans by default without launching training; pass `--no-materialize_child_plans` if you only want to print the child commands. This makes the A800 run usable as a lightweight experiment ledger for paper ablations and cross-dataset reproduction.
+The suite JSON records CUDA visibility, each dataset's current best test result, target-gate status, generated command, command return code, and a `child_plans` summary containing each dataset's plan JSON, paired-prior output, slot-stacker output, final-selector output, skipped stages, and CUDA-required stages. In dry-run mode the suite materializes these child plans by default without launching training; pass `--no-materialize_child_plans` if you only want to print the child commands. This makes the A800 run usable as a lightweight experiment ledger for paper ablations and cross-dataset reproduction.
 
 In the real A800 `llm-factory` shell, add `--execute` to run the suite sequentially:
 

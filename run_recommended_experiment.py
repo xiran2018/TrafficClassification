@@ -19,6 +19,11 @@ DATASET_PRESETS = {
         "num_classes": 16,
         "label_map": "reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json",
         "base_selector_input": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
+        "slot_stacker_inputs": [
+            ("prior_base", "reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_prior_ensemble_softcap_k31_vote.json"),
+            ("emb_lr", "reasoningDataset/vpn-app/test_flow_embedding_classifier_logreg_meta_valid_acc.json"),
+            ("emb_et", "reasoningDataset/vpn-app/test_flow_embedding_classifier_extratrees_valid_acc.json"),
+        ],
         "max_prediction_change_rate": 0.0,
         "final_selector_rank_metric": "bootstrap_gain_quantile",
         "final_selector_rank_select_metric": "accuracy",
@@ -28,6 +33,10 @@ DATASET_PRESETS = {
         "num_classes": 120,
         "label_map": "reasoningDataset/tls-120/train_tower1_change_weight/label_map.json",
         "base_selector_input": "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
+        "slot_stacker_inputs": [
+            ("graph", "reasoningDataset/tls-120/fusion_input_graph_acc_ft.json"),
+            ("seq", "reasoningDataset/tls-120/fusion_input_seq_baseline.json"),
+        ],
         "max_prediction_change_rate": 0.05,
         "final_selector_rank_metric": "bootstrap_gain_quantile",
         "final_selector_rank_select_metric": "macro_f1",
@@ -37,6 +46,9 @@ DATASET_PRESETS = {
         "num_classes": 20,
         "label_map": "reasoningDataset/ustc-app/train_tower1_flowaware_change_weight/label_map.json",
         "base_selector_input": "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
+        "slot_stacker_inputs": [
+            ("proto_emb", "reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json"),
+        ],
         "max_prediction_change_rate": 0.05,
     },
 }
@@ -110,6 +122,18 @@ def final_selector_output_exists(args) -> bool:
     return Path(final_selector_output_path(args)).exists()
 
 
+def slot_stacker_output_path(args) -> str:
+    if args.slot_stacker_output:
+        return args.slot_stacker_output
+    root = Path("reasoningDataset") / args.dataset
+    suffix = result_suffix(args.embedding_suffix, args.run_tag)
+    return str(root / f"test_stacker_unified_slot_{suffix}_valid_macro.json")
+
+
+def slot_stacker_output_exists(args) -> bool:
+    return Path(slot_stacker_output_path(args)).exists()
+
+
 def selected_model_types(args) -> List[str]:
     out: List[str] = []
     for raw in args.model_types.split(","):
@@ -161,6 +185,49 @@ def recommendation_cmd(args) -> List[str]:
     return cmd
 
 
+def parse_named_inputs(raw_items: List[List[str]]) -> List[tuple[str, str]]:
+    return [(name, path) for name, path in raw_items]
+
+
+def default_slot_stacker_inputs(args) -> List[tuple[str, str]]:
+    preset = DATASET_PRESETS.get(args.dataset, {})
+    inputs = [("base", args.base_selector_input or default_base_selector_input(args))]
+    inputs.extend((str(name), str(path)) for name, path in preset.get("slot_stacker_inputs", []))
+    if args.include_paired_in_slot_stacker:
+        inputs.append(("paired", paired_prior_output_path(args)))
+    return [(name, path) for name, path in inputs if path]
+
+
+def slot_stacker_inputs(args) -> List[tuple[str, str]]:
+    return parse_named_inputs(args.slot_stacker_input) if args.slot_stacker_input else default_slot_stacker_inputs(args)
+
+
+def slot_stacker_cmd(args) -> List[str]:
+    cmd = [
+        "python",
+        "train_prediction_stacker.py",
+        "--label_map",
+        args.label_map or default_label_map(args),
+        "--c_grid",
+        args.slot_stacker_c_grid,
+        "--class_weight_grid",
+        args.slot_stacker_class_weight_grid,
+        "--select_metric",
+        args.slot_stacker_select_metric,
+        "--unified_expert_slots",
+        args.final_selector_unified_expert_slots,
+        "--output_json",
+        slot_stacker_output_path(args),
+    ]
+    if args.slot_stacker_include_logits:
+        cmd.append("--include_logits")
+    if args.slot_stacker_include_confidence:
+        cmd.append("--include_confidence")
+    for name, path in slot_stacker_inputs(args):
+        cmd += ["--input", name, path]
+    return cmd
+
+
 def final_selector_cmd(args) -> List[str]:
     base_input = args.base_selector_input or default_base_selector_input(args)
     if not base_input:
@@ -174,6 +241,10 @@ def final_selector_cmd(args) -> List[str]:
         "--input",
         "paired",
         paired_prior_output_path(args),
+    ]
+    if args.enable_slot_stacker:
+        cmd += ["--input", "slot_stacker", slot_stacker_output_path(args)]
+    cmd += [
         "--label_map",
         args.label_map or default_label_map(args),
         "--select_metric",
@@ -198,10 +269,8 @@ def final_selector_cmd(args) -> List[str]:
         args.final_selector_expert_margin_grid,
         "--base_conf_max_grid",
         args.final_selector_base_conf_max_grid,
-        "--delta_conf_grid",
-        args.final_selector_delta_conf_grid,
-        "--delta_margin_grid",
-        args.final_selector_delta_margin_grid,
+        f"--delta_conf_grid={args.final_selector_delta_conf_grid}",
+        f"--delta_margin_grid={args.final_selector_delta_margin_grid}",
         "--reliability_power_grid",
         args.final_selector_reliability_power_grid,
         "--confidence_power_grid",
@@ -220,8 +289,7 @@ def final_selector_cmd(args) -> List[str]:
         str(args.final_selector_bootstrap_samples),
         "--bootstrap_min_win_rate",
         str(args.final_selector_bootstrap_min_win_rate),
-        "--bootstrap_min_gain_quantile",
-        str(args.final_selector_bootstrap_min_gain_quantile),
+        f"--bootstrap_min_gain_quantile={args.final_selector_bootstrap_min_gain_quantile}",
         "--max_prediction_change_rate",
         str(args.final_selector_max_prediction_change_rate),
         "--output_json",
@@ -317,6 +385,12 @@ def stage_commands(args) -> List[Dict[str, Any]]:
             "skip_if": args.skip_existing and final_outputs_exist(args),
         },
         {
+            "name": "slot_stacker",
+            "cmd": slot_stacker_cmd(args),
+            "requires_cuda": False,
+            "skip_if": (not args.enable_slot_stacker) or (args.skip_existing and slot_stacker_output_exists(args)),
+        },
+        {
             "name": "final_selector",
             "cmd": final_selector_cmd(args),
             "requires_cuda": False,
@@ -355,9 +429,18 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "flow_pooling": args.flow_pooling,
             "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
             "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
+            "enable_slot_stacker": args.enable_slot_stacker,
+            "slot_stacker_inputs": slot_stacker_inputs(args) if args.enable_slot_stacker else [],
+            "slot_stacker_output": slot_stacker_output_path(args) if args.enable_slot_stacker else "",
+            "slot_stacker_c_grid": args.slot_stacker_c_grid,
+            "slot_stacker_class_weight_grid": args.slot_stacker_class_weight_grid,
+            "slot_stacker_select_metric": args.slot_stacker_select_metric,
+            "slot_stacker_include_logits": args.slot_stacker_include_logits,
+            "slot_stacker_include_confidence": args.slot_stacker_include_confidence,
         },
         "base_selector_input": args.base_selector_input or default_base_selector_input(args),
         "paired_prior_output": paired_prior_output_path(args),
+        "slot_stacker_output": slot_stacker_output_path(args) if args.enable_slot_stacker else "",
         "final_selector_output": final_selector_output_path(args),
         "stages": [
             {
@@ -455,6 +538,27 @@ def main() -> None:
             "Missing slots are filled as identity experts from the base input; pass an empty string to disable."
         ),
     )
+    ap.add_argument(
+        "--enable_slot_stacker",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Train a CPU probability stacker over the unified expert slots and pass it as slot_stacker to the final selector.",
+    )
+    ap.add_argument(
+        "--slot_stacker_input",
+        nargs=2,
+        action="append",
+        metavar=("NAME", "JSON"),
+        default=[],
+        help="Optional explicit inputs for train_prediction_stacker.py. Defaults to dataset preset inputs plus paired prior.",
+    )
+    ap.add_argument("--slot_stacker_output", default="", help="Optional path for the unified-slot stacker probability JSON.")
+    ap.add_argument("--slot_stacker_c_grid", default="0.01,0.03")
+    ap.add_argument("--slot_stacker_class_weight_grid", default="none")
+    ap.add_argument("--slot_stacker_select_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
+    ap.add_argument("--slot_stacker_include_logits", action="store_true")
+    ap.add_argument("--slot_stacker_include_confidence", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--include_paired_in_slot_stacker", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--require_cuda_for_tower2", action="store_true")
     ap.add_argument("--execute", action="store_true", help="Actually run the recommended commands. Default prints a dry-run plan.")
     ap.add_argument("--allow_no_cuda", action="store_true", help="Allow --execute even when CUDA is unavailable; useful only for tiny CPU probes.")
