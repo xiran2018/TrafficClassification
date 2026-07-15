@@ -2001,7 +2001,7 @@ reasoningDataset/vpn-app/test_selector_best_plus_rawproj_flowaware_change_weight
 
 This final selector keeps the same safety gates as the paper framework: validation macro-F1 gain, bootstrap stability, and a strict VPN target-shift guard. If the paired candidate is not stable, the selector falls back to the current best base. In the Codex sandbox this remains a dry-run because CUDA is not exposed; use the real A800 environment for the embedding and long training stages.
 
-Generate a paper-ready framework report with selector decisions and guard evidence:
+Generate a paper-ready framework report with selector decisions, guard evidence, and learned multi-view gate weights when a result JSON contains `metrics.eval_config.multi_view_gate`:
 
 ```bash
 conda run --no-capture-output -n llm-factory \

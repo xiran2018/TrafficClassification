@@ -160,6 +160,32 @@ def guard_summary(selected: Dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "-"
 
 
+def multi_view_gate_summary(data: Dict[str, Any]) -> Dict[str, Any] | None:
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    eval_config = metrics.get("eval_config")
+    if not isinstance(eval_config, dict):
+        return None
+    gate = eval_config.get("multi_view_gate")
+    if not isinstance(gate, dict):
+        return None
+    branches = gate.get("branches") or []
+    mean = gate.get("mean") or []
+    std = gate.get("std") or []
+    if not branches or not mean or len(branches) != len(mean):
+        return None
+    pairs = sorted(zip(branches, mean), key=lambda item: float(item[1]), reverse=True)
+    return {
+        "branches": branches,
+        "mean": mean,
+        "std": std,
+        "num_flows": gate.get("num_flows"),
+        "dominant_branch": pairs[0][0],
+        "dominant_weight": float(pairs[0][1]),
+    }
+
+
 def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
     selected = data.get("selected", {})
     feature_config = data.get("feature_config") or {}
@@ -176,6 +202,7 @@ def module_usage(data: Dict[str, Any]) -> Dict[str, str]:
         "target_shift_guard": "inactive",
         "expert_switch_or_fusion": "identity",
         "class_bias_calibration_candidate": "not_configured",
+        "trainable_multiview_gate": "active" if multi_view_gate_summary(data) else "not_observed",
     }
     if "class_bias_calibration" in strategies:
         usage["class_bias_calibration_candidate"] = "evaluated"
@@ -211,6 +238,7 @@ def module_usage_summary(usage: Dict[str, str]) -> str:
         f"selector={usage['validation_gated_selector']}; "
         f"expert={usage['expert_switch_or_fusion']}; "
         f"calib={usage['class_bias_calibration_candidate']}; "
+        f"mv_gate={usage.get('trainable_multiview_gate', 'not_observed')}; "
         f"guards=boot:{usage['bootstrap_guard']},shift:{usage['target_shift_guard']}"
     )
 
@@ -228,6 +256,7 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     required_candidates = [
         "expert_switch_or_fusion",
         "class_bias_calibration_candidate",
+        "trainable_multiview_gate",
     ]
     dataset_checks = []
     for row in rows:
@@ -261,7 +290,8 @@ def framework_consistency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "interpretation": (
             "All datasets pass through the same backbone, base expert, validation-gated selector, "
             "bootstrap guard, target-shift guard, and candidate expert/calibration family. "
-            "Dataset-specific validation may activate, gate off, or leave candidate experts as identity."
+            "Dataset-specific validation may activate, gate off, or leave candidate experts as identity. "
+            "When multi-view pooling is evaluated, learned branch-gate weights are reported as trainable module evidence."
         ),
     }
 
@@ -288,6 +318,7 @@ def build_rows(results: List[Tuple[str, str, float | None, float | None]], boots
                 "selector": selector_summary(selected),
                 "guards": guard_summary(selected),
                 "module_usage": module_usage(data),
+                "multi_view_gate": multi_view_gate_summary(data),
                 "uncertainty": bootstrap_uncertainty(data, bootstrap_samples, bootstrap_seed),
             }
         )
@@ -370,6 +401,37 @@ def markdown_uncertainty(rows: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def markdown_multiview_gates(rows: List[Dict[str, Any]]) -> str:
+    gated = [row for row in rows if row.get("multi_view_gate")]
+    if not gated:
+        return ""
+    lines = [
+        "",
+        "Trainable multi-view branch gates",
+        "",
+        "| Dataset | Flows | Dominant branch | Mean weights: mean/max/std/attention |",
+        "|---|---:|---|---|",
+    ]
+    for row in gated:
+        gate = row["multi_view_gate"]
+        branches = gate.get("branches") or []
+        means = gate.get("mean") or []
+        weight_by_branch = {branch: value for branch, value in zip(branches, means)}
+        ordered = [weight_by_branch.get(branch) for branch in ["mean", "max", "std", "attention"]]
+        weight_text = "/".join(format_float(value) for value in ordered)
+        lines.append(
+            "| {dataset} | {flows} | {branch} ({weight}) | {weights} |".format(
+                dataset=row["dataset"],
+                flows=gate.get("num_flows", "-"),
+                branch=gate.get("dominant_branch", "-"),
+                weight=format_float(gate.get("dominant_weight")),
+                weights=weight_text,
+            )
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def parse_result(raw: List[str]) -> Tuple[str, str, float | None, float | None]:
     if len(raw) != 4:
         raise ValueError("--result expects DATASET JSON TARGET_ACC TARGET_MACRO_F1; use '-' for no target")
@@ -391,7 +453,7 @@ def main() -> None:
     results = [parse_result(item) for item in args.result] if args.result else DEFAULT_RESULTS
     rows = build_rows(results, args.bootstrap_samples, args.bootstrap_seed)
     audit = framework_consistency(rows)
-    md = markdown_table(rows) + markdown_consistency(audit) + markdown_uncertainty(rows)
+    md = markdown_table(rows) + markdown_consistency(audit) + markdown_multiview_gates(rows) + markdown_uncertainty(rows)
     print(md)
 
     if args.output_json:
