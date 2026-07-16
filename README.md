@@ -2221,6 +2221,41 @@ rejected content_clean_graph:
 
 Research conclusion: the next paper-facing improvement should optimize for content-grouped cross-split stability, not single-split or duplicated multi-split accuracy. A useful next model iteration is group-aware training/validation: use content hashes or endpoint-invariant hashes as groups, keep duplicate groups inside one split, and train the unified graph/seq/statistics/expert-gate framework on these grouped splits. This turns the problem into a stronger generalization setting and is a cleaner CCF B/A story than additional probability-level tuning.
 
+3-fold stability ledger:
+
+The paper-facing evaluation target is now cross-split stability, not only the best single split. For SWEET VPN and TLS, `train_val_split_0/1/2` are treated as three ready-made folds: each folder already contains its own `train` and `val`, and all folds share the same `test`. Do not merge these fold folders for the main result. Use merging only as a documented ablation.
+
+Generate the current 3-fold status and the exact missing/weak-fold rerun commands:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python summarize_cross_split_results.py \
+    --dataset vpn-app \
+    --dataset tls-120 \
+    --output_json reasoningDataset/cross_split_summary.json \
+    --output_md reasoningDataset/cross_split_summary.md
+```
+
+Current fold-level status from the latest summary:
+
+```text
+VPN targets: accuracy >= 0.7400, macro-F1 >= 0.6500
+  fold0: pass, acc=0.7488, macro-F1=0.7558
+  fold1: weak, acc=0.6411, macro-F1=0.6030
+  fold2: weak, acc=0.6597, macro-F1=0.6138
+  mean: acc=0.6832, macro-F1=0.6575
+  min:  acc=0.6411, macro-F1=0.6030
+
+TLS-120 targets: accuracy >= 0.7800, macro-F1 >= 0.7000
+  fold0: pass, acc=0.7991, macro-F1=0.7897
+  fold1: missing
+  fold2: missing
+```
+
+Interpretation: VPN already has evidence across all three folds, but only split0 meets the target. Split1/split2 are the real bottleneck. TLS currently has a strong split0 result, but fold1/fold2 still need to be run before claiming cross-split stability. This is why the next automatic loop should prioritize fold1/fold2 training and validation, not additional split0-only tuning.
+
+The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, safe prior, and validation-gated selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
+
 Use the metric dashboard to check the current target gates across datasets:
 
 ```bash
