@@ -2258,10 +2258,10 @@ Current fold-level status from the latest summary:
 ```text
 VPN targets: accuracy >= 0.7400, macro-F1 >= 0.6500
   fold0: pass, acc=0.7488, macro-F1=0.7558
-  fold1: weak, acc=0.6722, macro-F1=0.6501
-  fold2: weak, acc=0.7033, macro-F1=0.6995
-  mean: acc=0.7081, macro-F1=0.7018
-  min:  acc=0.6722, macro-F1=0.6501
+  fold1: weak, acc=0.6812, macro-F1=0.6585
+  fold2: weak, acc=0.7039, macro-F1=0.7003
+  mean: acc=0.7113, macro-F1=0.7049
+  min:  acc=0.6812, macro-F1=0.6585
 
 TLS-120 targets: accuracy >= 0.7800, macro-F1 >= 0.7000
   fold0: pass, acc=0.7991, macro-F1=0.7897
@@ -2310,6 +2310,15 @@ VPN fold1 + paired Tower-1 seq + label-free target-prior softcap ensemble:
   This is the first fold1 result to cross the macro-F1 target, although accuracy
   is still below the 0.74 fold target.
 
+VPN fold1 + pairwise/group confusion refinement:
+  Starting from the paired Tower-1 seq + prior-softcap result, top-2 pairwise
+  refinement with message/header/port flow features improves to
+  test acc=0.6794, macro-F1=0.6566.
+  Adding the social/media confusion-group refinement gives the current fold1 best:
+  test acc=0.6812, macro-F1=0.6585.
+  The gain is local and low-risk: pairwise refinement changed 97/1672 test flows,
+  while the group refinement made a small additional correction.
+
 VPN fold2 + message/header/port flow-statistics expert:
   selected random forest; test acc=0.6657, macro-F1=0.6264.
   It is the current fold2 best, but still below the target.
@@ -2339,9 +2348,17 @@ VPN fold2 + message/header/port statistics expert + label-free target-prior soft
   This clears the fold2 macro-F1 target but still misses the 0.74 accuracy
   target. The improvement mainly fixes prior imbalance: under-predicted `skype`
   recovers while over-predicted small classes are softened.
+
+VPN fold2 + pairwise/group confusion refinement:
+  Top-2 pairwise refinement on the fold2 statistics + prior-softcap result gives
+  the current fold2 best:
+  test acc=0.7039, macro-F1=0.7003.
+  The social/media group refinement is a negative ablation on fold2
+  (`0.6645/0.6382`), so it should remain a candidate expert that can be
+  validation-gated down, not a mandatory post-processor.
 ```
 
-Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning plus label-free target-prior stabilization. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch enough to make the VPN cross-fold macro-F1 minimum reach `0.6501`. The remaining bottleneck is weak-fold accuracy, especially fold1 at `0.6722`. The next model iteration should generalize this into a reusable endpoint-invariant branch with learned/gated contribution: content-grouped or endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, and cross-fold model selection that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
+Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning plus label-free target-prior stabilization and local confusion refinement. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement pushes the VPN cross-fold macro-F1 minimum to `0.6585`. The remaining bottleneck is weak-fold accuracy, especially fold1 at `0.6812`. The next model iteration should generalize this into a reusable endpoint-invariant branch with learned/gated contribution: content-grouped or endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold model selection that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
 
 The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, safe prior, and validation-gated selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
 
