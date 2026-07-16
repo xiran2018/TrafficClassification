@@ -136,6 +136,17 @@ def tower1_train_cmd(args) -> List[str]:
         cmd += ["--save_steps", str(args.tower1_save_steps)]
     if args.tower1_init_checkpoint_dir:
         cmd += ["--init_checkpoint_dir", args.tower1_init_checkpoint_dir]
+    if args.tower1_paired_data_suffix:
+        cmd += [
+            "--paired_packet_aux_jsonl",
+            f"reasoningDataset/{args.dataset}/train_tower1_{args.tower1_paired_data_suffix}/packet_auxiliary.jsonl",
+            "--paired_consistency_weight",
+            str(args.tower1_paired_consistency_weight),
+            "--paired_cls_weight",
+            str(args.tower1_paired_cls_weight),
+            "--paired_logit_kl_weight",
+            str(args.tower1_paired_logit_kl_weight),
+        ]
     if args.flow_balanced_packet_batches:
         cmd += ["--flow_balanced_packet_batches", "--packets_per_flow", str(args.packets_per_flow)]
     if args.local_files_only:
@@ -543,6 +554,10 @@ def main() -> None:
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0)
     ap.add_argument("--flow_proto_weight", type=float, default=0.0)
     ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class")
+    ap.add_argument("--tower1_paired_data_suffix", default="", help="Optional Tower-1 second-view data suffix for paired packet consistency.")
+    ap.add_argument("--tower1_paired_consistency_weight", type=float, default=0.0, help="Tower-1 full-header vs paired-view consistency weight.")
+    ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier in Tower-1.")
+    ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
     ap.add_argument("--flow_balanced_packet_batches", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--packets_per_flow", type=int, default=2)
     ap.add_argument("--tower1_lr", type=float, default=2e-5)

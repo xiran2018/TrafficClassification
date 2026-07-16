@@ -67,10 +67,28 @@ class PacketSFTDataset(Dataset):
 
 
 class PacketAuxDataset(Dataset):
-    def __init__(self, path: str, show_progress: bool = True):
+    def __init__(self, path: str, show_progress: bool = True, paired_path: str = ""):
         self.rows = load_jsonl(path, show_progress=show_progress)
         if not self.rows:
             raise ValueError(f"No packet auxiliary samples loaded from {path}")
+        self.paired_rows = 0
+        if paired_path:
+            paired = load_jsonl(paired_path, show_progress=show_progress)
+            paired_by_uid = {str(row.get("packet_uid", "")): row for row in paired}
+            for row in self.rows:
+                paired_row = paired_by_uid.get(str(row.get("packet_uid", "")))
+                if paired_row is None:
+                    continue
+                if int(paired_row.get("label_id", -1)) != int(row.get("label_id", -2)):
+                    continue
+                row["paired_prompt"] = paired_row.get("prompt", "")
+                row["paired_embedding_header_policy"] = paired_row.get("embedding_header_policy", "")
+                self.paired_rows += 1
+            print(
+                f"paired packet auxiliary: matched={self.paired_rows}/{len(self.rows)} "
+                f"from {paired_path}",
+                flush=True,
+            )
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -165,13 +183,26 @@ class PacketAuxCollator:
         labels = torch.tensor([int(r["label_id"]) for r in rows], dtype=torch.long)
         weights = torch.tensor([float(r.get("packet_weight", 1.0)) for r in rows], dtype=torch.float32)
         flow_ids = torch.tensor([stable_flow_id(str(r.get("flow_id", ""))) for r in rows], dtype=torch.long)
-        return {
+        batch = {
             "input_ids": toks["input_ids"],
             "attention_mask": toks["attention_mask"],
             "labels": labels,
             "weights": weights,
             "flow_ids": flow_ids,
         }
+        if any(r.get("paired_prompt") for r in rows):
+            paired_texts = [r.get("paired_prompt") or r["prompt"] for r in rows]
+            paired_toks = self.tokenizer(
+                paired_texts,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            )
+            batch["paired_input_ids"] = paired_toks["input_ids"]
+            batch["paired_attention_mask"] = paired_toks["attention_mask"]
+            batch["paired_mask"] = torch.tensor([bool(r.get("paired_prompt")) for r in rows], dtype=torch.bool)
+        return batch
 
 
 def pad_lm_batch(input_ids: List[torch.Tensor], labels: List[torch.Tensor], pad_id: int) -> Dict[str, torch.Tensor]:
@@ -296,6 +327,10 @@ def main() -> None:
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0, help="Positive weight for same-label packets in flow-aware SupCon.")
     ap.add_argument("--flow_proto_weight", type=float, default=0.0, help="Weight for packet-to-flow prototype contrastive loss in Tower-1.")
     ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class", help="Positive flow prototypes for --flow_proto_weight.")
+    ap.add_argument("--paired_packet_aux_jsonl", default="", help="Optional second-view packet_auxiliary.jsonl aligned by packet_uid, e.g. randomized IP/port prompts.")
+    ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Weight for Tower-1 full-header vs paired-view packet embedding/logit consistency.")
+    ap.add_argument("--paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier added inside the packet classification loss.")
+    ap.add_argument("--paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
     ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
     ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
     ap.add_argument("--projection_dim", type=int, default=256)
@@ -370,7 +405,11 @@ def main() -> None:
         print(f"using max_sft_length={args.max_sft_length}", flush=True)
 
     print(f"loading packet auxiliary dataset: {args.packet_aux_jsonl}", flush=True)
-    packet_ds = PacketAuxDataset(args.packet_aux_jsonl, show_progress=show_load_progress)
+    packet_ds = PacketAuxDataset(
+        args.packet_aux_jsonl,
+        show_progress=show_load_progress,
+        paired_path=args.paired_packet_aux_jsonl,
+    )
     if args.flow_balanced_packet_batches:
         packet_sampler = FlowBalancedPacketBatchSampler(
             packet_ds.rows,
@@ -444,7 +483,7 @@ def main() -> None:
     pbar = tqdm(range(total_steps), desc="train tower1")
     opt.zero_grad(set_to_none=True)
 
-    running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
+    running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
     skipped_nonfinite = 0
     for step in pbar:
         sft_batch = next(sft_iter) if sft_iter is not None else None
@@ -462,6 +501,9 @@ def main() -> None:
             same_label_positive_weight=args.same_label_positive_weight,
             flow_proto_weight=args.flow_proto_weight,
             flow_proto_positive=args.flow_proto_positive,
+            paired_consistency_weight=args.paired_consistency_weight,
+            paired_cls_weight=args.paired_cls_weight,
+            paired_logit_kl_weight=args.paired_logit_kl_weight,
         )
         if not torch.isfinite(out.loss):
             skipped_nonfinite += 1
@@ -472,7 +514,8 @@ def main() -> None:
                 f"lm={float(out.lm_loss.detach().cpu())} "
                 f"pkt_cls={float(out.pkt_cls_loss.detach().cpu())} "
                 f"supcon={float(out.supcon_loss.detach().cpu())} "
-                f"proto={float(out.flow_proto_loss.detach().cpu())}"
+                f"proto={float(out.flow_proto_loss.detach().cpu())} "
+                f"pair={float(out.paired_consistency_loss.detach().cpu())}"
             )
             if args.stop_on_nonfinite_loss:
                 raise FloatingPointError(msg)
@@ -494,6 +537,7 @@ def main() -> None:
             running["cls"] += float(out.pkt_cls_loss.detach().cpu())
             running["con"] += float(out.supcon_loss.detach().cpu())
             running["proto"] += float(out.flow_proto_loss.detach().cpu())
+            running["pair"] += float(out.paired_consistency_loss.detach().cpu())
             if sft_batch is not None:
                 running["lm_tokens"] += float(sft_batch.get("valid_label_tokens", torch.zeros(())).detach().cpu())
             if out.packet_logits is not None:
@@ -510,13 +554,15 @@ def main() -> None:
                 "pkt_cls": running["cls"] / n,
                 "supcon": running["con"] / n,
                 "proto": running["proto"] / n,
+                "pair": running["pair"] / n,
                 "pkt_acc": running["acc"] / n,
                 "lm_tokens": running["lm_tokens"] / n,
             }
             pbar.set_postfix({k: f"{v:.4f}" for k, v in msg.items()})
             tqdm.write(
                 "step={step}/{total} loss={loss:.4f} lm={lm:.4f} pkt_cls={pkt_cls:.4f} "
-                "supcon={supcon:.4f} proto={proto:.4f} pkt_acc={pkt_acc:.4f} lm_tokens/batch={lm_tokens:.1f} "
+                "supcon={supcon:.4f} proto={proto:.4f} pair={pair:.4f} "
+                "pkt_acc={pkt_acc:.4f} lm_tokens/batch={lm_tokens:.1f} "
                 "skipped_nonfinite={skipped}".format(
                     step=step + 1,
                     total=total_steps,
@@ -524,7 +570,7 @@ def main() -> None:
                     **msg,
                 )
             )
-            running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
+            running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
 
         if args.save_steps and (step + 1) % args.save_steps == 0:
             save_model(model, args.output_dir, suffix=f"step_{step+1}")
@@ -547,9 +593,10 @@ def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "
                 "num_classes": model.num_classes,
                 "hidden_size": model.hidden_size,
                 "embedding_pooling": "last_token",
-                "loss": "L_QA + alpha*L_packet_cls + beta*L_supcon + gamma*L_flow_proto",
+                "loss": "L_QA + alpha*L_packet_cls + beta*L_supcon + gamma*L_flow_proto + delta*L_paired_consistency",
                 "supports_flow_aware_supcon": True,
                 "supports_flow_prototype_loss": True,
+                "supports_paired_view_consistency": True,
             },
             f,
             indent=2,

@@ -35,6 +35,7 @@ class Tower1LossOutput:
     pkt_cls_loss: torch.Tensor
     supcon_loss: torch.Tensor
     flow_proto_loss: torch.Tensor
+    paired_consistency_loss: torch.Tensor
     packet_logits: Optional[torch.Tensor]
     packet_embeddings: Optional[torch.Tensor]
     projected_embeddings: Optional[torch.Tensor]
@@ -158,6 +159,9 @@ class QwenPacketMultiTaskModel(nn.Module):
         same_label_positive_weight: float = 1.0,
         flow_proto_weight: float = 0.0,
         flow_proto_positive: str = "same_class",
+        paired_consistency_weight: float = 0.0,
+        paired_cls_weight: float = 0.0,
+        paired_logit_kl_weight: float = 0.5,
     ) -> Tower1LossOutput:
         device = next(self.parameters()).device
         zero = torch.zeros((), device=device)
@@ -165,6 +169,7 @@ class QwenPacketMultiTaskModel(nn.Module):
         pkt_cls_loss = zero
         supcon_loss = zero
         flow_proto_loss = zero
+        paired_consistency_loss = zero
         packet_logits = None
         packet_embeddings = None
         projected_embeddings = None
@@ -211,14 +216,46 @@ class QwenPacketMultiTaskModel(nn.Module):
                     temperature=temperature,
                     positive_mode=flow_proto_positive,
                 )
+            if paired_consistency_weight > 0 and "paired_input_ids" in packet_batch:
+                paired_mask = packet_batch.get("paired_mask")
+                if paired_mask is None:
+                    paired_mask = torch.ones_like(labels, dtype=torch.bool)
+                else:
+                    paired_mask = paired_mask.bool()
+                if paired_mask.any():
+                    _, paired_projected, paired_logits = self.encode_packets(
+                        packet_batch["paired_input_ids"], packet_batch["paired_attention_mask"]
+                    )
+                    paired_consistency_loss = paired_view_consistency_loss(
+                        projected_embeddings[paired_mask],
+                        paired_projected[paired_mask],
+                        packet_logits[paired_mask],
+                        paired_logits[paired_mask],
+                        logit_kl_weight=paired_logit_kl_weight,
+                    )
+                    if paired_cls_weight > 0:
+                        paired_ce_each = F.cross_entropy(paired_logits[paired_mask], labels[paired_mask], reduction="none")
+                        paired_weights = weights[paired_mask] if weights is not None else None
+                        if paired_weights is not None:
+                            paired_cls_loss = (paired_ce_each * paired_weights).sum() / paired_weights.sum().clamp(min=1.0)
+                        else:
+                            paired_cls_loss = paired_ce_each.mean()
+                        pkt_cls_loss = pkt_cls_loss + paired_cls_weight * paired_cls_loss
 
-        loss = lm_loss + cls_weight * pkt_cls_loss + contrastive_weight * supcon_loss + flow_proto_weight * flow_proto_loss
+        loss = (
+            lm_loss
+            + cls_weight * pkt_cls_loss
+            + contrastive_weight * supcon_loss
+            + flow_proto_weight * flow_proto_loss
+            + paired_consistency_weight * paired_consistency_loss
+        )
         return Tower1LossOutput(
             loss,
             lm_loss,
             pkt_cls_loss,
             supcon_loss,
             flow_proto_loss,
+            paired_consistency_loss,
             packet_logits,
             packet_embeddings,
             projected_embeddings,
@@ -338,3 +375,35 @@ def packet_to_flow_prototype_loss(
 
     pos_logits = logits.masked_fill(~pos_mask, -1e9)
     return -(torch.logsumexp(pos_logits[valid], dim=1) - torch.logsumexp(logits[valid], dim=1)).mean()
+
+
+def paired_view_consistency_loss(
+    z: torch.Tensor,
+    paired_z: torch.Tensor,
+    logits: torch.Tensor,
+    paired_logits: torch.Tensor,
+    logit_kl_weight: float = 0.5,
+) -> torch.Tensor:
+    """Keep full-header and randomized/masked-header packet views close.
+
+    The representation term pulls projected packet embeddings together. The
+    symmetric KL term keeps class evidence stable without requiring the paired
+    view to be a separate expert. Both terms are differentiable zeros for empty
+    batches so callers can enable the loss conditionally.
+    """
+    if z.numel() == 0:
+        return logits.sum() * 0.0
+    z = F.normalize(z.float(), p=2, dim=-1)
+    paired_z = F.normalize(paired_z.float(), p=2, dim=-1)
+    rep_loss = (1.0 - (z * paired_z).sum(dim=-1)).mean()
+    if logit_kl_weight <= 0:
+        return rep_loss
+    p_log = F.log_softmax(logits.float(), dim=-1)
+    q_log = F.log_softmax(paired_logits.float(), dim=-1)
+    p = p_log.exp()
+    q = q_log.exp()
+    kl = 0.5 * (
+        F.kl_div(p_log, q, reduction="batchmean")
+        + F.kl_div(q_log, p, reduction="batchmean")
+    )
+    return rep_loss + float(logit_kl_weight) * kl
