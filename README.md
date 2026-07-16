@@ -2259,8 +2259,8 @@ Current fold-level status from the latest summary:
 VPN targets: accuracy >= 0.7400, macro-F1 >= 0.6500
   fold0: pass, acc=0.7488, macro-F1=0.7558
   fold1: weak, acc=0.6932, macro-F1=0.6759
-  fold2: weak, acc=0.7045, macro-F1=0.7012
-  mean: acc=0.7155, macro-F1=0.7109
+  fold2: weak, acc=0.7057, macro-F1=0.7026
+  mean: acc=0.7159, macro-F1=0.7114
   min:  acc=0.6932, macro-F1=0.6759
 
 TLS-120 targets: accuracy >= 0.7800, macro-F1 >= 0.7000
@@ -2374,6 +2374,15 @@ VPN fold2 + second label-free prior softcap:
   Fold2 now clears the macro-F1 target comfortably, but accuracy is still below
   the 0.74 fold target.
 
+VPN fold2 + safety-constrained trainable residual:
+  Although unconstrained trainable stacker/soft-gate experts overfit, a residual
+  fusion constrained to keep at least 90% of the current fold2 best is mildly
+  useful:
+  base=0.925, stacker=0.075, softgate=0.000
+  test acc=0.7057, macro-F1=0.7026.
+  The analogous fold1 residual does not improve accuracy, so the fold1 best
+  remains the focused pairwise + second prior result.
+
 VPN fold1/fold2 trainable stacker and soft expert gate check:
   A trainable logistic stacker over the current expert set reaches very high
   validation scores, but drops on the shared test set:
@@ -2387,7 +2396,7 @@ VPN fold1/fold2 trainable stacker and soft expert gate check:
   or target-shift guards before they can replace the safer prior/refinement loop.
 ```
 
-Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning plus label-free target-prior stabilization and local confusion refinement. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus a second prior pass pushes the VPN cross-fold macro-F1 minimum to `0.6759`. The remaining bottleneck is weak-fold accuracy, especially fold1 at `0.6932` and fold2 at `0.7045`. The next model iteration should move this post-hoc loop into a reusable trainable module: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold model selection that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
+Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning plus label-free target-prior stabilization and local confusion refinement. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus a second prior pass pushes the VPN cross-fold macro-F1 minimum to `0.6759`. The remaining bottleneck is weak-fold accuracy, especially fold1 at `0.6932` and fold2 at `0.7057`. The next model iteration should move this post-hoc loop into a reusable trainable module: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold model selection that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
 
 The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, safe prior, and validation-gated selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
 
