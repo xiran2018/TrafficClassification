@@ -2276,9 +2276,17 @@ VPN fold1 + paired full-header/randomized-IP-port consistency:
 VPN fold2 + message/header/port flow-statistics expert:
   selected random forest; test acc=0.6657, macro-F1=0.6264.
   It is the current fold2 best, but still below the target.
+
+VPN fold2 + paired full-header/randomized-IP-port consistency:
+  seq test acc=0.6591, macro-F1=0.6126
+  graph test acc=0.6675, macro-F1=0.6109
+  graph/seq fusion test acc=0.6591, macro-F1=0.6126
+  validation-gated selector falls back to the flow-statistics expert.
+  Interpretation: the paired branch slightly improves graph accuracy on fold2,
+  but it does not improve the fold2 macro-F1 target.
 ```
 
-Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning. The first positive evidence is paired full-header/randomized-IP-port consistency on fold1, which raises the weak-fold macro-F1 from `0.6030` to `0.6200`. The next model iteration should generalize this into a reusable endpoint-invariant branch: content-grouped or endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, and cross-fold model selection that penalizes target prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
+Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning. The first positive evidence is paired full-header/randomized-IP-port consistency on fold1, which raises the weak-fold macro-F1 from `0.6030` to `0.6200`; on fold2, the same branch slightly improves graph accuracy but is rejected by the validation-gated selector because macro-F1 is worse than the statistics expert. The next model iteration should generalize this into a reusable endpoint-invariant branch with learned/gated contribution: content-grouped or endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, and cross-fold model selection that penalizes target prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
 
 The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, safe prior, and validation-gated selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
 
