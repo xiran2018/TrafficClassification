@@ -2373,6 +2373,18 @@ VPN fold2 + second label-free prior softcap:
   test acc=0.7045, macro-F1=0.7012.
   Fold2 now clears the macro-F1 target comfortably, but accuracy is still below
   the 0.74 fold target.
+
+VPN fold1/fold2 trainable stacker and soft expert gate check:
+  A trainable logistic stacker over the current expert set reaches very high
+  validation scores, but drops on the shared test set:
+  fold1 stacker test acc=0.6764, macro-F1=0.6240
+  fold2 stacker test acc=0.6531, macro-F1=0.6109
+  A soft expert gate with stratified out-of-fold validation is also negative:
+  fold1 soft-gate test acc=0.6782, macro-F1=0.6518
+  fold2 soft-gate test acc=0.6352, macro-F1=0.6018
+  Interpretation: single-fold validation is too easy for trainable expert fusion.
+  Future trainable fusion/local-expert modules must include cross-fold stability
+  or target-shift guards before they can replace the safer prior/refinement loop.
 ```
 
 Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning plus label-free target-prior stabilization and local confusion refinement. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus a second prior pass pushes the VPN cross-fold macro-F1 minimum to `0.6759`. The remaining bottleneck is weak-fold accuracy, especially fold1 at `0.6932` and fold2 at `0.7045`. The next model iteration should move this post-hoc loop into a reusable trainable module: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold model selection that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
