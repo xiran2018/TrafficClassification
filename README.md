@@ -1284,6 +1284,57 @@ train/valid predictions or from an explicitly unlabeled target-domain protocol.
 The shared-test consensus JSON can be used for analysis or transductive
 ablation only if that protocol is clearly disclosed.
 
+Build paper-safe validation teachers from already evaluated validation
+predictions:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python build_consensus_distill_targets.py \
+    --input t1paired reasoningDataset/vpn-app/test_selector_fold1_t1paired_s80_search_valid_macro.json \
+    --input ipport reasoningDataset/vpn-app/test_selector_fold1_paired_ipport_search_valid_macro.json \
+    --input strongreg reasoningDataset/vpn-app/test_selector_fold1_strongreg_stats_search_valid_macro.json \
+    --split valid \
+    --mode auto_confidence \
+    --confidence_threshold 0.9 \
+    --min_teacher_confidence 0.55 \
+    --min_input_accuracy 0.90 \
+    --min_input_macro_f1 0.90 \
+    --output_json reasoningDataset/vpn-app/valid_consensus_distill_targets_fold1_robust_family.json
+
+conda run --no-capture-output -n llm-factory \
+  python build_consensus_distill_targets.py \
+    --input soft_gate reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json \
+    --input slot_stacker reasoningDataset/tls-120/test_stacker_unified_slot_tls120_confidence_valid_macro.json \
+    --input unified_selector reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json \
+    --split valid \
+    --mode auto_confidence \
+    --confidence_threshold 0.9 \
+    --min_teacher_confidence 0.45 \
+    --min_input_accuracy 0.78 \
+    --min_input_macro_f1 0.78 \
+    --output_json reasoningDataset/tls-120/valid_consensus_distill_targets_selector_family.json
+```
+
+Current teacher-building observations:
+
+```text
+VPN robust-family validation teacher:
+  output: reasoningDataset/vpn-app/valid_consensus_distill_targets_fold1_robust_family.json
+  selected_mode=log_mean, kept 298/352 validation flows after confidence filtering
+  validation accuracy=0.9530, macro-F1=0.9416
+
+TLS-120 selector-family validation teacher:
+  output: reasoningDataset/tls-120/valid_consensus_distill_targets_selector_family.json
+  selected_mode=log_mean, kept 2751/3455 validation flows after confidence filtering
+  validation accuracy=0.9004, macro-F1=0.8778
+```
+
+These are teacher targets, not new headline test results. The next run should
+train a Tower-2 student with `--distill_targets_json` and then evaluate the
+student on the shared test set and the cross-split summary. Avoid using
+near-perfect multi-split validation teachers as headline evidence unless a
+content-duplicate audit proves the split is clean.
+
 Example student training template once an out-of-fold teacher JSON has been
 created for matching training `flow_id` values:
 
