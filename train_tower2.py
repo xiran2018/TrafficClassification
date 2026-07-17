@@ -272,6 +272,37 @@ def load_distillation_targets(path: str, num_classes: int, device: str | torch.d
     return targets
 
 
+def load_distillation_class_priors(path: str, num_classes: int, device: str | torch.device) -> torch.Tensor | None:
+    """Average teacher distributions by true class for class-conditional distillation."""
+    if not path:
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    y_true = data.get("flow_y_true", [])
+    flow_prob = data.get("flow_prob", [])
+    if not y_true or not flow_prob or len(y_true) != len(flow_prob):
+        return None
+    sums = torch.zeros(num_classes, num_classes, dtype=torch.float32, device=device)
+    counts = torch.zeros(num_classes, dtype=torch.float32, device=device)
+    for label, prob in zip(y_true, flow_prob):
+        label = int(label)
+        if not (0 <= label < num_classes):
+            continue
+        p = torch.as_tensor(prob, dtype=torch.float32, device=device)
+        if p.numel() != num_classes:
+            continue
+        p = p.clamp(min=1e-8)
+        sums[label] += p / p.sum().clamp(min=1e-8)
+        counts[label] += 1.0
+    priors = torch.eye(num_classes, dtype=torch.float32, device=device)
+    present = counts > 0
+    if present.any():
+        priors[present] = sums[present] / counts[present].unsqueeze(-1).clamp(min=1.0)
+        priors[present] = priors[present].clamp(min=1e-8)
+        priors[present] = priors[present] / priors[present].sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    return priors
+
+
 def report_distillation_coverage(name: str, targets: Dict[str, torch.Tensor], flow_ids: Sequence[str]) -> None:
     if not targets:
         return
@@ -288,6 +319,21 @@ def report_distillation_coverage(name: str, targets: Dict[str, torch.Tensor], fl
     print("distillation_coverage " + json.dumps(msg, sort_keys=True), flush=True)
     if matched == 0:
         print("WARNING: distillation targets do not match any training flow_id; KL distillation will be inactive.", flush=True)
+
+
+def report_class_prior_distillation(name: str, priors: torch.Tensor | None) -> None:
+    if priors is None:
+        return
+    top1 = priors.argmax(dim=-1)
+    diag_mass = priors.diag()
+    msg = {
+        "scope": name,
+        "num_classes": int(priors.size(0)),
+        "mean_diag_mass": float(diag_mass.mean().detach().cpu()),
+        "min_diag_mass": float(diag_mass.min().detach().cpu()),
+        "non_identity_top1_classes": int((top1 != torch.arange(priors.size(0), device=priors.device)).sum().detach().cpu()),
+    }
+    print("distillation_class_prior " + json.dumps(msg, sort_keys=True), flush=True)
 
 
 class SeqDataset(Dataset):
@@ -542,6 +588,25 @@ def distillation_kl_loss(
         weights = weights / weights.mean().clamp(min=1e-8)
         per_sample = per_sample * weights
     return args.distill_weight * per_sample.mean() * (max(float(args.distill_temperature), 1e-6) ** 2)
+
+
+def class_prior_distillation_loss(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    class_priors: torch.Tensor | None,
+    args,
+) -> torch.Tensor:
+    if args.distill_class_prior_weight <= 0 or class_priors is None or logits.numel() == 0:
+        return logits.sum() * 0.0
+    valid = y >= 0
+    if not valid.any():
+        return logits.sum() * 0.0
+    selected_y = y[valid].long().clamp(min=0, max=class_priors.size(0) - 1)
+    teacher = class_priors.to(logits.device, dtype=logits.dtype).index_select(0, selected_y)
+    teacher = soften_prob_targets(teacher, args.distill_temperature)
+    temperature = max(float(args.distill_temperature), 1e-6)
+    student_log_prob = F.log_softmax(logits[valid] / temperature, dim=-1)
+    return args.distill_class_prior_weight * F.kl_div(student_log_prob, teacher, reduction="batchmean") * (temperature ** 2)
 
 
 def compute_class_weights(
@@ -893,6 +958,8 @@ def train_seq(args):
     maybe_load_init_checkpoint(args, model)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     report_distillation_coverage("train_seq", distill_targets, dataset_flow_ids(tr))
+    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    report_class_prior_distillation("train_seq", distill_class_priors)
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -905,6 +972,7 @@ def train_seq(args):
             out = model(x, mask)
             loss = regularized_classification_loss(out["logits"], y, class_weight, args)
             loss = loss + distillation_kl_loss(out["logits"], batch["flow_id"], distill_targets, args)
+            loss = loss + class_prior_distillation_loss(out["logits"], y, distill_class_priors, args)
             loss = loss + next_aux_loss(out, {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}, args.aux_weight)
             loss = loss + coherence_loss(out, batch["coherence_label"], args.coherence_weight)
             if not loss.requires_grad:
@@ -1040,6 +1108,8 @@ def train_seq_flow(args):
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, SeqDataset)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     report_distillation_coverage("train_seq_flow", distill_targets, group_flow_ids(tr_groups))
+    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    report_class_prior_distillation("train_seq_flow", distill_class_priors)
     sample = (tr_groups or va_groups)[0]["items"][0]
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
     confusion_weights = build_confusion_weights(
@@ -1151,6 +1221,7 @@ def train_seq_flow(args):
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = regularized_classification_loss(flow_logits, y, class_weight, args)
             loss = loss + distillation_kl_loss(flow_logits, flow_ids, distill_targets, args)
+            loss = loss + class_prior_distillation_loss(flow_logits, y, distill_class_priors, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
@@ -1324,6 +1395,8 @@ def train_graph(args):
     maybe_load_init_checkpoint(args, model)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     report_distillation_coverage("train_graph", distill_targets, dataset_flow_ids(tr))
+    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    report_class_prior_distillation("train_graph", distill_class_priors)
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -1341,6 +1414,7 @@ def train_graph(args):
             out = model(x, edge_index, edge_attr)
             loss = regularized_classification_loss(out["logits"], y, class_weight, args)
             loss = loss + distillation_kl_loss(out["logits"], [str(item.get("flow_id", idx))], distill_targets, args)
+            loss = loss + class_prior_distillation_loss(out["logits"], y, distill_class_priors, args)
             targets = {
                 "next_direction": item.get("next_direction", torch.tensor(-1)).view(1),
                 "next_length_bin": item.get("next_length_bin", torch.tensor(-1)).view(1),
@@ -1372,6 +1446,8 @@ def train_graph_flow(args):
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     report_distillation_coverage("train_graph_flow", distill_targets, group_flow_ids(tr_groups))
+    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    report_class_prior_distillation("train_graph_flow", distill_class_priors)
     sample = (tr_groups or va_groups)[0]["items"][0]
     edge_attr_dim = int(sample.get("edge_attr", torch.zeros((0, 4))).shape[1])
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
@@ -1523,6 +1599,7 @@ def train_graph_flow(args):
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = regularized_classification_loss(logits, y, class_weight, args)
             loss = loss + distillation_kl_loss(logits, flow_ids, distill_targets, args)
+            loss = loss + class_prior_distillation_loss(logits, y, distill_class_priors, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
@@ -1698,6 +1775,7 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "domain_adversarial_lambda": args.domain_adversarial_lambda,
         "distill_targets_json": args.distill_targets_json,
         "distill_weight": args.distill_weight,
+        "distill_class_prior_weight": args.distill_class_prior_weight,
         "distill_temperature": args.distill_temperature,
         "distill_min_confidence": args.distill_min_confidence,
         "distill_confidence_power": args.distill_confidence_power,
@@ -1774,6 +1852,7 @@ def main():
     ap.add_argument("--domain_adversarial_lambda", type=float, default=1.0, help="Gradient reversal strength for --view_domain_adversarial_weight.")
     ap.add_argument("--distill_targets_json", default="", help="Optional prediction/consensus JSON with flow_ids and flow_prob used as soft distillation targets.")
     ap.add_argument("--distill_weight", type=float, default=0.0, help="KL weight for consensus/self-distillation targets. 0 disables it.")
+    ap.add_argument("--distill_class_prior_weight", type=float, default=0.0, help="KL weight for class-conditional consensus priors averaged from teacher flow_y_true/flow_prob.")
     ap.add_argument("--distill_temperature", type=float, default=2.0, help="Temperature for probability-target distillation.")
     ap.add_argument("--distill_min_confidence", type=float, default=0.0, help="Ignore teacher targets whose max probability is below this confidence.")
     ap.add_argument("--distill_confidence_power", type=float, default=0.0, help="If >0, weight distillation samples by teacher max-probability^power.")
@@ -1811,6 +1890,8 @@ def main():
         print("WARNING: --distill_targets_json is set but --distill_weight <= 0, so distillation is disabled.")
     if args.distill_weight > 0 and not args.distill_targets_json:
         print("WARNING: --distill_weight > 0 but no --distill_targets_json was provided.")
+    if args.distill_class_prior_weight > 0 and not args.distill_targets_json:
+        print("WARNING: --distill_class_prior_weight > 0 but no --distill_targets_json was provided.")
     if args.model_type == "seq":
         train_seq_flow(args) if args.train_level == "flow" else train_seq(args)
     else:

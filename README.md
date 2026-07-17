@@ -1425,6 +1425,36 @@ seq fine-tune from existing split1 t1paired checkpoint:
   baseline seq split1 t1paired was 0.6675/0.6380, so distillation helps the seq
   branch and almost reaches the 0.65 macro-F1 target, but still trails the fold1
   post-processing best of 0.6944/0.6768.
+
+seq fine-tune with lower learning rate / weaker flow-id distillation:
+  output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_split1_t1paired_consensus_distill_ft_lr1e5_w002_e1.json
+  test accuracy=0.6603, macro-F1=0.6256
+  conclusion: negative; too little adaptation underuses the teacher signal.
+
+seq fine-tune with one epoch at the stronger setting:
+  output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_split1_t1paired_consensus_distill_ft_lr3e5_w005_e1.json
+  test accuracy=0.6633, macro-F1=0.6292
+  conclusion: negative; the previous 3-epoch result is better, so the gain is
+  not only a first-epoch perturbation.
+
+seq fine-tune with class-conditional consensus prior distillation:
+  output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_split1_t1paired_classprior_distill_ft.json
+  test accuracy=0.6818, macro-F1=0.6417
+  class-prior teacher stats: mean diagonal mass=0.7490, min diagonal mass=0.4679
+  conclusion: the class-conditional prior captures non-one-hot confusion
+  structure and is useful as a paper module, but this weight setting does not
+  beat direct flow-id distillation.
+
+flow aggregation re-evaluation of the best seq distillation checkpoint:
+  checkpoint pooling: 0.6830/0.6453
+  mean_logits: 0.6800/0.6427
+  mean_probs: 0.6800/0.6427
+  max_conf: 0.6788/0.6408
+  topk_logits: 0.6800/0.6427
+  vote: 0.6782/0.6412
+  conclusion: the learned multi-view flow head remains the best evaluation
+  aggregation for this checkpoint; the bottleneck is teacher coverage/stability,
+  not the final pooling rule.
 ```
 
 Interpretation for the next iteration: consensus distillation is useful as a
