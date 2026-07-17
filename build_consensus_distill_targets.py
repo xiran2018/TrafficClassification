@@ -118,6 +118,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", nargs=2, action="append", metavar=("NAME", "JSON"), required=True)
     ap.add_argument("--split", choices=["valid", "test"], default="valid")
+    ap.add_argument("--align", choices=["intersection", "union"], default="intersection", help="intersection fuses same-flow candidates; union builds OOF teachers from different validation folds.")
     ap.add_argument("--mode", choices=["mean", "log_mean", "vote", "vote_priority", "auto_confidence"], default="auto_confidence")
     ap.add_argument("--confidence_threshold", type=float, default=0.9)
     ap.add_argument("--min_teacher_confidence", type=float, default=0.0, help="Drop fused targets below this max probability.")
@@ -132,31 +133,50 @@ def main() -> None:
 
     named = [parse_input(raw) for raw in args.input]
     payloads = [(name, load_payload(path), path) for name, path in named]
-    id_sets = []
-    for _, data, _ in payloads:
-        ids, _, _ = extract_split(data, args.split)
-        id_sets.append(set(ids))
-    common = sorted(set.intersection(*id_sets))
-    if not common:
+    extracted = []
+    ids_by_input = []
+    for name, data, path in payloads:
+        ids, y, prob = extract_split(data, args.split)
+        index = {fid: i for i, fid in enumerate(ids)}
+        extracted.append({"name": name, "path": path, "ids": ids, "y": y, "prob": prob, "index": index})
+        ids_by_input.append(set(ids))
+    if args.align == "intersection":
+        selected_ids = sorted(set.intersection(*ids_by_input))
+    else:
+        selected_ids = sorted(set.union(*ids_by_input))
+    if not selected_ids:
         raise ValueError("No common flow ids across inputs.")
 
     probs = []
     y_ref = None
     inputs = []
-    for name, data, path in payloads:
-        y, prob = align_payload(data, args.split, common)
-        if y_ref is None:
-            y_ref = y
-        elif y is not None and y_ref is not None and not np.array_equal(y_ref, y):
-            raise ValueError(f"Labels do not align for input {name}.")
-        probs.append(prob)
+    for entry in extracted:
+        name = entry["name"]
+        path = entry["path"]
+        ids = entry["ids"]
+        y_all = entry["y"]
+        prob_all = entry["prob"]
+        index = entry["index"]
+        y = None
+        prob = None
+        if args.align == "intersection":
+            idx = [index[fid] for fid in selected_ids]
+            prob = normalize_prob(prob_all[idx])
+            y = None if y_all is None else y_all[idx]
+        if args.align == "intersection":
+            if y_ref is None:
+                y_ref = y
+            elif y is not None and y_ref is not None and not np.array_equal(y_ref, y):
+                raise ValueError(f"Labels do not align for input {name}.")
+            probs.append(prob)
         row = {
             "name": name,
             "path": path,
-            "mean_confidence": float(prob.max(axis=1).mean()),
+            "num_available_flows": len(ids),
+            "mean_confidence": float(prob_all.max(axis=1).mean()),
         }
-        if y is not None:
-            row["metrics"] = compute_metrics(y, prob)
+        if y_all is not None:
+            row["metrics"] = compute_metrics(y_all, prob_all)
             if row["metrics"]["accuracy"] < args.min_input_accuracy or row["metrics"]["macro_f1"] < args.min_input_macro_f1:
                 raise ValueError(
                     f"Input {name} is below teacher-quality floor: "
@@ -165,14 +185,37 @@ def main() -> None:
                 )
         inputs.append(row)
 
-    mode = select_mode(probs, args.mode, args.confidence_threshold)
-    fused = fuse_probs(probs, mode)
+    mode = select_mode(probs if probs else [entry["prob"] for entry in extracted], args.mode, args.confidence_threshold)
+    if args.align == "intersection":
+        fused = fuse_probs(probs, mode)
+        y_out = y_ref
+    else:
+        fused_rows = []
+        y_rows = []
+        for fid in selected_ids:
+            fid_probs = []
+            fid_labels = []
+            for entry in extracted:
+                idx = entry["index"].get(fid)
+                if idx is None:
+                    continue
+                fid_probs.append(entry["prob"][idx : idx + 1])
+                if entry["y"] is not None:
+                    fid_labels.append(int(entry["y"][idx]))
+            if not fid_probs:
+                continue
+            if len(set(fid_labels)) > 1:
+                raise ValueError(f"Conflicting labels for flow_id={fid}: {sorted(set(fid_labels))}")
+            fused_rows.append(fuse_probs(fid_probs, mode).squeeze(0))
+            y_rows.append(fid_labels[0] if fid_labels else -1)
+        fused = normalize_prob(np.stack(fused_rows, axis=0))
+        y_out = None if not y_rows or all(y < 0 for y in y_rows) else np.asarray(y_rows, dtype=np.int64)
     keep = np.ones(fused.shape[0], dtype=bool)
     if args.min_teacher_confidence > 0:
         keep = fused.max(axis=1) >= float(args.min_teacher_confidence)
-    kept_ids = [fid for fid, ok in zip(common, keep) if ok]
+    kept_ids = [fid for fid, ok in zip(selected_ids, keep) if ok]
     fused = fused[keep]
-    y_out = None if y_ref is None else y_ref[keep]
+    y_out = None if y_out is None else y_out[keep]
 
     metrics = compute_metrics(y_out, fused) if y_out is not None else {}
     config = {
@@ -184,7 +227,8 @@ def main() -> None:
         "min_input_accuracy": args.min_input_accuracy,
         "min_input_macro_f1": args.min_input_macro_f1,
         "num_inputs": len(inputs),
-        "num_common_flows": len(common),
+        "align": args.align,
+        "num_selected_flows": len(selected_ids),
         "num_output_flows": len(kept_ids),
         "mean_input_confidence": float(np.mean([row["mean_confidence"] for row in inputs])),
         "paper_safe_note": "valid split is suitable for supervised paper-safe distillation; test split is transductive only.",

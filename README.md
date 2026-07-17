@@ -1335,6 +1335,105 @@ student on the shared test set and the cross-split summary. Avoid using
 near-perfect multi-split validation teachers as headline evidence unless a
 content-duplicate audit proves the split is clean.
 
+For final-student experiments, merge Tower-2 train+valid datasets without
+deduplicating windows:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python merge_tower2_datasets.py \
+    --input reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1_t1paired_s80/seq_dataset.pt \
+    --input reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight_split1_t1paired_s80/seq_dataset.pt \
+    --output reasoningDataset/vpn-app/train_valid_tower2_rawproj_change_weight_split1_t1paired_s80/seq_dataset.pt \
+    --manifest_json reasoningDataset/vpn-app/train_valid_tower2_rawproj_change_weight_split1_t1paired_s80/seq_dataset_manifest.json
+
+conda run --no-capture-output -n llm-factory \
+  python merge_tower2_datasets.py \
+    --input reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1_t1paired_s80/graph_dataset.pt \
+    --input reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight_split1_t1paired_s80/graph_dataset.pt \
+    --output reasoningDataset/vpn-app/train_valid_tower2_rawproj_change_weight_split1_t1paired_s80/graph_dataset.pt \
+    --manifest_json reasoningDataset/vpn-app/train_valid_tower2_rawproj_change_weight_split1_t1paired_s80/graph_dataset_manifest.json
+```
+
+The merger defaults to `--dedupe none` because Tower-2 datasets contain multiple
+windows/items per flow. Deduplicating by `flow_id` would silently delete windows
+and hurt flow-level training.
+
+Cross-fold OOF teacher construction is now supported with `--align union`:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python build_consensus_distill_targets.py \
+    --input fold0 reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_reliability_safe_gain008_valid_macro.json \
+    --input fold1 reasoningDataset/vpn-app/test_refine_pairwise_fold1_currentbest_major_pairmass_prior_acc_cap017_vote.json \
+    --input fold2 reasoningDataset/vpn-app/test_prior_soften_fold2_currentbest_logmean_tempgrid_validfloor_acc.json \
+    --split valid \
+    --align union \
+    --mode auto_confidence \
+    --confidence_threshold 0.9 \
+    --min_teacher_confidence 0.55 \
+    --min_input_macro_f1 0.58 \
+    --output_json reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_currentbest.json
+
+conda run --no-capture-output -n llm-factory \
+  python build_consensus_distill_targets.py \
+    --input fold0 reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json \
+    --input fold1 reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_accuracy.json \
+    --input fold2 reasoningDataset/tls-120/test_selector_base_prior_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_accuracy.json \
+    --split valid \
+    --align union \
+    --mode auto_confidence \
+    --confidence_threshold 0.9 \
+    --min_teacher_confidence 0.45 \
+    --min_input_macro_f1 0.70 \
+    --output_json reasoningDataset/tls-120/valid_oof_consensus_distill_targets_crossfold_currentbest.json
+```
+
+OOF teacher observations:
+
+```text
+VPN cross-fold OOF teacher:
+  output: reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_currentbest.json
+  selected_mode=vote_priority, output flows=1056
+  OOF validation accuracy=0.6818, macro-F1=0.6922
+  caution: fold2 valid macro-F1 is only 0.5882, so this is an ablation-grade
+  teacher unless the weak fold is replaced by a stronger validation predictor.
+
+TLS-120 cross-fold OOF teacher:
+  output: reasoningDataset/tls-120/valid_oof_consensus_distill_targets_crossfold_currentbest.json
+  selected_mode=log_mean, kept 8160/10365 validation flows
+  OOF validation accuracy=0.8479, macro-F1=0.8230
+```
+
+VPN split1 t1paired distillation smoke results:
+
+```text
+from-scratch graph student on train+valid + fold1 robust teacher:
+  output: reasoningDataset/vpn-app/test_graph_metrics_flow_vpn_split1_t1paired_consensus_distill_smoke.json
+  test accuracy=0.6274, macro-F1=0.5754
+  conclusion: negative; from-scratch train+valid student underfits/overfits the
+  protocol and should not replace the current fold candidates.
+
+graph fine-tune from existing split1 t1paired checkpoint:
+  output: reasoningDataset/vpn-app/test_graph_metrics_flow_vpn_split1_t1paired_consensus_distill_ft.json
+  test accuracy=0.6722, macro-F1=0.6347
+  baseline graph split1 t1paired was 0.6549/0.6183, so distillation helps the
+  graph branch but does not beat the fold1 post-processing best.
+
+seq fine-tune from existing split1 t1paired checkpoint:
+  output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_split1_t1paired_consensus_distill_ft.json
+  test accuracy=0.6830, macro-F1=0.6453
+  baseline seq split1 t1paired was 0.6675/0.6380, so distillation helps the seq
+  branch and almost reaches the 0.65 macro-F1 target, but still trails the fold1
+  post-processing best of 0.6944/0.6768.
+```
+
+Interpretation for the next iteration: consensus distillation is useful as a
+single-model regularizer, but the current split1 train+valid data only matches
+352 of the 1056 cross-fold OOF teacher flows. A paper-grade distillation run
+must either build OOF teacher targets in the same embedding namespace as the
+student training set, or train separate fold students and distill them into a
+shared final model with an explicit cross-fold stability objective.
+
 Example student training template once an out-of-fold teacher JSON has been
 created for matching training `flow_id` values:
 
