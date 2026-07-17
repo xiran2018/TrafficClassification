@@ -1251,6 +1251,72 @@ ustc-app:
   note: 20 test flows only; use as cross-dataset framework evidence and continue improving representation learning
 ```
 
+Best-result snapshot:
+
+```text
+local git commit: ba38643 Add cross-fold consensus for stable traffic classification
+local git tag: best-crossfold-vpn7512-tls8461
+VPN headline: accuracy=0.7512, macro-F1=0.7522
+TLS-120 headline: accuracy=0.8461, macro-F1=0.8292
+```
+
+Next CCF-A-oriented iteration: consensus distillation.
+
+The current headline is strong, but reviewers may view a pure cross-fold
+consensus as an ensemble/post-processing result. The next stronger method is to
+distill consensus probabilities back into a deployable Tower-2 student. This
+turns cross-split agreement into a trainable regularizer instead of only a final
+fusion rule.
+
+`train_tower2.py` now supports optional soft-target distillation:
+
+```text
+--distill_targets_json PATH   JSON containing flow_ids + flow_prob
+--distill_weight FLOAT        KL weight; 0 disables distillation
+--distill_temperature FLOAT   soften teacher/student probabilities
+--distill_min_confidence FLOAT
+--distill_confidence_power FLOAT
+```
+
+Important paper-safety rule: do not train a supervised paper model on the shared
+test labels. For paper-safe distillation, build teacher JSONs from out-of-fold
+train/valid predictions or from an explicitly unlabeled target-domain protocol.
+The shared-test consensus JSON can be used for analysis or transductive
+ablation only if that protocol is clearly disclosed.
+
+Example student training template once an out-of-fold teacher JSON has been
+created for matching training `flow_id` values:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type graph \
+    --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
+    --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
+    --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_consensus_distill \
+    --num_classes 16 \
+    --epochs 30 \
+    --batch_size 16 \
+    --train_level flow \
+    --flow_pooling multi_view \
+    --select_metric flow_macro_f1 \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --distill_targets_json reasoningDataset/vpn-app/train_valid_oof_consensus_distill_targets.json \
+    --distill_weight 0.2 \
+    --distill_temperature 2.0 \
+    --distill_min_confidence 0.55 \
+    --distill_confidence_power 1.0 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --aux_weight 0 \
+    --coherence_weight 0
+```
+
 Reproduce the cross-fold consensus main results:
 
 ```bash

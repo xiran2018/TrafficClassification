@@ -250,6 +250,28 @@ def load_pt(path: str):
         return torch.load(path, map_location="cpu")
 
 
+def load_distillation_targets(path: str, num_classes: int, device: str | torch.device) -> Dict[str, torch.Tensor]:
+    """Load flow-id keyed soft targets from a prediction/consensus JSON file."""
+    if not path:
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    flow_ids = data.get("flow_ids", [])
+    flow_prob = data.get("flow_prob", [])
+    if not flow_ids or not flow_prob:
+        raise ValueError(f"{path} must contain flow_ids and flow_prob for distillation")
+    if len(flow_ids) != len(flow_prob):
+        raise ValueError(f"{path} has mismatched flow_ids/flow_prob lengths")
+    targets: Dict[str, torch.Tensor] = {}
+    for fid, prob in zip(flow_ids, flow_prob):
+        p = torch.as_tensor(prob, dtype=torch.float32, device=device)
+        if p.numel() != num_classes:
+            raise ValueError(f"{path} target for flow_id={fid} has {p.numel()} classes, expected {num_classes}")
+        p = p.clamp(min=1e-8)
+        targets[str(fid)] = p / p.sum().clamp(min=1e-8)
+    return targets
+
+
 class SeqDataset(Dataset):
     def __init__(self, path: str):
         self.data = load_pt(path)
@@ -459,6 +481,49 @@ def regularized_classification_loss(
         y,
         args.confidence_penalty_weight,
     )
+
+
+def soften_prob_targets(prob: torch.Tensor, temperature: float) -> torch.Tensor:
+    temperature = max(float(temperature), 1e-6)
+    if temperature == 1.0:
+        return prob
+    softened = prob.clamp(min=1e-8).pow(1.0 / temperature)
+    return softened / softened.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+
+def distillation_kl_loss(
+    logits: torch.Tensor,
+    flow_ids: Sequence[str],
+    targets: Dict[str, torch.Tensor],
+    args,
+) -> torch.Tensor:
+    if args.distill_weight <= 0 or not targets or logits.numel() == 0:
+        return logits.sum() * 0.0
+    selected_idx = []
+    selected_targets = []
+    selected_conf = []
+    for idx, flow_id in enumerate(flow_ids):
+        target = targets.get(str(flow_id))
+        if target is None:
+            continue
+        conf = float(target.max().detach().cpu().item())
+        if conf < args.distill_min_confidence:
+            continue
+        selected_idx.append(idx)
+        selected_targets.append(target)
+        selected_conf.append(conf)
+    if not selected_idx:
+        return logits.sum() * 0.0
+    idx_t = torch.tensor(selected_idx, dtype=torch.long, device=logits.device)
+    teacher = torch.stack(selected_targets, dim=0).to(logits.device, dtype=logits.dtype)
+    teacher = soften_prob_targets(teacher, args.distill_temperature)
+    student_log_prob = F.log_softmax(logits.index_select(0, idx_t) / max(float(args.distill_temperature), 1e-6), dim=-1)
+    per_sample = F.kl_div(student_log_prob, teacher, reduction="none").sum(dim=-1)
+    if args.distill_confidence_power > 0:
+        weights = torch.tensor(selected_conf, dtype=logits.dtype, device=logits.device).pow(args.distill_confidence_power)
+        weights = weights / weights.mean().clamp(min=1e-8)
+        per_sample = per_sample * weights
+    return args.distill_weight * per_sample.mean() * (max(float(args.distill_temperature), 1e-6) ** 2)
 
 
 def compute_class_weights(
@@ -800,6 +865,7 @@ def train_seq(args):
     sample = ds[0]
     model = FlowTransformerClassifier(sample["x"].shape[1], args.num_classes, args.hidden_dim, args.num_layers, args.num_heads, args.dropout).to(args.device)
     maybe_load_init_checkpoint(args, model)
+    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -811,6 +877,7 @@ def train_seq(args):
             mask, y = batch["mask"].to(args.device), batch["label"].to(args.device)
             out = model(x, mask)
             loss = regularized_classification_loss(out["logits"], y, class_weight, args)
+            loss = loss + distillation_kl_loss(out["logits"], batch["flow_id"], distill_targets, args)
             loss = loss + next_aux_loss(out, {k: v.to(args.device) if torch.is_tensor(v) else v for k, v in batch.items()}, args.aux_weight)
             loss = loss + coherence_loss(out, batch["coherence_label"], args.coherence_weight)
             if not loss.requires_grad:
@@ -944,6 +1011,7 @@ def train_seq_flow(args):
     ds = SeqDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, SeqDataset)
+    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     sample = (tr_groups or va_groups)[0]["items"][0]
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
     confusion_weights = build_confusion_weights(
@@ -989,11 +1057,13 @@ def train_seq_flow(args):
             windows = []
             owners = []
             labels = []
+            flow_ids = []
             paired_windows = []
             paired_owners = []
             paired_labels = []
             for flow_idx, group in enumerate(flow_batch):
                 labels.append(int(group["label"]))
+                flow_ids.append(str(group["flow_id"]))
                 for item in maybe_drop_windows(group["items"], args.window_dropout_prob):
                     windows.append(item)
                     owners.append(flow_idx)
@@ -1052,6 +1122,7 @@ def train_seq_flow(args):
             flow_embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = regularized_classification_loss(flow_logits, y, class_weight, args)
+            loss = loss + distillation_kl_loss(flow_logits, flow_ids, distill_targets, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
@@ -1223,6 +1294,7 @@ def train_graph(args):
         dropout=args.dropout,
     ).to(args.device)
     maybe_load_init_checkpoint(args, model)
+    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -1239,6 +1311,7 @@ def train_graph(args):
             y = torch.tensor([int(item.get("label", -1))], dtype=torch.long, device=args.device)
             out = model(x, edge_index, edge_attr)
             loss = regularized_classification_loss(out["logits"], y, class_weight, args)
+            loss = loss + distillation_kl_loss(out["logits"], [str(item.get("flow_id", idx))], distill_targets, args)
             targets = {
                 "next_direction": item.get("next_direction", torch.tensor(-1)).view(1),
                 "next_length_bin": item.get("next_length_bin", torch.tensor(-1)).view(1),
@@ -1268,6 +1341,7 @@ def train_graph_flow(args):
     ds = GraphDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
+    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     sample = (tr_groups or va_groups)[0]["items"][0]
     edge_attr_dim = int(sample.get("edge_attr", torch.zeros((0, 4))).shape[1])
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
@@ -1333,6 +1407,7 @@ def train_graph_flow(args):
             multi_view_gates = []
             stat_logits = []
             labels = []
+            flow_ids = []
             for group in flow_batch:
                 window_embs = []
                 window_logits = []
@@ -1377,6 +1452,7 @@ def train_graph_flow(args):
                         pooled_aug = flow_head(torch.stack(window_embs_aug, dim=0), window_logits=torch.stack(window_logits_aug, dim=0))
                         flow_logits_aug.append(pooled_aug["logits"])
                     labels.append(int(group["label"]))
+                    flow_ids.append(str(group["flow_id"]))
                     paired_group = paired_groups.get(str(group["flow_id"]))
                     if paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (
                         args.paired_view_weight > 0
@@ -1416,6 +1492,7 @@ def train_graph_flow(args):
             embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
             loss = regularized_classification_loss(logits, y, class_weight, args)
+            loss = loss + distillation_kl_loss(logits, flow_ids, distill_targets, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
@@ -1589,6 +1666,11 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "paired_consistency_weight": args.paired_consistency_weight,
         "view_domain_adversarial_weight": args.view_domain_adversarial_weight,
         "domain_adversarial_lambda": args.domain_adversarial_lambda,
+        "distill_targets_json": args.distill_targets_json,
+        "distill_weight": args.distill_weight,
+        "distill_temperature": args.distill_temperature,
+        "distill_min_confidence": args.distill_min_confidence,
+        "distill_confidence_power": args.distill_confidence_power,
     }
     if edge_attr_dim is not None:
         payload["edge_attr_dim"] = edge_attr_dim
@@ -1660,6 +1742,11 @@ def main():
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired flow logits.")
     ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0, help="Adversarially remove clean-vs-paired view information from flow embeddings in --train_level flow.")
     ap.add_argument("--domain_adversarial_lambda", type=float, default=1.0, help="Gradient reversal strength for --view_domain_adversarial_weight.")
+    ap.add_argument("--distill_targets_json", default="", help="Optional prediction/consensus JSON with flow_ids and flow_prob used as soft distillation targets.")
+    ap.add_argument("--distill_weight", type=float, default=0.0, help="KL weight for consensus/self-distillation targets. 0 disables it.")
+    ap.add_argument("--distill_temperature", type=float, default=2.0, help="Temperature for probability-target distillation.")
+    ap.add_argument("--distill_min_confidence", type=float, default=0.0, help="Ignore teacher targets whose max probability is below this confidence.")
+    ap.add_argument("--distill_confidence_power", type=float, default=0.0, help="If >0, weight distillation samples by teacher max-probability^power.")
     ap.add_argument("--valid_ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -1690,6 +1777,10 @@ def main():
         print("WARNING: --paired_view_dataset is set but paired losses are both 0.")
     if args.view_domain_adversarial_weight > 0 and not args.paired_view_dataset:
         print("WARNING: --view_domain_adversarial_weight requires --paired_view_dataset and will be inactive.")
+    if args.distill_targets_json and args.distill_weight <= 0:
+        print("WARNING: --distill_targets_json is set but --distill_weight <= 0, so distillation is disabled.")
+    if args.distill_weight > 0 and not args.distill_targets_json:
+        print("WARNING: --distill_weight > 0 but no --distill_targets_json was provided.")
     if args.model_type == "seq":
         train_seq_flow(args) if args.train_level == "flow" else train_seq(args)
     else:
