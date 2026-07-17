@@ -1404,6 +1404,43 @@ TLS-120 cross-fold OOF teacher:
   OOF validation accuracy=0.8479, macro-F1=0.8230
 ```
 
+OOF union student ablations:
+
+```text
+OOF union train set:
+  output dataset: reasoningDataset/vpn-app/train_valid_tower2_rawproj_change_weight_oof_union/seq_dataset.pt
+  inputs: fold0/fold1/fold2 train+valid seq datasets from the same rawproj_change_weight family
+  output items=5185, unique flows=3161
+  OOF current-best teacher target coverage=1056/1056 targets, 1056/3161 student flows
+
+current-best OOF teacher student:
+  teacher: reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_currentbest.json
+  checkpoint: checkpoints/tower2_seq_flow_vpn_oof_union_consensus_distill_ablation/best.pt
+  test output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_oof_union_consensus_distill_ablation.json
+  test accuracy=0.6675, macro-F1=0.6330
+  conclusion: negative; better flow-id coverage alone is insufficient because
+  the teacher contains a weak fold2 validation source.
+
+high-quality OOF teacher:
+  teacher: reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_high_quality.json
+  validation accuracy=0.9631, macro-F1=0.9631
+  class-prior mean diagonal mass=0.9631, min diagonal mass=0.8333
+  test output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_oof_union_high_quality_distill_ablation.json
+  test accuracy=0.6316, macro-F1=0.5914
+  conclusion: negative; high validation accuracy with near-one-hot teacher
+  probabilities amplifies validation-specific bias and hurts shared-test
+  generalization.
+
+softened high-quality OOF teacher:
+  teacher: reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_high_quality_logmean.json
+  validation accuracy=0.9631, macro-F1=0.9631, avg confidence=0.9541
+  train temperature=4.0, distill_weight=0.03, class_prior_weight=0.01
+  test output: reasoningDataset/vpn-app/test_seq_metrics_flow_vpn_oof_union_high_quality_logmean_distill_ablation.json
+  test accuracy=0.6358, macro-F1=0.5973
+  conclusion: still negative; the main issue is validation/test shift in the
+  teacher, not only teacher overconfidence.
+```
+
 VPN split1 t1paired distillation smoke results:
 
 ```text
