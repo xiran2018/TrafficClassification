@@ -272,6 +272,24 @@ def load_distillation_targets(path: str, num_classes: int, device: str | torch.d
     return targets
 
 
+def report_distillation_coverage(name: str, targets: Dict[str, torch.Tensor], flow_ids: Sequence[str]) -> None:
+    if not targets:
+        return
+    unique_ids = sorted(set(map(str, flow_ids)))
+    matched = sum(1 for fid in unique_ids if fid in targets)
+    ratio = matched / max(1, len(unique_ids))
+    msg = {
+        "scope": name,
+        "target_count": len(targets),
+        "unique_flow_count": len(unique_ids),
+        "matched_flow_count": matched,
+        "coverage": ratio,
+    }
+    print("distillation_coverage " + json.dumps(msg, sort_keys=True), flush=True)
+    if matched == 0:
+        print("WARNING: distillation targets do not match any training flow_id; KL distillation will be inactive.", flush=True)
+
+
 class SeqDataset(Dataset):
     def __init__(self, path: str):
         self.data = load_pt(path)
@@ -566,6 +584,14 @@ def dataset_labels(ds: Dataset):
         if label >= 0:
             labels.append(label)
     return labels
+
+
+def dataset_flow_ids(ds: Dataset) -> List[str]:
+    return [str(ds[i].get("flow_id", i)) for i in range(len(ds))]
+
+
+def group_flow_ids(groups: Sequence[dict]) -> List[str]:
+    return [str(group["flow_id"]) for group in groups]
 
 
 def parse_label_groups(spec: str, num_classes: int) -> List[List[int]]:
@@ -866,6 +892,7 @@ def train_seq(args):
     model = FlowTransformerClassifier(sample["x"].shape[1], args.num_classes, args.hidden_dim, args.num_layers, args.num_heads, args.dropout).to(args.device)
     maybe_load_init_checkpoint(args, model)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    report_distillation_coverage("train_seq", distill_targets, dataset_flow_ids(tr))
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -1012,6 +1039,7 @@ def train_seq_flow(args):
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, SeqDataset)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    report_distillation_coverage("train_seq_flow", distill_targets, group_flow_ids(tr_groups))
     sample = (tr_groups or va_groups)[0]["items"][0]
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
     confusion_weights = build_confusion_weights(
@@ -1295,6 +1323,7 @@ def train_graph(args):
     ).to(args.device)
     maybe_load_init_checkpoint(args, model)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    report_distillation_coverage("train_graph", distill_targets, dataset_flow_ids(tr))
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
@@ -1342,6 +1371,7 @@ def train_graph_flow(args):
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    report_distillation_coverage("train_graph_flow", distill_targets, group_flow_ids(tr_groups))
     sample = (tr_groups or va_groups)[0]["items"][0]
     edge_attr_dim = int(sample.get("edge_attr", torch.zeros((0, 4))).shape[1])
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
