@@ -388,6 +388,8 @@ def main() -> None:
     ap.add_argument("--bootstrap_min_win_rate", type=float, default=0.0, help="Fallback unless selected candidate beats base in at least this fraction of bootstrap samples.")
     ap.add_argument("--bootstrap_min_gain_quantile", type=float, default=-1.0, help="Fallback unless the bootstrap gain quantile is at least this value.")
     ap.add_argument("--max_prediction_change_rate", type=float, default=1.0, help="Fallback if selected test predictions differ from the base input by more than this unlabeled target fraction.")
+    ap.add_argument("--max_prediction_js_divergence", type=float, default=1.0, help="Fallback if selected test prediction-distribution JS divergence from base is larger than this value.")
+    ap.add_argument("--base_input", default="", help="Input name used as the base/fallback expert. Defaults to the first input after slot alignment.")
     ap.add_argument(
         "--calibration_penalty_weight",
         type=float,
@@ -415,6 +417,12 @@ def main() -> None:
     named_payloads = [(name, load_payload(path), path) for name, path in args.input]
     unified_expert_slots = parse_name_list(args.unified_expert_slots)
     named_payloads, input_slot_status = apply_unified_expert_slots(named_payloads, unified_expert_slots)
+    if args.base_input:
+        names = [name for name, _, _ in named_payloads]
+        if args.base_input not in names:
+            raise ValueError(f"--base_input={args.base_input} is not one of selector inputs after slot alignment: {names}")
+        base_item = named_payloads[names.index(args.base_input)]
+        named_payloads = [base_item] + [item for item in named_payloads if item[0] != args.base_input]
     valid_common = sorted(set.intersection(*(set(map(str, data["valid_flow_ids"])) for _, data, _ in named_payloads)))
     test_common = sorted(set.intersection(*(set(map(str, data["flow_ids"])) for _, data, _ in named_payloads)))
     if not valid_common or not test_common:
@@ -684,7 +692,10 @@ def main() -> None:
                 or bootstrap_summary["gain_quantile"] < args.bootstrap_min_gain_quantile
             )
         shift_summary = target_shift_guard(candidate[5], base_candidate[5])
-        shift_reject = shift_summary["prediction_change_rate"] > args.max_prediction_change_rate
+        shift_reject = (
+            shift_summary["prediction_change_rate"] > args.max_prediction_change_rate
+            or shift_summary["prediction_js_divergence"] > args.max_prediction_js_divergence
+        )
         gain_reject = selected_gain < args.min_valid_gain_over_base
         rank_summary = rank_bootstrap_summary(candidate) if args.rank_metric.startswith("bootstrap_") else None
         if gain_reject or bootstrap_reject or shift_reject:
@@ -702,6 +713,7 @@ def main() -> None:
                     "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
                     "target_shift_guard": shift_summary,
                     "max_prediction_change_rate": args.max_prediction_change_rate,
+                    "max_prediction_js_divergence": args.max_prediction_js_divergence,
                     "rejected": candidate[1],
                     "reject_reasons": {
                         "gain": gain_reject,
@@ -720,6 +732,8 @@ def main() -> None:
             accepted_row["rank_bootstrap_guard"] = rank_summary
         accepted_row["bootstrap_guard"] = bootstrap_summary
         accepted_row["target_shift_guard"] = shift_summary
+        accepted_row["max_prediction_change_rate"] = args.max_prediction_change_rate
+        accepted_row["max_prediction_js_divergence"] = args.max_prediction_js_divergence
         if selected_rejections:
             accepted_row["rejected_before_accept"] = selected_rejections[:5]
         selected_candidate = (candidate[0], accepted_row, candidate[2], candidate[3], candidate[4], candidate[5])
@@ -790,6 +804,8 @@ def main() -> None:
             "bootstrap_min_win_rate": args.bootstrap_min_win_rate,
             "bootstrap_min_gain_quantile": args.bootstrap_min_gain_quantile,
             "max_prediction_change_rate": args.max_prediction_change_rate,
+            "max_prediction_js_divergence": args.max_prediction_js_divergence,
+            "base_input": named_payloads[0][0],
             "calibration_penalty_weight": args.calibration_penalty_weight,
             "calibration_penalty_metric": args.calibration_penalty_metric,
         },

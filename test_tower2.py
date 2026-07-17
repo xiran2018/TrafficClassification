@@ -57,6 +57,9 @@ def load_model(ckpt_path: str, device: str):
             flow_transformer_layers=ckpt.get("flow_transformer_layers", 1),
             flow_transformer_heads=ckpt.get("flow_transformer_heads", 4),
             dropout=ckpt.get("dropout", 0.1),
+            flow_stat_meta_dim=ckpt.get("meta_feature_dim", 0),
+            flow_stat_expert_weight=ckpt.get("flow_stat_expert_weight", 0.0),
+            flow_stat_aux_weight=ckpt.get("flow_stat_aux_weight", 0.0),
         )
         flow_head.load_state_dict(ckpt["flow_head_state"])
         flow_head.to(device).eval()
@@ -67,11 +70,12 @@ def load_model(ckpt_path: str, device: str):
 def predict_seq(model, dataset_path: str, device: str, batch_size: int):
     ds = SeqDataset(dataset_path)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_seq)
-    y_true, y_pred, flow_ids, logits_all, emb_all = [], [], [], [], []
+    y_true, y_pred, flow_ids, logits_all, emb_all, x_all = [], [], [], [], [], []
     for batch in dl:
         out = model(batch["x"].to(device), batch["mask"].to(device))
         logits = out["logits"].cpu()
         emb = out["embedding"].cpu()
+        x_cpu = batch["x"].cpu()
         labels = batch["label"]
         for i in range(logits.size(0)):
             if int(labels[i]) < 0:
@@ -81,13 +85,14 @@ def predict_seq(model, dataset_path: str, device: str, batch_size: int):
             flow_ids.append(batch["flow_id"][i])
             logits_all.append(logits[i].numpy())
             emb_all.append(emb[i].numpy())
-    return y_true, y_pred, flow_ids, logits_all, emb_all
+            x_all.append(x_cpu[i].numpy())
+    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all
 
 
 @torch.no_grad()
 def predict_graph(model, dataset_path: str, device: str):
     ds = GraphDataset(dataset_path)
-    y_true, y_pred, flow_ids, logits_all, emb_all = [], [], [], [], []
+    y_true, y_pred, flow_ids, logits_all, emb_all, x_all = [], [], [], [], [], []
     for item in ds:
         label = int(item.get("label", -1))
         if label < 0:
@@ -99,7 +104,8 @@ def predict_graph(model, dataset_path: str, device: str):
         flow_ids.append(str(item.get("flow_id", "")))
         logits_all.append(logits)
         emb_all.append(out["embedding"].cpu().numpy())
-    return y_true, y_pred, flow_ids, logits_all, emb_all
+        x_all.append(item["x"].cpu().numpy())
+    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all
 
 
 def aggregate_by_flow(
@@ -107,6 +113,7 @@ def aggregate_by_flow(
     flow_ids,
     logits_all,
     emb_all=None,
+    x_all=None,
     flow_head=None,
     device: str = "cpu",
     class_to_coarse=None,
@@ -117,14 +124,18 @@ def aggregate_by_flow(
 ):
     buckets = defaultdict(list)
     emb_buckets = defaultdict(list)
+    x_buckets = defaultdict(list)
     labels = {}
     for i, (y, fid, logit) in enumerate(zip(y_true, flow_ids, logits_all)):
         buckets[fid].append(logit)
         if emb_all is not None:
             emb_buckets[fid].append(emb_all[i])
+        if x_all is not None:
+            x_buckets[fid].append(x_all[i])
         labels[fid] = y
     flow_true, flow_pred, out_flow_ids, flow_logits_all = [], [], [], []
     multi_view_gates = []
+    stat_gates = []
     for fid, arrs in buckets.items():
         if flow_head is None or flow_eval_pooling != "checkpoint":
             pooling = "mean_logits" if flow_eval_pooling == "checkpoint" else flow_eval_pooling
@@ -132,9 +143,12 @@ def aggregate_by_flow(
         else:
             emb = torch.tensor(np.stack(emb_buckets[fid], axis=0), dtype=torch.float32, device=device)
             win_logits = torch.tensor(np.stack(arrs, axis=0), dtype=torch.float32, device=device)
-            pooled = flow_head(emb, window_logits=win_logits)
+            win_x = [torch.tensor(x, dtype=torch.float32, device=device) for x in x_buckets.get(fid, [])]
+            pooled = flow_head(emb, window_logits=win_logits, window_x=win_x)
             if pooled.get("multi_view_gate") is not None:
                 multi_view_gates.append(pooled["multi_view_gate"].detach().cpu().numpy())
+            if pooled.get("stat_gate") is not None:
+                stat_gates.append(float(pooled["stat_gate"].detach().cpu()))
             logits = pooled["logits"]
             if hierarchical_mode != "expert":
                 logits = apply_hierarchical_logits(
@@ -163,7 +177,17 @@ def aggregate_by_flow(
             "effective_branches_mean": float(np.exp(entropy).mean()),
             "num_flows": int(gate_arr.shape[0]),
         }
-    return flow_true, flow_pred, out_flow_ids, flow_logits_all, gate_summary
+    stat_gate_summary = None
+    if stat_gates:
+        stat_arr = np.asarray(stat_gates, dtype=np.float64)
+        stat_gate_summary = {
+            "mean": float(stat_arr.mean()),
+            "std": float(stat_arr.std()),
+            "min": float(stat_arr.min()),
+            "max": float(stat_arr.max()),
+            "num_flows": int(stat_arr.size),
+        }
+    return flow_true, flow_pred, out_flow_ids, flow_logits_all, gate_summary, stat_gate_summary
 
 
 def softmax_np(x: np.ndarray) -> np.ndarray:
@@ -256,18 +280,19 @@ def main():
     if ckpt.get("num_coarse_classes", 0) > 0:
         class_to_coarse, _ = build_class_to_coarse(ckpt.get("coarse_groups", "vpn_app"), ckpt["num_classes"], args.device)
     if ckpt["model_type"] == "seq":
-        y_true, y_pred, flow_ids, logits_all, emb_all = predict_seq(model, args.dataset, args.device, args.batch_size)
+        y_true, y_pred, flow_ids, logits_all, emb_all, x_all = predict_seq(model, args.dataset, args.device, args.batch_size)
     else:
-        y_true, y_pred, flow_ids, logits_all, emb_all = predict_graph(model, args.dataset, args.device)
+        y_true, y_pred, flow_ids, logits_all, emb_all, x_all = predict_graph(model, args.dataset, args.device)
 
     window_prob = softmax_np(np.stack(logits_all, axis=0)) if logits_all else np.zeros((0, ckpt["num_classes"]))
     window_metrics = compute_metrics(y_true, y_pred)
     window_metrics["calibration"] = calibration_metrics(y_true, window_prob)
-    flow_true, flow_pred, out_flow_ids, flow_logits_all, multi_view_gate_summary = aggregate_by_flow(
+    flow_true, flow_pred, out_flow_ids, flow_logits_all, multi_view_gate_summary, stat_gate_summary = aggregate_by_flow(
         y_true,
         flow_ids,
         logits_all,
         emb_all=emb_all,
+        x_all=x_all,
         flow_head=flow_head,
         device=args.device,
         class_to_coarse=class_to_coarse,
@@ -286,6 +311,7 @@ def main():
             "flow_eval_pooling": args.flow_eval_pooling,
             "flow_eval_topk": args.flow_eval_topk,
             "multi_view_gate": multi_view_gate_summary,
+            "flow_stat_gate": stat_gate_summary,
         },
     }
     print(json.dumps(metrics, indent=2))

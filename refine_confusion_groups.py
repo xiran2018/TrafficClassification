@@ -180,6 +180,7 @@ def main() -> None:
     ap.add_argument("--threshold_grid", default="0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9")
     ap.add_argument("--alpha_grid", default="0.25,0.5,0.75,1.0")
     ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
+    ap.add_argument("--final_n_estimators", type=int, default=0, help="Final train+valid refit tree count. 0 keeps the historical max(n_estimators, 800).")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
@@ -200,9 +201,13 @@ def main() -> None:
     test_prob = np.asarray(base["flow_prob"], dtype=np.float32)
     num_classes = test_prob.shape[1]
 
+    print(f"loading train features: {args.train_index}", flush=True)
     x_train, y_train, _ = load_split(args.train_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
+    print(f"loading valid features: {args.valid_index}", flush=True)
     x_valid_all, y_valid_all, valid_feature_fids = load_split(args.valid_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
+    print(f"loading test features: {args.test_index}", flush=True)
     x_test_all, y_test_all, test_feature_fids = load_split(args.test_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
+    print(f"loaded features: train={x_train.shape}, valid={x_valid_all.shape}, test={x_test_all.shape}", flush=True)
     x_valid, y_valid_aligned = align_features(x_valid_all, y_valid_all, valid_feature_fids, valid_fids)
     x_test, y_test_aligned = align_features(x_test_all, y_test_all, test_feature_fids, test_fids)
     if not np.array_equal(y_valid, y_valid_aligned) or not np.array_equal(y_test, y_test_aligned):
@@ -211,13 +216,15 @@ def main() -> None:
     valid_group_probs = []
     test_group_probs = []
     group_reports = []
-    for name, group_ids in groups:
+    for idx, (name, group_ids) in enumerate(groups, start=1):
+        print(f"training group {idx}/{len(groups)}: {name}", flush=True)
         train_model, selected, reports = select_group_model(x_train, y_train, x_valid, y_valid, group_ids, args)
         valid_group_probs.append(model_group_prob(train_model, x_valid, num_classes))
 
+        final_n_estimators = args.final_n_estimators if args.final_n_estimators > 0 else max(args.n_estimators, 800)
         final_model = make_model(
             selected["kind"],
-            max(args.n_estimators, 800),
+            final_n_estimators,
             selected["max_depth"],
             selected["min_samples_leaf"],
             selected["class_weight"],

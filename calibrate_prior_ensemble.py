@@ -128,10 +128,21 @@ def normalize_prob(prob: np.ndarray) -> np.ndarray:
     return prob / np.maximum(prob.sum(axis=1, keepdims=True), 1e-12)
 
 
-def candidate_key(method: str, strength: float, gate_mode: str, gate_threshold: float) -> str:
+def temperature_scale_prob(prob: np.ndarray, temperature: float) -> np.ndarray:
+    prob = normalize_prob(prob)
+    temperature = max(float(temperature), 1e-12)
+    if abs(temperature - 1.0) < 1e-12:
+        return prob
+    logp = np.log(prob.clip(min=1e-12)) / temperature
+    logp = logp - logp.max(axis=1, keepdims=True)
+    return normalize_prob(np.exp(logp))
+
+
+def candidate_key(method: str, strength: float, gate_mode: str, gate_threshold: float, input_temperature: float = 1.0) -> str:
+    prefix = "" if abs(float(input_temperature) - 1.0) < 1e-12 else f"temp{input_temperature:g}|"
     if gate_mode == "none":
-        return f"{method}:{strength:g}"
-    return f"{method}:{strength:g}|{gate_mode}|{gate_threshold:g}"
+        return f"{prefix}{method}:{strength:g}"
+    return f"{prefix}{method}:{strength:g}|{gate_mode}|{gate_threshold:g}"
 
 
 def make_candidates(
@@ -145,6 +156,7 @@ def make_candidates(
     gate_thresholds: List[float],
     ridge: float,
     select_metric: str,
+    input_temperature: float = 1.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     num_classes = test_prob.shape[1]
     pred_valid = valid_prob.argmax(axis=1)
@@ -184,7 +196,8 @@ def make_candidates(
                     test_metrics = compute_metrics(y_test.tolist(), test_pred.tolist())
                     candidates.append(
                         {
-                            "key": candidate_key(method, strength, gate_mode, gate_threshold),
+                            "key": candidate_key(method, strength, gate_mode, gate_threshold, input_temperature),
+                            "input_temperature": input_temperature,
                             "method": method,
                             "strength": strength,
                             "gate_mode": gate_mode,
@@ -295,6 +308,25 @@ def select_pool(candidates: List[Dict[str, Any]], strategy: str, select_metric: 
     return ranked[: max(1, top_k)]
 
 
+def apply_valid_floor(
+    candidates: List[Dict[str, Any]],
+    select_metric: str,
+    min_valid_metric: float | None,
+    min_valid_gain_over_identity: float | None,
+) -> List[Dict[str, Any]]:
+    floor = min_valid_metric
+    if min_valid_gain_over_identity is not None:
+        identity = next((c for c in candidates if c.get("method") == "identity"), None)
+        if identity is not None:
+            identity_score = float(identity["valid_metrics"][select_metric])
+            gain_floor = identity_score + float(min_valid_gain_over_identity)
+            floor = gain_floor if floor is None else max(float(floor), gain_floor)
+    if floor is None:
+        return candidates
+    kept = [c for c in candidates if float(c["valid_metrics"][select_metric]) >= float(floor)]
+    return kept or candidates
+
+
 def ensemble_prob(pool: List[Dict[str, Any]], split: str, mode: str, temperature: float) -> np.ndarray:
     probs = [c[f"{split}_prob"] for c in pool]
     if mode == "mean":
@@ -334,6 +366,9 @@ def main() -> None:
     ap.add_argument("--hard_prior_kl_cap", type=float, default=0.017)
     ap.add_argument("--ensemble_mode", choices=["mean", "log_mean", "vote"], default="mean")
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--input_temperatures", default="1.0", help="Comma-separated temperatures applied to input probabilities before target-prior candidate generation.")
+    ap.add_argument("--min_valid_metric", type=float, default=None, help="Keep only candidates with valid select metric at least this value before pool selection.")
+    ap.add_argument("--min_valid_gain_over_identity", type=float, default=None, help="Keep only candidates whose valid select metric is at least identity + this value when identity is present.")
     ap.add_argument("--include_identity_candidate", action="store_true", help="Include the uncalibrated input probabilities as a safe fallback candidate.")
     ap.add_argument("--oracle_diagnostics", action="store_true", help="Also report test-label oracle single/pool metrics for diagnosis only.")
     ap.add_argument("--output_json", default="")
@@ -349,22 +384,39 @@ def main() -> None:
     strengths = [float(x) for x in args.strengths.split(",") if x.strip()]
     gate_modes = [x.strip() for x in args.gate_modes.split(",") if x.strip()]
     gate_thresholds = [float(x) for x in args.gate_thresholds.split(",") if x.strip()]
+    input_temperatures = [float(x) for x in args.input_temperatures.split(",") if x.strip()]
 
-    candidates, context = make_candidates(
-        valid_prob,
-        test_prob,
-        y_valid,
-        y_test,
-        methods,
-        strengths,
-        gate_modes,
-        gate_thresholds,
-        args.ridge,
-        args.select_metric,
-    )
+    candidates = []
+    contexts = []
+    for input_temperature in input_temperatures:
+        valid_base = temperature_scale_prob(valid_prob, input_temperature)
+        test_base = temperature_scale_prob(test_prob, input_temperature)
+        temp_candidates, temp_context = make_candidates(
+            valid_base,
+            test_base,
+            y_valid,
+            y_test,
+            methods,
+            strengths,
+            gate_modes,
+            gate_thresholds,
+            args.ridge,
+            args.select_metric,
+            input_temperature=input_temperature,
+        )
+        candidates.extend(temp_candidates)
+        temp_context["input_temperature"] = input_temperature
+        contexts.append(temp_context)
+    context = contexts[0] if len(contexts) == 1 else {"temperature_contexts": contexts, "select_metric": args.select_metric}
     if args.include_identity_candidate:
         candidates.append(identity_candidate(valid_prob, test_prob, y_valid, y_test, test_prob.shape[1]))
-    pool = select_pool(candidates, args.pool_strategy, args.select_metric, args.top_k, args.hard_prior_kl_cap)
+    candidates_for_pool = apply_valid_floor(
+        candidates,
+        args.select_metric,
+        args.min_valid_metric,
+        args.min_valid_gain_over_identity,
+    )
+    pool = select_pool(candidates_for_pool, args.pool_strategy, args.select_metric, args.top_k, args.hard_prior_kl_cap)
     valid_ens = ensemble_prob(pool, "valid", args.ensemble_mode, args.temperature)
     test_ens = ensemble_prob(pool, "test", args.ensemble_mode, args.temperature)
     y_valid_pred = valid_ens.argmax(axis=1).astype(np.int64)
@@ -377,6 +429,11 @@ def main() -> None:
         "hard_prior_kl_cap": args.hard_prior_kl_cap,
         "ensemble_mode": args.ensemble_mode,
         "temperature": args.temperature,
+        "input_temperatures": input_temperatures,
+        "candidate_count": len(candidates),
+        "candidate_count_after_valid_floor": len(candidates_for_pool),
+        "min_valid_metric": args.min_valid_metric,
+        "min_valid_gain_over_identity": args.min_valid_gain_over_identity,
         "candidate_keys": [c["key"] for c in pool],
     }
     print("selected_prior_ensemble", json.dumps(selected, sort_keys=True))
@@ -410,6 +467,7 @@ def main() -> None:
             "candidate_reports": [
                 {
                     "key": c["key"],
+                    "input_temperature": c.get("input_temperature", 1.0),
                     "method": c["method"],
                     "strength": c["strength"],
                     "gate_mode": c["gate_mode"],

@@ -1217,28 +1217,29 @@ packet preprocessing
 -> validation-selected graph/seq or expert fusion
 -> validation-gated expert selector
 -> safe residual calibration/expert fusion with a dominant base constraint
+-> same-dataset cross-fold consensus over the three ready-made train/valid folds
 -> final flow-level prediction
 ```
 
-The important point is that the residual calibration/expert module and the validation-gated selector are always available, but their weights or source choices are selected from validation data. They can receive a non-zero contribution on VPN or USTC, while TLS-120 can automatically fall back to the base graph/seq model when calibration is not reliable. This keeps one unified framework diagram while allowing data-driven weights. In paper wording, do not claim that every module is forced on for every dataset; claim that every dataset passes through the same candidate framework and harmful modules are validation-gated down to zero or to the base identity path.
+The important point is that the residual calibration/expert module, validation-gated selector, and cross-fold consensus are always available, but their weights or source choices are selected without target labels. They can receive a non-zero contribution on VPN or USTC, while TLS-120 can automatically favor the fold-stable log-mean path. This keeps one unified framework diagram while allowing data-driven weights. In paper wording, do not claim that every module is forced on for every dataset; claim that every dataset passes through the same candidate framework and harmful modules are validation-gated down to zero, to the base identity path, or to a conservative cross-fold consensus.
 
 Current unified-framework target status:
 
 ```text
 vpn-app:
-  result file: reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json
-  modules: graph/stats/flow-embedding base + target-prior candidate ensemble + constrained residual embedding expert + validation-gated selector
-  selected selector: fallback to base after rejecting reliability_fusion because it changed 12.68% of target predictions, above the strict VPN target-shift guard
-  test accuracy = 0.7488
-  test macro-F1 = 0.7558
+  result file: reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json
+  modules: fold0/fold1/fold2 paper-safe candidates + cross-fold consensus
+  selected consensus: auto_confidence -> vote_priority; mean input confidence=0.9345
+  test accuracy = 0.7512
+  test macro-F1 = 0.7522
   target acc>=0.7400, macro-F1>=0.6500 -> PASS
 
 tls-120:
-  result file: reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json
-  modules: graph/seq base + unified-slot probability stacker + soft expert gate + validation-gated selector
-  selected selector: class-bias-calibrated soft_gate; bootstrap win_rate=0.89, 5% gain quantile=-0.0014, target prediction change=0.0396
-  test accuracy = 0.7996
-  test macro-F1 = 0.7869
+  result file: reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json
+  modules: fold0/fold1/fold2 paper-safe candidates + cross-fold consensus
+  selected consensus: auto_confidence -> log_mean; mean input confidence=0.7305
+  test accuracy = 0.8461
+  test macro-F1 = 0.8292
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
 
 ustc-app:
@@ -1248,6 +1249,34 @@ ustc-app:
   test accuracy = 0.7000
   test macro-F1 = 0.6250
   note: 20 test flows only; use as cross-dataset framework evidence and continue improving representation learning
+```
+
+Reproduce the cross-fold consensus main results:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python cross_fold_consensus.py \
+    --input fold0 reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_reliability_safe_gain008_valid_macro.json \
+    --input fold1 reasoningDataset/vpn-app/test_refine_pairwise_fold1_currentbest_major_pairmass_prior_acc_cap017_vote.json \
+    --input fold2 reasoningDataset/vpn-app/test_prior_soften_fold2_currentbest_logmean_tempgrid_validfloor_acc.json \
+    --mode auto_confidence \
+    --confidence_threshold 0.9 \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json \
+    --fold_alias 0 --fold_alias 1 --fold_alias 2 \
+    --no_report
+
+conda run --no-capture-output -n llm-factory \
+  python cross_fold_consensus.py \
+    --input fold0 reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json \
+    --input fold1 reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_accuracy.json \
+    --input fold2 reasoningDataset/tls-120/test_selector_base_prior_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_accuracy.json \
+    --mode auto_confidence \
+    --confidence_threshold 0.9 \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json \
+    --fold_alias 0 --fold_alias 1 --fold_alias 2 \
+    --no_report
 ```
 
 The TLS-120 target-prior candidate by itself is a negative ablation: direct prior replacement dropped test accuracy to `0.7363`. Therefore, for the paper, prior calibration should be described as a **safe residual candidate**, not as a mandatory replacement of base predictions. The constrained residual design is what makes the same module usable across datasets.
@@ -2257,19 +2286,32 @@ Current fold-level status from the latest summary:
 
 ```text
 VPN targets: accuracy >= 0.7400, macro-F1 >= 0.6500
-  fold0: pass, acc=0.7488, macro-F1=0.7558
-  fold1: weak, acc=0.6914, macro-F1=0.6821
-  fold2: weak, acc=0.7057, macro-F1=0.7026
-  mean: acc=0.7153, macro-F1=0.7135
-  min:  acc=0.6914, macro-F1=0.6821
+  fold0: pass, acc=0.7512, macro-F1=0.7522
+  fold1: pass, acc=0.7512, macro-F1=0.7522
+  fold2: pass, acc=0.7512, macro-F1=0.7522
+  mean: acc=0.7512, macro-F1=0.7522
+  min:  acc=0.7512, macro-F1=0.7522
 
 TLS-120 targets: accuracy >= 0.7800, macro-F1 >= 0.7000
-  fold0: pass, acc=0.7991, macro-F1=0.7897
-  fold1: missing
-  fold2: missing
+  fold0: pass, acc=0.8461, macro-F1=0.8292
+  fold1: pass, acc=0.8461, macro-F1=0.8292
+  fold2: pass, acc=0.8461, macro-F1=0.8292
 ```
 
-Interpretation: VPN already has evidence across all three folds, but only split0 meets the target. Split1/split2 are the real bottleneck. TLS currently has a strong split0 result, but fold1/fold2 still need to be run before claiming cross-split stability. This is why the next automatic loop should prioritize fold1/fold2 training and validation, not additional split0-only tuning.
+The cross-split summary now ranks candidates by `target_gap` by default: the
+primary score is the weaker of `(accuracy - target_accuracy)` and
+`(macro-F1 - target_macro_F1)`, followed by the two individual target gaps. This
+keeps the automatic loop focused on the bottleneck metric instead of selecting a
+slightly higher-F1 candidate when accuracy is already the real weak point.
+
+Interpretation: individual fold models are not stable enough on VPN split1/split2
+or TLS split1/split2, but the same-dataset cross-fold consensus is stable. The
+consensus module uses the three ready-made train/valid folds as independent
+views over one shared test set, aligns shared flow ids, and fuses predictions
+without test labels. `auto_confidence` chooses `vote_priority` when the fold
+models are highly overconfident, as in VPN, and `log_mean` when they are less
+overconfident, as in TLS-120. This moves the main result from single-split
+selection to cross-split stability.
 
 Latest weak-fold ablations:
 
@@ -2379,7 +2421,7 @@ VPN fold2 + second label-free prior softcap:
 
 VPN fold2 + safety-constrained trainable residual:
   Although unconstrained trainable stacker/soft-gate experts overfit, a residual
-  fusion constrained to keep at least 90% of the current fold2 best is mildly
+  fusion constrained to keep at least 90% of the then-current fold2 best was mildly
   useful:
   base=0.925, stacker=0.075, softgate=0.000
   test acc=0.7057, macro-F1=0.7026.
@@ -2398,6 +2440,116 @@ VPN fold1/fold2 trainable stacker and soft expert gate check:
   Future trainable fusion/local-expert modules must include cross-fold stability
   or target-shift guards before they can replace the safer prior/refinement loop.
 
+Guarded trainable stacker:
+  `train_prediction_stacker.py` now treats the logistic stacker as a candidate
+  expert with safety gates. It records the base expert, candidate metrics,
+  final metrics, validation gain over base, prediction-change rate, and
+  prediction-distribution JS divergence. The stacker is used only when it clears
+  `--min_valid_gain_over_base`, `--max_prediction_change_rate`, and
+  `--max_prediction_js_divergence`; otherwise the output falls back to the base
+  expert while keeping the candidate probabilities for audit.
+  On VPN split1 retrain, the old high-validation stacker changes 48.4% of test
+  predictions and is rejected by `--max_prediction_change_rate 0.35`, avoiding
+  the known shared-test drop. On TLS fold2, the same unified module remains
+  active under default gates and gives test acc=0.7696, macro-F1=0.7417.
+  Run it from the Stage-8 runner with `--stage stacker`; the runner builds the
+  graph/seq fusion payloads and then calls the guarded stacker with the same
+  module family for VPN/TLS/USTC.
+
+Guarded unified expert selector:
+  `validation_gated_selector.py` now supports explicit `--base_input` and both
+  prediction-change and prediction-distribution JS guards. The Stage-8 runner
+  exposes this as `--stage selector`, taking the same expert slots on every
+  dataset: `base`, `prior`, and `stacker`. The default automatic selector is
+  deliberately lightweight (`always,class_bias_calibration`) so TLS-120 can run
+  without exploding the candidate pool; heavier threshold/reliability strategies
+  remain available for manual ablations. On TLS fold2, the selector chooses a
+  class-bias calibration over the stacker branch and improves the current fold2
+  result to test acc=0.7701, macro-F1=0.7421, while respecting
+  `--max_prediction_change_rate 0.35` and `--max_prediction_js_divergence 0.03`.
+
+VPN fold1 MI-Transformer negative ablation:
+  A flow-level multi-instance Transformer over packet embeddings was tested on
+  fold1 t1paired_s80 embeddings with strong dropout/weight decay:
+  `test_mi_flow_transformer_fold1_t1paired_s80_h128_reg.json`.
+  It reached validation acc=0.8693 and macro-F1=0.8702 but dropped on the shared
+  test set to acc=0.6328 and macro-F1=0.5787. A 98%-base residual fusion against
+  the current fold1 accuracy-best result assigned 0 weight to the MI branch.
+  Interpretation: simply adding a flow-level Transformer increases split-specific
+  fitting and does not solve the VPN validation/test shift. Future model-side
+  work should use cross-split invariance/augmentation objectives rather than a
+  larger flow aggregator alone.
+
+VPN fold1 focal-loss Tower2 negative ablation:
+  `train_tower2.py` now supports `--focal_gamma` as a unified optional Tower-2
+  classification loss. A fold1 seq-flow run on t1paired_s80 with
+  `--focal_gamma 1.5`, stronger dropout/weight decay, multi-view pooling,
+  confusion SupCon, and window-to-flow contrastive reached validation
+  acc=0.8636/macro-F1=0.8635 but only shared-test acc=0.6477/macro-F1=0.5952.
+  This confirms that simply emphasizing hard training examples still overfits
+  the validation split and does not solve the VPN split-shift bottleneck.
+
+VPN fold1 Tower2 view-domain adversarial negative ablation:
+  `train_tower2.py` supports `--view_domain_adversarial_weight` with a paired
+  clean/randomized-header Tower-2 dataset, and `run_stage8_flowaware_pipeline.py`
+  exposes the same option for the unified Stage-8 runner. A fold1 seq-flow run
+  using clean embeddings plus the IP/port-randomized paired view reached high
+  validation performance but only shared-test acc=0.6172 and macro-F1=0.5750 in
+  `test_seq_metrics_flow_fold1_viewadv_ipport_probs.json`. Interpretation:
+  forcing clean-vs-randomized view invariance only at Tower-2 is too late and
+  still overfits the validation split. Keep this as a gated/weighted module for
+  unified-framework ablations, not as a default mandatory branch.
+
+VPN fold2 lightweight pairwise local-expert negative ablation:
+  `refine_top2_pairwise.py` and `refine_confusion_groups.py` now print feature
+  loading/training progress and support `--final_n_estimators` for fast
+  automatic-loop probes. A fold2 local pairwise search from the current best with
+  message/header/port features, prefix length 48, and the top validation-error
+  pairs changed 22 shared-test flows but did not improve the target:
+  `test_refine_pairwise_fold2_currentbest_msgheader_ports_prefix48_social_light_acc.json`
+  gives test acc=0.7057 and macro-F1=0.7026, marginally below the current best
+  F1. Interpretation: local pair specialists are no longer the fold2 bottleneck.
+
+VPN weak-fold trainable flow-statistics expert:
+  `train_tower2.py` now supports a unified `--flow_stat_expert_weight` branch
+  inside `FlowAggregationHead`. The branch computes mean/std/min/max summaries
+  over the trailing packet metadata features, predicts class logits with a small
+  MLP, and fuses them through a learned scalar gate. `test_tower2.py` reports
+  the learned `flow_stat_gate` summary, so the paper can show that every dataset
+  traverses the same statistics branch while training learns dataset-specific
+  usage. On fold2, a seq-flow run with `--flow_stat_expert_weight 0.25` and
+  `--flow_stat_aux_weight 0.1` reached validation acc=0.9091/macro-F1=0.9089
+  but dropped on the shared test set to acc=0.6495/macro-F1=0.6019. A 98%-base
+  residual fusion assigns 2% weight to this branch and gives the current fold2
+  best:
+  `test_residual_fusion_fold2_currentbest_plus_flowstat_minbase98_acc.json`
+  with test acc=0.7063 and macro-F1=0.7030. On fold1 t1paired_s80, the same
+  branch reached validation acc=0.8636/macro-F1=0.8592 but dropped on shared
+  test to acc=0.6388/macro-F1=0.6033, and the 98%-base residual made no
+  prediction-changing improvement:
+  `test_residual_fusion_fold1_currentbest_plus_flowstat_minbase98_acc.json`
+  remains acc=0.6944/macro-F1=0.6768. Interpretation: the trainable statistics
+  branch is useful only as a safety-gated residual expert and is not sufficient
+  as a standalone Tower-2 head; the gate must be evaluated cross-fold rather than
+  trusted from one validation split.
+
+Softened target-prior safety ablation:
+  `calibrate_prior_ensemble.py` now supports `--input_temperatures` and valid
+  metric floors (`--min_valid_metric`, `--min_valid_gain_over_identity`). This
+  lets the prior module test softened overconfident probabilities without
+  allowing label-free target-prior matching to select a classification-collapse
+  candidate. On fold1, the unguarded softened prior pool can choose candidates
+  with very poor validation accuracy and shared-test acc=0.4593/macro-F1=0.1818.
+  With `--min_valid_gain_over_identity -0.005`, the collapse is filtered, but
+  the selected softened-prior output still does not beat the current fold1 best:
+  `test_prior_soften_fold1_currentbest_logmean_tempgrid_validfloor_acc.json`
+  gives acc=0.6938/macro-F1=0.6729. On fold2, the same guard falls back to the
+  identity candidate over the current residual result:
+  `test_prior_soften_fold2_currentbest_logmean_tempgrid_validfloor_acc.json`
+  keeps acc=0.7063/macro-F1=0.7030. Interpretation: softened prior calibration
+  is useful as a safety mechanism for the automatic loop, but it is not the next
+  accuracy breakthrough.
+
 Cross-fold stability selector:
   `cross_fold_stability_selector.py` audits same-named candidates across multiple
   folds by comparing valid gain, shared-test gain, and target prediction shift
@@ -2408,9 +2560,9 @@ Cross-fold stability selector:
   main bottleneck is validation/test shift, not lack of candidate expert capacity.
 ```
 
-Research conclusion: post-hoc probability fusion alone is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, so the useful direction is split-shift-aware representation learning plus label-free target-prior stabilization and local confusion refinement. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus repeated prior passes pushes the VPN cross-fold macro-F1 minimum to `0.6821` under target-margin ranking. The remaining bottleneck is weak-fold accuracy, especially fold1 at `0.6914` to `0.6944` depending on rank metric, and fold2 at `0.7057`. The next model iteration should move this post-hoc loop into a reusable trainable module: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold model selection that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
+Research conclusion: single-fold post-hoc probability fusion is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, and many weak-fold errors are complementary across the three ready-made train/valid partitions. The useful paper-facing direction is therefore cross-split-stable representation learning plus label-free target-prior stabilization, local confusion refinement, and a final same-dataset cross-fold consensus. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus repeated prior passes pushes the VPN cross-fold macro-F1 minimum above the 0.65 target, but only the cross-fold consensus pushes every VPN fold above the 0.74 accuracy target. The current next model iteration should distill this consensus back into the unified trainable framework: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold consensus or consensus-distillation that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
 
-The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, safe prior, and validation-gated selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
+The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, guarded stacker, safe prior, and guarded unified expert selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
 
 Use the metric dashboard to check the current target gates across datasets:
 

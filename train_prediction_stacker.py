@@ -14,7 +14,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from probability_metrics import calibration_metrics
-from validation_gated_selector import apply_unified_expert_slots, parse_name_list
+from validation_gated_selector import apply_unified_expert_slots, parse_name_list, target_shift_guard
 
 
 def compute_metrics(y_true, y_pred):
@@ -55,6 +55,12 @@ def load_prob_payload(path: str) -> Dict[str, Any]:
     return data
 
 
+def normalize_prob(prob: np.ndarray) -> np.ndarray:
+    prob = np.asarray(prob, dtype=np.float32)
+    prob = np.clip(prob, 1e-12, None)
+    return prob / prob.sum(axis=1, keepdims=True)
+
+
 def align_prob(data: Dict[str, Any], split: str, fids: List[str]) -> Tuple[np.ndarray, np.ndarray]:
     if split == "valid":
         ids = data["valid_flow_ids"]
@@ -68,7 +74,7 @@ def align_prob(data: Dict[str, Any], split: str, fids: List[str]) -> Tuple[np.nd
         raise ValueError(split)
     idx = {str(fid): i for i, fid in enumerate(ids)}
     y = np.asarray([labels[idx[fid]] for fid in fids], dtype=np.int64)
-    p = np.asarray([probs[idx[fid]] for fid in fids], dtype=np.float32)
+    p = normalize_prob(np.asarray([probs[idx[fid]] for fid in fids], dtype=np.float32))
     return y, p
 
 
@@ -119,6 +125,10 @@ def main() -> None:
     ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
     ap.add_argument("--include_logits", action="store_true")
     ap.add_argument("--include_confidence", action="store_true")
+    ap.add_argument("--base_input", default="", help="Input name used as the fallback/base expert. Defaults to the first input after slot alignment.")
+    ap.add_argument("--min_valid_gain_over_base", type=float, default=0.0, help="Use stacker only if selected validation metric improves over base by at least this margin.")
+    ap.add_argument("--max_prediction_change_rate", type=float, default=1.0, help="Use stacker only if test prediction change rate versus base is no larger than this value.")
+    ap.add_argument("--max_prediction_js_divergence", type=float, default=1.0, help="Use stacker only if test prediction-distribution JS divergence versus base is no larger than this value.")
     ap.add_argument(
         "--unified_expert_slots",
         default="",
@@ -131,6 +141,13 @@ def main() -> None:
     named_payloads = [(name, load_prob_payload(path), path) for name, path in args.input]
     unified_expert_slots = parse_name_list(args.unified_expert_slots)
     named_payloads, input_slot_status = apply_unified_expert_slots(named_payloads, unified_expert_slots)
+    input_names = [name for name, _, _ in named_payloads]
+    if args.base_input:
+        if args.base_input not in input_names:
+            raise ValueError(f"--base_input={args.base_input} is not one of stacker inputs after slot alignment: {input_names}")
+        base_index = input_names.index(args.base_input)
+    else:
+        base_index = 0
     valid_common = sorted(set.intersection(*(set(map(str, data["valid_flow_ids"])) for _, data, _ in named_payloads)))
     test_common = sorted(set.intersection(*(set(map(str, data["flow_ids"])) for _, data, _ in named_payloads)))
     if not valid_common or not test_common:
@@ -153,6 +170,14 @@ def main() -> None:
 
     x_valid = prob_features(valid_probs, args.include_logits, args.include_confidence)
     x_test = prob_features(test_probs, args.include_logits, args.include_confidence)
+    base_valid_prob = valid_probs[base_index]
+    base_test_prob = test_probs[base_index]
+    base_valid_pred = base_valid_prob.argmax(axis=1).astype(np.int64)
+    base_test_pred = base_test_prob.argmax(axis=1).astype(np.int64)
+    base_valid_metrics = compute_metrics(y_valid_ref.tolist(), base_valid_pred.tolist())
+    base_valid_metrics["calibration"] = calibration_metrics(y_valid_ref, base_valid_prob)
+    base_test_metrics = compute_metrics(y_test_ref.tolist(), base_test_pred.tolist())
+    base_test_metrics["calibration"] = calibration_metrics(y_test_ref, base_test_prob)
     num_classes = int(max(y_valid_ref.max(), y_test_ref.max()) + 1)
     min_class_count = int(np.bincount(y_valid_ref, minlength=num_classes).min())
     n_splits = max(2, min(5, min_class_count))
@@ -184,38 +209,96 @@ def main() -> None:
     for col, cls in enumerate(classes):
         test_prob[:, int(cls)] = test_prob_raw[:, col]
     y_pred = test_prob.argmax(axis=1).astype(np.int64)
-    metrics = compute_metrics(y_test_ref.tolist(), y_pred.tolist())
-    metrics["calibration"] = calibration_metrics(y_test_ref, test_prob)
+    candidate_metrics = compute_metrics(y_test_ref.tolist(), y_pred.tolist())
+    candidate_metrics["calibration"] = calibration_metrics(y_test_ref, test_prob)
+    selected_valid_pred = selected_valid_prob.argmax(axis=1).astype(np.int64)
+    selected_valid_metric = float(selected["metrics"][args.select_metric])
+    base_valid_metric = float(base_valid_metrics[args.select_metric])
+    valid_gain_over_base = selected_valid_metric - base_valid_metric
+    valid_shift = target_shift_guard(selected_valid_prob, base_valid_prob)
+    test_shift = target_shift_guard(test_prob, base_test_prob)
+    safety_reasons = []
+    if valid_gain_over_base < args.min_valid_gain_over_base:
+        safety_reasons.append(
+            f"valid_gain_over_base={valid_gain_over_base:.6f}<min_valid_gain_over_base={args.min_valid_gain_over_base:.6f}"
+        )
+    if test_shift["prediction_change_rate"] > args.max_prediction_change_rate:
+        safety_reasons.append(
+            f"test_prediction_change_rate={test_shift['prediction_change_rate']:.6f}>max_prediction_change_rate={args.max_prediction_change_rate:.6f}"
+        )
+    if test_shift["prediction_js_divergence"] > args.max_prediction_js_divergence:
+        safety_reasons.append(
+            f"test_prediction_js_divergence={test_shift['prediction_js_divergence']:.6f}>max_prediction_js_divergence={args.max_prediction_js_divergence:.6f}"
+        )
+    use_stacker = not safety_reasons
+    if use_stacker:
+        final_prob = test_prob
+        final_valid_prob = selected_valid_prob
+        final_pred = y_pred
+        final_valid_pred = selected_valid_pred
+        metrics = candidate_metrics
+    else:
+        final_prob = base_test_prob
+        final_valid_prob = base_valid_prob
+        final_pred = base_test_pred
+        final_valid_pred = base_valid_pred
+        metrics = base_test_metrics
+    safety = {
+        "enabled": True,
+        "use_stacker": bool(use_stacker),
+        "fallback_input": input_names[base_index],
+        "reasons": safety_reasons,
+        "select_metric": args.select_metric,
+        "selected_valid_metric": selected_valid_metric,
+        "base_valid_metric": base_valid_metric,
+        "valid_gain_over_base": valid_gain_over_base,
+        "valid_shift_vs_base": valid_shift,
+        "test_shift_vs_base": test_shift,
+        "min_valid_gain_over_base": args.min_valid_gain_over_base,
+        "max_prediction_change_rate": args.max_prediction_change_rate,
+        "max_prediction_js_divergence": args.max_prediction_js_divergence,
+    }
     print("selected_stacker", json.dumps(selected, sort_keys=True))
+    print("base_stacker", json.dumps({"name": input_names[base_index], "valid_metrics": base_valid_metrics, "test_metrics": base_test_metrics}, sort_keys=True))
+    print("candidate_stacker", json.dumps(candidate_metrics, indent=2, sort_keys=True))
+    print("stacker_safety", json.dumps(safety, indent=2, sort_keys=True))
     print("test_stacker", json.dumps(metrics, indent=2, sort_keys=True))
 
     label_names, label_map = load_label_names(args.label_map)
     if label_names:
-        print(classification_report(y_test_ref, y_pred, labels=list(range(len(label_names))), target_names=label_names, zero_division=0))
+        print(classification_report(y_test_ref, final_pred, labels=list(range(len(label_names))), target_names=label_names, zero_division=0))
     else:
-        print(classification_report(y_test_ref, y_pred, zero_division=0))
+        print(classification_report(y_test_ref, final_pred, zero_division=0))
 
     if args.output_json:
         payload = {
             "metrics": {"flow_level": metrics},
             "selected": selected,
+            "safety": safety,
+            "candidate_metrics": {"flow_level": candidate_metrics},
+            "base_metrics": {"valid": base_valid_metrics, "flow_level": base_test_metrics},
             "valid_reports": reports,
             "inputs": [{"name": name, "path": path} for name, _, path in named_payloads],
             "label_map": label_map,
             "flow_ids": test_common,
             "flow_y_true": y_test_ref.tolist(),
-            "flow_y_pred": y_pred.tolist(),
-            "flow_prob": test_prob.tolist(),
+            "flow_y_pred": final_pred.tolist(),
+            "flow_prob": final_prob.tolist(),
             "valid_flow_ids": valid_common,
             "valid_y_true": y_valid_ref.tolist(),
-            "valid_y_pred": selected_valid_prob.argmax(axis=1).astype(np.int64).tolist(),
-            "valid_prob": selected_valid_prob.tolist(),
+            "valid_y_pred": final_valid_pred.tolist(),
+            "valid_prob": final_valid_prob.tolist(),
+            "candidate_flow_y_pred": y_pred.tolist(),
+            "candidate_flow_prob": test_prob.tolist(),
+            "candidate_valid_y_pred": selected_valid_pred.tolist(),
+            "candidate_valid_prob": selected_valid_prob.tolist(),
             "feature_config": {
                 "include_logits": args.include_logits,
                 "include_confidence": args.include_confidence,
                 "select_metric": args.select_metric,
                 "unified_expert_slots": unified_expert_slots,
                 "input_slot_status": input_slot_status,
+                "base_input": input_names[base_index],
             },
         }
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)

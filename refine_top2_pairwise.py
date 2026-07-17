@@ -175,6 +175,7 @@ def main() -> None:
     ap.add_argument("--min_pair_train", type=int, default=16)
     ap.add_argument("--min_pair_valid", type=int, default=6)
     ap.add_argument("--max_pairs", type=int, default=20, help="Train only the most frequent validation top-2 pairs. 0 keeps all candidate pairs.")
+    ap.add_argument("--final_n_estimators", type=int, default=0, help="Final train+valid refit tree count. 0 keeps the historical max(n_estimators, 800).")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
@@ -189,9 +190,13 @@ def main() -> None:
     test_prob = np.asarray(base["flow_prob"], dtype=np.float32)
     num_classes = test_prob.shape[1]
 
+    print(f"loading train features: {args.train_index}", flush=True)
     x_train, y_train, _ = load_split(args.train_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
+    print(f"loading valid features: {args.valid_index}", flush=True)
     x_valid_all, y_valid_all, valid_feature_fids = load_split(args.valid_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
+    print(f"loading test features: {args.test_index}", flush=True)
     x_test_all, y_test_all, test_feature_fids = load_split(args.test_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
+    print(f"loaded features: train={x_train.shape}, valid={x_valid_all.shape}, test={x_test_all.shape}", flush=True)
     x_valid, y_valid_aligned = align_features(x_valid_all, y_valid_all, valid_feature_fids, valid_fids)
     x_test, y_test_aligned = align_features(x_test_all, y_test_all, test_feature_fids, test_fids)
     if not np.array_equal(y_valid, y_valid_aligned) or not np.array_equal(y_test, y_test_aligned):
@@ -218,16 +223,18 @@ def main() -> None:
     candidate_pairs = [pair for pair, _ in sorted(pair_counts.items(), key=lambda item: (-item[1], item[0]))]
     if args.max_pairs > 0:
         candidate_pairs = candidate_pairs[: args.max_pairs]
-    print("candidate_pairs", json.dumps({"count": len(candidate_pairs), "pairs": [f"{a}-{b}:{pair_counts[(a, b)]}" for a, b in candidate_pairs]}, sort_keys=True))
+    print("candidate_pairs", json.dumps({"count": len(candidate_pairs), "pairs": [f"{a}-{b}:{pair_counts[(a, b)]}" for a, b in candidate_pairs]}, sort_keys=True), flush=True)
     pair_models = {}
     pair_reports = {}
-    for pair in candidate_pairs:
+    for idx, pair in enumerate(candidate_pairs, start=1):
+        print(f"training pair {idx}/{len(candidate_pairs)}: {pair[0]}-{pair[1]}", flush=True)
         model, selected, reports = select_pair_model(x_train, y_train, x_valid, y_valid, pair, args)
         if model is None:
+            print(f"skipped pair {pair[0]}-{pair[1]}: insufficient train/valid support", flush=True)
             continue
         pair_models[pair] = model
         pair_reports[f"{pair[0]}-{pair[1]}"] = {"selected": selected, "reports": reports}
-    print("trained_pairs", json.dumps({"count": len(pair_models), "pairs": list(pair_reports.keys())}, sort_keys=True))
+    print("trained_pairs", json.dumps({"count": len(pair_models), "pairs": list(pair_reports.keys())}, sort_keys=True), flush=True)
 
     best = None
     reports = []
@@ -258,9 +265,10 @@ def main() -> None:
         if train_mask.sum() < args.min_pair_train:
             continue
         selected_pair = pair_reports[f"{pair[0]}-{pair[1]}"]["selected"]
+        final_n_estimators = args.final_n_estimators if args.final_n_estimators > 0 else max(args.n_estimators, 800)
         model = make_model(
             selected_pair["kind"],
-            max(args.n_estimators, 800),
+            final_n_estimators,
             selected_pair["max_depth"],
             selected_pair["min_samples_leaf"],
             selected_pair["class_weight"],

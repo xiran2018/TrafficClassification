@@ -10,8 +10,12 @@ from pathlib import Path
 from typing import Iterable, List
 
 
+def format_cmd(cmd: List[str]) -> str:
+    return " ".join(shlex.quote(x) for x in cmd)
+
+
 def run(cmd: List[str], dry_run: bool = False) -> None:
-    print("$ " + " ".join(shlex.quote(x) for x in cmd), flush=True)
+    print("$ " + format_cmd(cmd), flush=True)
     if not dry_run:
         subprocess.run(cmd, check=True)
 
@@ -191,14 +195,18 @@ def tower1_preprocess_cmd(args, split: str) -> List[str]:
     return cmd
 
 
-def embedding_cmd(args, split: str) -> List[str]:
-    return [
+def embedding_output_dir(args, split: str) -> str:
+    return f"reasoningDataset/{args.dataset}/{split}_embeddings_{args.embedding_suffix}"
+
+
+def embedding_cmd(args, split: str, output_dir: str | None = None, shard_index: int | None = None) -> List[str]:
+    cmd = [
         py(),
         "extract_packet_embeddings_qwen.py",
         "--packet_index",
         f"reasoningDataset/{args.dataset}/{split}_tower1_{args.output_suffix}/packet_index.jsonl",
         "--output_dir",
-        f"reasoningDataset/{args.dataset}/{split}_embeddings_{args.embedding_suffix}",
+        output_dir or embedding_output_dir(args, split),
         "--base_model",
         args.base_model,
         "--lora_path",
@@ -212,7 +220,80 @@ def embedding_cmd(args, split: str) -> List[str]:
         "--max_length",
         str(args.embedding_max_length),
         "--local_files_only",
-    ] + (["--no_progress"] if args.no_progress else [])
+    ]
+    if shard_index is not None:
+        cmd += ["--num_shards", str(args.embedding_num_shards), "--shard_index", str(shard_index)]
+    if args.no_progress:
+        cmd.append("--no_progress")
+    return cmd
+
+
+def merge_embedding_shards(args, split: str) -> None:
+    out_dir = Path(embedding_output_dir(args, split))
+    shard_root = out_dir / "_shards"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    merged_index = out_dir / "flow_embedding_index.jsonl"
+    total = 0
+    with open(merged_index, "w", encoding="utf-8") as outf:
+        for shard_index in range(args.embedding_num_shards):
+            shard_index_path = shard_root / f"shard_{shard_index}" / "flow_embedding_index.jsonl"
+            if not shard_index_path.exists():
+                raise FileNotFoundError(f"Missing shard index: {shard_index_path}")
+            with open(shard_index_path, "r", encoding="utf-8") as inf:
+                for line in inf:
+                    if line.strip():
+                        outf.write(line)
+                        total += 1
+    with open(out_dir / "embedding_config.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "base_model": args.base_model,
+                "lora_path": f"{args.tower1_output_dir}/adapter",
+                "tower1_heads": f"{args.tower1_output_dir}/tower1_heads.pt",
+                "embedding_mode": args.embedding_mode,
+                "max_length": args.embedding_max_length,
+                "num_shards": args.embedding_num_shards,
+                "shard_root": str(shard_root),
+                "merged_flows": total,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+    print(f"merged embedding shards: split={split}, flows={total}, index={merged_index}", flush=True)
+
+
+def run_embedding_stage(args, split: str) -> None:
+    if args.embedding_num_shards <= 1:
+        run(embedding_cmd(args, split), dry_run=args.dry_run)
+        return
+
+    out_dir = Path(embedding_output_dir(args, split))
+    shard_root = out_dir / "_shards"
+    devices = [x.strip() for x in args.embedding_cuda_devices.split(",") if x.strip()]
+    procs: list[tuple[int, subprocess.Popen]] = []
+    for shard_index in range(args.embedding_num_shards):
+        shard_dir = shard_root / f"shard_{shard_index}"
+        cmd = embedding_cmd(args, split, output_dir=str(shard_dir), shard_index=shard_index)
+        env = os.environ.copy()
+        device = devices[shard_index % len(devices)] if devices else ""
+        prefix = f"CUDA_VISIBLE_DEVICES={shlex.quote(device)} " if device else ""
+        print("$ " + prefix + format_cmd(cmd), flush=True)
+        if not args.dry_run:
+            if device:
+                env["CUDA_VISIBLE_DEVICES"] = device
+            procs.append((shard_index, subprocess.Popen(cmd, env=env)))
+
+    if args.dry_run:
+        return
+    failed: list[tuple[int, int]] = []
+    for shard_index, proc in procs:
+        code = proc.wait()
+        if code != 0:
+            failed.append((shard_index, code))
+    if failed:
+        raise subprocess.CalledProcessError(failed[0][1], f"embedding shards failed: {failed}")
+    merge_embedding_shards(args, split)
 
 
 def tower2_preprocess_cmd(args, split: str) -> List[str]:
@@ -270,6 +351,10 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
         args.flow_pooling,
         "--multi_view_gate_entropy_weight",
         str(args.multi_view_gate_entropy_weight),
+        "--flow_stat_expert_weight",
+        str(args.flow_stat_expert_weight),
+        "--flow_stat_aux_weight",
+        str(args.flow_stat_aux_weight),
         "--window_loss_weight",
         str(args.window_loss_weight),
         "--class_weighting",
@@ -332,6 +417,10 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
             str(args.paired_view_weight),
             "--paired_consistency_weight",
             str(args.paired_consistency_weight),
+            "--view_domain_adversarial_weight",
+            str(args.view_domain_adversarial_weight),
+            "--domain_adversarial_lambda",
+            str(args.domain_adversarial_lambda),
         ]
     return cmd
 
@@ -403,12 +492,58 @@ def fusion_output_path(args) -> str:
     return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_valid_acc.json"
 
 
+def stacker_output_path(args) -> str:
+    return f"reasoningDataset/{args.dataset}/test_stacker_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_{safe_name(args.stacker_select_metric)}.json"
+
+
+def stacker_cmd(args) -> List[str]:
+    cmd = [
+        py(),
+        "train_prediction_stacker.py",
+    ]
+    for model_type in selected_model_types(args):
+        cmd += ["--input", model_type, fusion_payload_path(args, model_type)]
+    cmd += [
+        "--label_map",
+        train_label_map(args),
+        "--select_metric",
+        args.stacker_select_metric,
+        "--c_grid",
+        args.stacker_c_grid,
+        "--class_weight_grid",
+        args.stacker_class_weight_grid,
+        "--base_input",
+        args.stacker_base_input or selected_model_types(args)[0],
+        "--unified_expert_slots",
+        args.stacker_unified_expert_slots or ",".join(selected_model_types(args)),
+        "--min_valid_gain_over_base",
+        str(args.stacker_min_valid_gain_over_base),
+        "--max_prediction_change_rate",
+        str(args.stacker_max_prediction_change_rate),
+        "--max_prediction_js_divergence",
+        str(args.stacker_max_prediction_js_divergence),
+        "--seed",
+        str(args.seed),
+        "--output_json",
+        stacker_output_path(args),
+    ]
+    if args.stacker_include_logits:
+        cmd.append("--include_logits")
+    if args.stacker_include_confidence:
+        cmd.append("--include_confidence")
+    return cmd
+
+
 def prior_candidate_output_path(args) -> str:
     return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_safe_prior_candidate.json"
 
 
 def safe_prior_output_path(args) -> str:
     return f"reasoningDataset/{args.dataset}/test_fusion_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_safe_prior_residual.json"
+
+
+def selector_output_path(args) -> str:
+    return f"reasoningDataset/{args.dataset}/test_selector_base_prior_stacker_{'_'.join(selected_model_types(args))}_{result_suffix(args)}_{safe_name(args.selector_select_metric)}.json"
 
 
 def prior_cmd(args) -> List[str]:
@@ -465,6 +600,57 @@ def safe_prior_residual_cmd(args) -> List[str]:
     ]
 
 
+def selector_cmd(args) -> List[str]:
+    cmd = [
+        py(),
+        "validation_gated_selector.py",
+        "--input",
+        "base",
+        fusion_output_path(args),
+        "--input",
+        "prior",
+        safe_prior_output_path(args),
+        "--input",
+        "stacker",
+        stacker_output_path(args),
+        "--label_map",
+        train_label_map(args),
+        "--select_metric",
+        args.selector_select_metric,
+        "--rank_select_metric",
+        args.selector_rank_select_metric or args.selector_select_metric,
+        "--rank_metric",
+        args.selector_rank_metric,
+        "--strategies",
+        args.selector_strategies,
+        "--base_input",
+        args.selector_base_input,
+        "--unified_expert_slots",
+        args.selector_unified_expert_slots,
+        "--min_valid_gain_over_base",
+        str(args.selector_min_valid_gain_over_base),
+        "--bootstrap_samples",
+        str(args.selector_bootstrap_samples),
+        "--rank_bootstrap_samples",
+        str(args.selector_rank_bootstrap_samples),
+        "--rank_candidate_limit",
+        str(args.selector_rank_candidate_limit),
+        "--bootstrap_min_win_rate",
+        str(args.selector_bootstrap_min_win_rate),
+        "--bootstrap_min_gain_quantile",
+        str(args.selector_bootstrap_min_gain_quantile),
+        "--max_prediction_change_rate",
+        str(args.selector_max_prediction_change_rate),
+        "--max_prediction_js_divergence",
+        str(args.selector_max_prediction_js_divergence),
+        "--calibration_penalty_weight",
+        str(args.selector_calibration_penalty_weight),
+        "--output_json",
+        selector_output_path(args),
+    ]
+    return cmd
+
+
 def selected_model_types(args) -> List[str]:
     out: List[str] = []
     for raw in args.model_types.split(","):
@@ -495,9 +681,6 @@ def commands(args) -> Iterable[List[str]]:
             yield tower1_preprocess_cmd(args, split)
     if args.stage in {"tower1_train", "all"}:
         yield tower1_train_cmd(args)
-    if args.stage in {"embeddings", "all"}:
-        for split in splits:
-            yield embedding_cmd(args, split)
     if args.stage in {"tower2_preprocess", "all"}:
         for split in splits:
             yield tower2_preprocess_cmd(args, split)
@@ -508,13 +691,18 @@ def commands(args) -> Iterable[List[str]]:
         for model_type in selected_model_types(args):
             yield tower2_eval_cmd(args, model_type, "valid")
             yield tower2_eval_cmd(args, model_type, "test")
-    if args.stage in {"fusion", "all"}:
+    if args.stage in {"fusion", "stacker", "all"}:
         for model_type in selected_model_types(args):
             yield make_fusion_payload_cmd(args, model_type)
+    if args.stage in {"fusion", "all"}:
         yield fusion_cmd(args)
+    if args.stage in {"stacker", "all"}:
+        yield stacker_cmd(args)
     if args.stage in {"prior", "all"}:
         yield prior_cmd(args)
         yield safe_prior_residual_cmd(args)
+    if args.stage in {"selector", "all"}:
+        yield selector_cmd(args)
 
 
 def main() -> None:
@@ -522,7 +710,7 @@ def main() -> None:
     default_tower1_output_dir = "checkpoints/tower1_qwen_multitask_flowaware_change_weight"
     ap.add_argument("--dataset", default="vpn-app")
     ap.add_argument("--num_classes", type=int, default=16)
-    ap.add_argument("--stage", choices=["tower1_train", "tower1_preprocess", "embeddings", "tower2_preprocess", "tower2_train", "eval", "fusion", "prior", "all"], required=True)
+    ap.add_argument("--stage", choices=["tower1_train", "tower1_preprocess", "embeddings", "tower2_preprocess", "tower2_train", "eval", "fusion", "stacker", "prior", "selector", "all"], required=True)
     ap.add_argument("--splits", default="train,valid,test")
     ap.add_argument("--train_dir", default="")
     ap.add_argument("--valid_dir", default="")
@@ -571,6 +759,8 @@ def main() -> None:
     ap.add_argument("--embedding_mode", choices=["raw", "projected", "concat"], default="concat")
     ap.add_argument("--embedding_batch_size", type=int, default=8)
     ap.add_argument("--embedding_max_length", type=int, default=1024)
+    ap.add_argument("--embedding_num_shards", type=int, default=1, help="Run embedding extraction as N deterministic flow-id shards and merge the shard indexes.")
+    ap.add_argument("--embedding_cuda_devices", default="", help="Comma-separated CUDA device ids assigned round-robin to embedding shards, e.g. 0,1,2,3.")
     ap.add_argument("--window_size", type=int, default=32)
     ap.add_argument("--stride", type=int, default=16)
     ap.add_argument("--model_types", default="graph,seq")
@@ -585,6 +775,8 @@ def main() -> None:
     ap.add_argument("--weight_decay", type=float, default=0.03)
     ap.add_argument("--flow_pooling", default="mean", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"])
     ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0, help="Entropy-minimization weight for trainable multi-view flow pooling gates.")
+    ap.add_argument("--flow_stat_expert_weight", type=float, default=0.0, help="Fuse the trainable flow metadata/statistics expert into Tower-2.")
+    ap.add_argument("--flow_stat_aux_weight", type=float, default=0.0, help="Auxiliary CE weight for the trainable flow metadata/statistics expert.")
     ap.add_argument("--window_loss_weight", type=float, default=0.3)
     ap.add_argument("--class_weight_strength", type=float, default=0.6)
     ap.add_argument("--label_smoothing", type=float, default=0.05)
@@ -608,6 +800,8 @@ def main() -> None:
     ap.add_argument("--paired_embedding_suffix", default="", help="Optional second-view Tower-2 dataset suffix aligned by flow_id.")
     ap.add_argument("--paired_view_weight", type=float, default=0.0, help="Flow CE weight for the paired view.")
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired-view flow logits.")
+    ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0, help="Adversarially remove primary-vs-paired view information from Tower-2 flow embeddings.")
+    ap.add_argument("--domain_adversarial_lambda", type=float, default=1.0, help="Gradient reversal strength for Tower-2 view-domain adversarial training.")
     ap.add_argument("--prior_strengths", default="0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2")
     ap.add_argument("--prior_gate_modes", default="none,low_margin,high_entropy,low_confidence")
     ap.add_argument("--prior_gate_thresholds", default="0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8")
@@ -617,6 +811,35 @@ def main() -> None:
     ap.add_argument("--prior_ensemble_mode", choices=["mean", "log_mean", "vote"], default="mean")
     ap.add_argument("--safe_prior_min_base_weight", type=float, default=0.90)
     ap.add_argument("--safe_prior_simplex_step", type=float, default=0.01)
+    ap.add_argument("--stacker_select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
+    ap.add_argument("--stacker_c_grid", default="0.01,0.03,0.1,0.3,1,3,10")
+    ap.add_argument("--stacker_class_weight_grid", default="none,balanced")
+    ap.add_argument("--stacker_include_logits", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--stacker_include_confidence", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--stacker_base_input", default="")
+    ap.add_argument("--stacker_unified_expert_slots", default="")
+    ap.add_argument("--stacker_min_valid_gain_over_base", type=float, default=0.0)
+    ap.add_argument("--stacker_max_prediction_change_rate", type=float, default=1.0)
+    ap.add_argument("--stacker_max_prediction_js_divergence", type=float, default=1.0)
+    ap.add_argument("--selector_select_metric", choices=["accuracy", "macro_f1"], default="accuracy")
+    ap.add_argument("--selector_rank_select_metric", choices=["", "accuracy", "macro_f1"], default="")
+    ap.add_argument(
+        "--selector_rank_metric",
+        choices=["select_metric", "accuracy", "macro_f1", "bootstrap_gain_quantile", "bootstrap_mean_gain", "bootstrap_win_rate"],
+        default="bootstrap_gain_quantile",
+    )
+    ap.add_argument("--selector_strategies", default="always,class_bias_calibration")
+    ap.add_argument("--selector_base_input", default="base")
+    ap.add_argument("--selector_unified_expert_slots", default="base,prior,stacker")
+    ap.add_argument("--selector_min_valid_gain_over_base", type=float, default=0.0)
+    ap.add_argument("--selector_bootstrap_samples", type=int, default=50)
+    ap.add_argument("--selector_rank_bootstrap_samples", type=int, default=50)
+    ap.add_argument("--selector_rank_candidate_limit", type=int, default=48)
+    ap.add_argument("--selector_bootstrap_min_win_rate", type=float, default=0.55)
+    ap.add_argument("--selector_bootstrap_min_gain_quantile", type=float, default=-0.001)
+    ap.add_argument("--selector_max_prediction_change_rate", type=float, default=0.25)
+    ap.add_argument("--selector_max_prediction_js_divergence", type=float, default=0.03)
+    ap.add_argument("--selector_calibration_penalty_weight", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--require_cuda", action="store_true", help="Fail before long stages if CUDA is unavailable.")
     ap.add_argument("--no_progress", action="store_true")
@@ -642,12 +865,47 @@ def main() -> None:
         args.train_dir = args.train_dir or train_dir
         args.valid_dir = args.valid_dir or valid_dir
         args.test_dir = args.test_dir or test_dir
+    if args.embedding_num_shards <= 0:
+        raise SystemExit("--embedding_num_shards must be positive")
 
     long_stages = {"tower1_train", "embeddings", "all"}
     if args.require_cuda and args.stage in long_stages and not cuda_available():
         raise SystemExit("CUDA is unavailable; refusing to run long Stage-8 GPU stage.")
 
     write_manifest(args)
+    pre_embedding_stages = {"tower1_preprocess", "tower1_train"}
+    if args.stage in pre_embedding_stages:
+        for cmd in commands(args):
+            run(cmd, dry_run=args.dry_run)
+        return
+
+    if args.stage == "embeddings":
+        for split in selected_splits(args.splits):
+            run_embedding_stage(args, split)
+        return
+
+    if args.stage == "all":
+        for split in selected_splits(args.splits):
+            run(tower1_preprocess_cmd(args, split), dry_run=args.dry_run)
+        run(tower1_train_cmd(args), dry_run=args.dry_run)
+        for split in selected_splits(args.splits):
+            run_embedding_stage(args, split)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "tower2_preprocess"})):
+            run(cmd, dry_run=args.dry_run)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "tower2_train"})):
+            run(cmd, dry_run=args.dry_run)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "eval"})):
+            run(cmd, dry_run=args.dry_run)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "fusion"})):
+            run(cmd, dry_run=args.dry_run)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "stacker"})):
+            run(cmd, dry_run=args.dry_run)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "prior"})):
+            run(cmd, dry_run=args.dry_run)
+        for cmd in commands(argparse.Namespace(**{**vars(args), "stage": "selector"})):
+            run(cmd, dry_run=args.dry_run)
+        return
+
     for cmd in commands(args):
         run(cmd, dry_run=args.dry_run)
 

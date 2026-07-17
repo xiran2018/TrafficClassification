@@ -47,6 +47,9 @@ class FlowAggregationHead(nn.Module):
         flow_transformer_layers: int = 1,
         flow_transformer_heads: int = 4,
         dropout: float = 0.1,
+        flow_stat_meta_dim: int = 0,
+        flow_stat_expert_weight: float = 0.0,
+        flow_stat_aux_weight: float = 0.0,
     ):
         super().__init__()
         self.pooling = pooling
@@ -54,6 +57,9 @@ class FlowAggregationHead(nn.Module):
         self.num_coarse_classes = num_coarse_classes
         self.hierarchical_mode = hierarchical_mode
         self.class_groups = [list(group) for group in (class_groups or [])]
+        self.flow_stat_meta_dim = int(max(0, flow_stat_meta_dim))
+        self.flow_stat_expert_weight = float(max(0.0, flow_stat_expert_weight))
+        self.flow_stat_aux_weight = float(max(0.0, flow_stat_aux_weight))
         self.score = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1))
         if pooling == "transformer":
             if hidden_dim % flow_transformer_heads != 0:
@@ -90,6 +96,27 @@ class FlowAggregationHead(nn.Module):
         ) if self.use_expert_heads else nn.ModuleList()
         if pooling == "late_fusion":
             self.fusion_logit_scale = nn.Parameter(torch.tensor(1.0))
+        self.use_flow_stat_expert = self.flow_stat_meta_dim > 0 and (
+            self.flow_stat_expert_weight > 0 or self.flow_stat_aux_weight > 0
+        )
+        stat_dim = self.flow_stat_meta_dim * 4 + 2
+        if self.use_flow_stat_expert:
+            self.stat_proj = nn.Sequential(
+                nn.LayerNorm(stat_dim),
+                nn.Linear(stat_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+            )
+            self.stat_cls = nn.Linear(hidden_dim, num_classes)
+            self.stat_gate = nn.Sequential(
+                nn.LayerNorm(hidden_dim * 2),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
 
     def pool(self, h: torch.Tensor) -> torch.Tensor:
         if h.numel() == 0:
@@ -120,7 +147,41 @@ class FlowAggregationHead(nn.Module):
                 logits[class_id] = coarse_log_prob[coarse_idx] + fine_log_prob[local_idx]
         return logits
 
-    def forward(self, h: torch.Tensor, window_logits: torch.Tensor | None = None):
+    def _flow_stat_features(self, window_x: torch.Tensor | Sequence[torch.Tensor] | None, like: torch.Tensor) -> torch.Tensor | None:
+        if not self.use_flow_stat_expert or window_x is None:
+            return None
+        if isinstance(window_x, torch.Tensor):
+            x = window_x.reshape(-1, window_x.shape[-1])
+        else:
+            pieces = [t.reshape(-1, t.shape[-1]) for t in window_x if isinstance(t, torch.Tensor) and t.numel() > 0]
+            if not pieces:
+                return None
+            x = torch.cat(pieces, dim=0)
+        if x.numel() == 0:
+            return None
+        meta_dim = min(self.flow_stat_meta_dim, x.shape[-1])
+        if meta_dim <= 0:
+            return None
+        meta = x[:, -meta_dim:].float()
+        if meta_dim < self.flow_stat_meta_dim:
+            pad = meta.new_zeros((meta.shape[0], self.flow_stat_meta_dim - meta_dim))
+            meta = torch.cat([meta, pad], dim=-1)
+        mean = meta.mean(dim=0)
+        std = meta.std(dim=0, unbiased=False) if meta.size(0) > 1 else torch.zeros_like(mean)
+        minv = meta.min(dim=0).values
+        maxv = meta.max(dim=0).values
+        extras = meta.new_tensor([
+            math.log1p(float(meta.size(0))),
+            math.log1p(float(x.shape[0])),
+        ])
+        return torch.cat([mean, std, minv, maxv, extras], dim=0).to(device=like.device, dtype=like.dtype)
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        window_logits: torch.Tensor | None = None,
+        window_x: torch.Tensor | Sequence[torch.Tensor] | None = None,
+    ):
         pooled = self.pool(h)
         gate = None
         if isinstance(pooled, tuple):
@@ -135,11 +196,51 @@ class FlowAggregationHead(nn.Module):
         if self.pooling == "late_fusion" and window_logits is not None:
             logits = logits + self.fusion_logit_scale * window_logits.mean(dim=0)
         out = {"embedding": emb, "logits": logits}
+        stat_features = self._flow_stat_features(window_x, emb)
+        if stat_features is not None:
+            stat_emb = self.stat_proj(stat_features)
+            stat_logits = self.stat_cls(stat_emb)
+            stat_gate = torch.sigmoid(self.stat_gate(torch.cat([emb, stat_emb], dim=-1))).squeeze(-1)
+            if self.flow_stat_expert_weight > 0:
+                logits = logits + self.flow_stat_expert_weight * stat_gate * stat_logits
+                out["logits"] = logits
+            out["stat_logits"] = stat_logits
+            out["stat_gate"] = stat_gate
         if gate is not None:
             out["multi_view_gate"] = gate
         if coarse_logits is not None:
             out["coarse_logits"] = coarse_logits
         return out
+
+
+class GradientReverseFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, lambd: float):
+        ctx.lambd = float(lambd)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return -ctx.lambd * grad_output, None
+
+
+def gradient_reverse(x: torch.Tensor, lambd: float = 1.0) -> torch.Tensor:
+    return GradientReverseFn.apply(x, lambd)
+
+
+class DomainAdversarialHead(nn.Module):
+    def __init__(self, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 2),
+        )
+
+    def forward(self, x: torch.Tensor, lambd: float = 1.0) -> torch.Tensor:
+        return self.net(gradient_reverse(x, lambd))
 
 
 def load_pt(path: str):
@@ -310,10 +411,25 @@ def class_weighted_loss(
     y: torch.Tensor,
     class_weight: torch.Tensor | None = None,
     label_smoothing: float = 0.0,
+    focal_gamma: float = 0.0,
 ) -> torch.Tensor:
     valid = y >= 0
     if valid.any():
-        return F.cross_entropy(logits[valid], y[valid], weight=class_weight, label_smoothing=label_smoothing)
+        selected_logits = logits[valid]
+        selected_y = y[valid]
+        if focal_gamma <= 0:
+            return F.cross_entropy(selected_logits, selected_y, weight=class_weight, label_smoothing=label_smoothing)
+        log_prob = F.log_softmax(selected_logits, dim=-1)
+        ce = F.cross_entropy(
+            selected_logits,
+            selected_y,
+            weight=class_weight,
+            label_smoothing=label_smoothing,
+            reduction="none",
+        )
+        pt = log_prob.gather(1, selected_y.view(-1, 1)).squeeze(1).exp().clamp(min=1e-6, max=1.0)
+        focal = (1.0 - pt).pow(float(focal_gamma))
+        return (focal * ce).mean()
     return torch.tensor(0.0, device=logits.device)
 
 
@@ -338,7 +454,7 @@ def regularized_classification_loss(
     class_weight: torch.Tensor | None,
     args,
 ) -> torch.Tensor:
-    return class_weighted_loss(logits, y, class_weight, args.label_smoothing) + confidence_penalty_loss(
+    return class_weighted_loss(logits, y, class_weight, args.label_smoothing, args.focal_gamma) + confidence_penalty_loss(
         logits,
         y,
         args.confidence_penalty_weight,
@@ -793,6 +909,37 @@ def multi_view_gate_entropy_loss(gates: List[torch.Tensor], weight: float) -> to
     return weight * entropy
 
 
+def flow_stat_aux_loss(stat_logits: List[torch.Tensor], y: torch.Tensor, class_weight: torch.Tensor | None, args) -> torch.Tensor | None:
+    if args.flow_stat_aux_weight <= 0 or not stat_logits:
+        return None
+    if len(stat_logits) != y.numel():
+        return None
+    logits = torch.stack(stat_logits, dim=0)
+    return args.flow_stat_aux_weight * regularized_classification_loss(logits, y, class_weight, args)
+
+
+def view_domain_adversarial_loss(
+    domain_head: DomainAdversarialHead | None,
+    clean_embs: torch.Tensor,
+    paired_embs: torch.Tensor | None,
+    weight: float,
+    lambd: float,
+) -> torch.Tensor:
+    if domain_head is None or weight <= 0 or paired_embs is None or paired_embs.numel() == 0:
+        return clean_embs.sum() * 0.0
+    if clean_embs.size(0) != paired_embs.size(0):
+        return clean_embs.sum() * 0.0
+    z = torch.cat([clean_embs, paired_embs], dim=0)
+    y = torch.cat(
+        [
+            torch.zeros(clean_embs.size(0), dtype=torch.long, device=clean_embs.device),
+            torch.ones(paired_embs.size(0), dtype=torch.long, device=clean_embs.device),
+        ],
+        dim=0,
+    )
+    return weight * F.cross_entropy(domain_head(z, lambd), y)
+
+
 def train_seq_flow(args):
     ds = SeqDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
@@ -818,10 +965,21 @@ def train_seq_flow(args):
         flow_transformer_layers=args.flow_transformer_layers,
         flow_transformer_heads=args.flow_transformer_heads,
         dropout=args.dropout,
+        flow_stat_meta_dim=args.meta_feature_dim,
+        flow_stat_expert_weight=args.flow_stat_expert_weight,
+        flow_stat_aux_weight=args.flow_stat_aux_weight,
     ).to(args.device)
+    domain_head = (
+        DomainAdversarialHead(args.hidden_dim, args.dropout).to(args.device)
+        if args.view_domain_adversarial_weight > 0 and args.paired_view_dataset
+        else None
+    )
     maybe_load_init_checkpoint(args, model, flow_head)
     class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
-    opt = torch.optim.AdamW(list(model.parameters()) + list(flow_head.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    opt_params = list(model.parameters()) + list(flow_head.parameters())
+    if domain_head is not None:
+        opt_params += list(domain_head.parameters())
+    opt = torch.optim.AdamW(opt_params, lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
     stale_epochs = 0
     for epoch in range(1, args.epochs + 1):
@@ -863,17 +1021,28 @@ def train_seq_flow(args):
             flow_embs = []
             flow_logits_aug = []
             multi_view_gates = []
+            stat_logits = []
             for flow_idx in range(len(flow_batch)):
                 win_mask = owners_t == flow_idx
-                pooled = flow_head(out["embedding"][win_mask], window_logits=out["logits"][win_mask])
+                pooled = flow_head(
+                    out["embedding"][win_mask],
+                    window_logits=out["logits"][win_mask],
+                    window_x=x_clean[win_mask],
+                )
                 flow_logits.append(pooled["logits"])
                 if pooled.get("multi_view_gate") is not None:
                     multi_view_gates.append(pooled["multi_view_gate"])
+                if pooled.get("stat_logits") is not None:
+                    stat_logits.append(pooled["stat_logits"])
                 if pooled.get("coarse_logits") is not None:
                     flow_coarse_logits.append(pooled["coarse_logits"])
                 flow_embs.append(pooled["embedding"])
                 if out_aug is not None:
-                    pooled_aug = flow_head(out_aug["embedding"][win_mask], window_logits=out_aug["logits"][win_mask])
+                    pooled_aug = flow_head(
+                        out_aug["embedding"][win_mask],
+                        window_logits=out_aug["logits"][win_mask],
+                        window_x=x_clean[win_mask],
+                    )
                     flow_logits_aug.append(pooled_aug["logits"])
             flow_logits = torch.stack(flow_logits, dim=0)
             coarse_logits = torch.stack(flow_coarse_logits, dim=0) if flow_coarse_logits else None
@@ -886,8 +1055,12 @@ def train_seq_flow(args):
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
+            stat_loss = flow_stat_aux_loss(stat_logits, y, class_weight, args)
+            if stat_loss is not None:
+                loss = loss + stat_loss
             paired_logits = None
-            if paired_windows and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0):
+            paired_embs = None
+            if paired_windows and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0 or args.view_domain_adversarial_weight > 0):
                 paired_batch = collate_seq(paired_windows)
                 paired_out = model(
                     apply_input_augmentation(paired_batch["x"].to(args.device), args),
@@ -896,22 +1069,37 @@ def train_seq_flow(args):
                 paired_owners_t = torch.tensor(paired_owners, dtype=torch.long, device=args.device)
                 paired_flow_logits = []
                 paired_flow_coarse_logits = []
+                paired_flow_embs = []
                 for flow_idx in range(len(flow_batch)):
                     win_mask = paired_owners_t == flow_idx
                     if not win_mask.any():
                         continue
-                    pooled = flow_head(paired_out["embedding"][win_mask], window_logits=paired_out["logits"][win_mask])
+                    pooled = flow_head(
+                        paired_out["embedding"][win_mask],
+                        window_logits=paired_out["logits"][win_mask],
+                        window_x=paired_batch["x"].to(args.device)[win_mask],
+                    )
                     paired_flow_logits.append(pooled["logits"])
+                    paired_flow_embs.append(pooled["embedding"])
                     if pooled.get("coarse_logits") is not None:
                         paired_flow_coarse_logits.append(pooled["coarse_logits"])
                 if paired_flow_logits and len(paired_flow_logits) == len(flow_batch):
                     paired_logits = torch.stack(paired_flow_logits, dim=0)
+                    paired_embs = torch.stack(paired_flow_embs, dim=0)
                     paired_coarse = torch.stack(paired_flow_coarse_logits, dim=0) if paired_flow_coarse_logits else None
                     paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse, class_to_coarse, effective_hierarchical_logit_weight(args))
                     if args.paired_view_weight > 0:
                         loss = loss + args.paired_view_weight * regularized_classification_loss(paired_logits, y, class_weight, args)
                     if args.paired_consistency_weight > 0:
                         loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(flow_logits, paired_logits, args.consistency_temperature)
+            if args.view_domain_adversarial_weight > 0:
+                loss = loss + view_domain_adversarial_loss(
+                    domain_head,
+                    flow_embs,
+                    paired_embs,
+                    args.view_domain_adversarial_weight,
+                    args.domain_adversarial_lambda,
+                )
             if args.consistency_weight > 0 and isinstance(flow_logits_aug, torch.Tensor):
                 loss = loss + args.consistency_weight * consistency_kl_loss(flow_logits, flow_logits_aug, args.consistency_temperature)
             if coarse_logits is not None and args.hierarchical_weight > 0:
@@ -930,7 +1118,7 @@ def train_seq_flow(args):
             if args.flow_contrastive_weight > 0:
                 loss = loss + args.flow_contrastive_weight * contrastive_loss(flow_embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
-            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(flow_head.parameters()), 1.0)
+            torch.nn.utils.clip_grad_norm_(opt_params, 1.0)
             opt.step()
             total += float(loss.item()) * len(labels)
             ok += int((flow_logits.argmax(-1) == y).sum()); cnt += len(labels)
@@ -1006,6 +1194,7 @@ def evaluate_seq_flow(
                 flow_head(
                     out["embedding"][owners_t == flow_idx],
                     window_logits=out["logits"][owners_t == flow_idx],
+                    window_x=batch["x"].to(device)[owners_t == flow_idx],
                 )
                 for flow_idx in range(len(flow_batch))
             ]
@@ -1109,10 +1298,21 @@ def train_graph_flow(args):
         flow_transformer_layers=args.flow_transformer_layers,
         flow_transformer_heads=args.flow_transformer_heads,
         dropout=args.dropout,
+        flow_stat_meta_dim=args.meta_feature_dim,
+        flow_stat_expert_weight=args.flow_stat_expert_weight,
+        flow_stat_aux_weight=args.flow_stat_aux_weight,
     ).to(args.device)
+    domain_head = (
+        DomainAdversarialHead(args.hidden_dim, args.dropout).to(args.device)
+        if args.view_domain_adversarial_weight > 0 and args.paired_view_dataset
+        else None
+    )
     maybe_load_init_checkpoint(args, model, flow_head)
     class_weight = compute_class_weights([g["label"] for g in tr_groups], args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
-    opt = torch.optim.AdamW(list(model.parameters()) + list(flow_head.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    opt_params = list(model.parameters()) + list(flow_head.parameters())
+    if domain_head is not None:
+        opt_params += list(domain_head.parameters())
+    opt = torch.optim.AdamW(opt_params, lr=args.lr, weight_decay=args.weight_decay)
     best = -1.0
     stale_epochs = 0
     for epoch in range(1, args.epochs + 1):
@@ -1125,19 +1325,23 @@ def train_graph_flow(args):
             flow_logits_aug = []
             paired_flow_logits = []
             paired_flow_coarse_logits = []
+            paired_flow_embs = []
             window_logits_all = []
             window_labels = []
             window_embs_all = []
             window_owners = []
             multi_view_gates = []
+            stat_logits = []
             labels = []
             for group in flow_batch:
                 window_embs = []
                 window_logits = []
                 window_embs_aug = []
                 window_logits_aug = []
+                window_xs = []
                 for item in maybe_drop_windows(group["items"], args.window_dropout_prob):
                     x_clean = item["x"].to(args.device)
+                    window_xs.append(x_clean)
                     edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
                     if args.consistency_weight > 0:
                         out = model(x_clean, item["edge_index"].to(args.device), item["edge_attr"].to(args.device))
@@ -1156,10 +1360,16 @@ def train_graph_flow(args):
                     active_flow_idx = len(labels)
                     window_embs_all.extend(window_embs)
                     window_owners.extend([active_flow_idx] * len(window_embs))
-                    pooled = flow_head(torch.stack(window_embs, dim=0), window_logits=torch.stack(window_logits, dim=0))
+                    pooled = flow_head(
+                        torch.stack(window_embs, dim=0),
+                        window_logits=torch.stack(window_logits, dim=0),
+                        window_x=window_xs,
+                    )
                     flow_logits.append(pooled["logits"])
                     if pooled.get("multi_view_gate") is not None:
                         multi_view_gates.append(pooled["multi_view_gate"])
+                    if pooled.get("stat_logits") is not None:
+                        stat_logits.append(pooled["stat_logits"])
                     if pooled.get("coarse_logits") is not None:
                         flow_coarse_logits.append(pooled["coarse_logits"])
                     flow_embs.append(pooled["embedding"])
@@ -1168,7 +1378,11 @@ def train_graph_flow(args):
                         flow_logits_aug.append(pooled_aug["logits"])
                     labels.append(int(group["label"]))
                     paired_group = paired_groups.get(str(group["flow_id"]))
-                    if paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0):
+                    if paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (
+                        args.paired_view_weight > 0
+                        or args.paired_consistency_weight > 0
+                        or args.view_domain_adversarial_weight > 0
+                    ):
                         paired_window_embs = []
                         paired_window_logits = []
                         for paired_item in maybe_drop_windows(paired_group["items"], args.window_dropout_prob):
@@ -1181,8 +1395,10 @@ def train_graph_flow(args):
                             paired_pooled = flow_head(
                                 torch.stack(paired_window_embs, dim=0),
                                 window_logits=torch.stack(paired_window_logits, dim=0),
+                                window_x=[paired_item["x"].to(args.device) for paired_item in paired_group["items"]],
                             )
                             paired_flow_logits.append(paired_pooled["logits"])
+                            paired_flow_embs.append(paired_pooled["embedding"])
                             if paired_pooled.get("coarse_logits") is not None:
                                 paired_flow_coarse_logits.append(paired_pooled["coarse_logits"])
             if not flow_logits:
@@ -1191,8 +1407,10 @@ def train_graph_flow(args):
             coarse_logits = torch.stack(flow_coarse_logits, dim=0) if flow_coarse_logits else None
             logits = apply_hierarchical_logits(logits, coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             paired_logits = None
+            paired_embs = None
             if paired_flow_logits and len(paired_flow_logits) == len(flow_logits):
                 paired_logits = torch.stack(paired_flow_logits, dim=0)
+                paired_embs = torch.stack(paired_flow_embs, dim=0)
                 paired_coarse_logits = torch.stack(paired_flow_coarse_logits, dim=0) if paired_flow_coarse_logits else None
                 paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             embs = torch.stack(flow_embs, dim=0)
@@ -1201,11 +1419,22 @@ def train_graph_flow(args):
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
             if gate_loss is not None:
                 loss = loss + gate_loss
+            stat_loss = flow_stat_aux_loss(stat_logits, y, class_weight, args)
+            if stat_loss is not None:
+                loss = loss + stat_loss
             if paired_logits is not None:
                 if args.paired_view_weight > 0:
                     loss = loss + args.paired_view_weight * regularized_classification_loss(paired_logits, y, class_weight, args)
                 if args.paired_consistency_weight > 0:
                     loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(logits, paired_logits, args.consistency_temperature)
+            if args.view_domain_adversarial_weight > 0:
+                loss = loss + view_domain_adversarial_loss(
+                    domain_head,
+                    embs,
+                    paired_embs,
+                    args.view_domain_adversarial_weight,
+                    args.domain_adversarial_lambda,
+                )
             if args.consistency_weight > 0 and flow_logits_aug:
                 aug_logits = torch.stack(flow_logits_aug, dim=0)
                 loss = loss + args.consistency_weight * consistency_kl_loss(logits, aug_logits, args.consistency_temperature)
@@ -1227,7 +1456,7 @@ def train_graph_flow(args):
             if args.flow_contrastive_weight > 0:
                 loss = loss + args.flow_contrastive_weight * contrastive_loss(embs, y, args, confusion_weights)
             opt.zero_grad(); loss.backward()
-            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(flow_head.parameters()), 1.0)
+            torch.nn.utils.clip_grad_norm_(opt_params, 1.0)
             opt.step()
             total += float(loss.item()) * len(labels)
             ok += int((logits.argmax(-1) == y).sum()); cnt += len(labels)
@@ -1289,7 +1518,11 @@ def evaluate_graph_flow(
         if flow_head is None:
             logits = torch.stack(window_logits, dim=0).mean(dim=0)
         else:
-            pooled = flow_head(torch.stack(window_embs, dim=0), window_logits=torch.stack(window_logits, dim=0))
+            pooled = flow_head(
+                torch.stack(window_embs, dim=0),
+                window_logits=torch.stack(window_logits, dim=0),
+                window_x=[item["x"].to(device) for item in group["items"]],
+            )
             logits = apply_hierarchical_logits(pooled["logits"], pooled.get("coarse_logits"), class_to_coarse, hierarchical_logit_weight)
         y = int(group["label"])
         y_true.append(y)
@@ -1319,6 +1552,7 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "class_weight_beta": args.class_weight_beta,
         "class_weight_strength": args.class_weight_strength,
         "label_smoothing": args.label_smoothing,
+        "focal_gamma": args.focal_gamma,
         "confidence_penalty_weight": args.confidence_penalty_weight,
         "balanced_flow_batches": args.balanced_flow_batches,
         "classes_per_batch": args.classes_per_batch,
@@ -1341,6 +1575,8 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "window_contrastive_positive": args.window_contrastive_positive,
         "flow_transformer_layers": args.flow_transformer_layers,
         "flow_transformer_heads": args.flow_transformer_heads,
+        "flow_stat_expert_weight": args.flow_stat_expert_weight,
+        "flow_stat_aux_weight": args.flow_stat_aux_weight,
         "meta_dropout_prob": args.meta_dropout_prob,
         "meta_feature_dim": args.meta_feature_dim,
         "embedding_dropout_prob": args.embedding_dropout_prob,
@@ -1351,6 +1587,8 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "paired_view_dataset": args.paired_view_dataset,
         "paired_view_weight": args.paired_view_weight,
         "paired_consistency_weight": args.paired_consistency_weight,
+        "view_domain_adversarial_weight": args.view_domain_adversarial_weight,
+        "domain_adversarial_lambda": args.domain_adversarial_lambda,
     }
     if edge_attr_dim is not None:
         payload["edge_attr_dim"] = edge_attr_dim
@@ -1385,6 +1623,7 @@ def main():
     ap.add_argument("--class_weight_beta", type=float, default=0.9999, help="Beta used by --class_weighting effective.")
     ap.add_argument("--class_weight_strength", type=float, default=1.0, help="Interpolate class weights toward 1.0. 1 keeps full weighting, 0 disables the weighting effect.")
     ap.add_argument("--label_smoothing", type=float, default=0.0, help="Label smoothing for main flow/window classification CE losses.")
+    ap.add_argument("--focal_gamma", type=float, default=0.0, help="Focal CE gamma. 0 disables focal loss; positive values focus Tower-2 CE on hard examples.")
     ap.add_argument("--confidence_penalty_weight", type=float, default=0.0, help="KL-to-uniform penalty on classification logits. Positive values reduce overconfident predictions and can improve CI stability.")
     ap.add_argument("--balanced_flow_batches", action="store_true", help="Sample each flow batch from multiple classes with repeated positives, useful for flow SupCon.")
     ap.add_argument("--classes_per_batch", type=int, default=0, help="Classes per balanced flow batch. 0 derives it from batch_size / samples_per_class.")
@@ -1396,6 +1635,8 @@ def main():
     ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="attention", help="Pooling used by --train_level flow over window embeddings.")
     ap.add_argument("--flow_transformer_layers", type=int, default=1, help="Number of Transformer layers for --flow_pooling transformer.")
     ap.add_argument("--flow_transformer_heads", type=int, default=4, help="Attention heads for --flow_pooling transformer.")
+    ap.add_argument("--flow_stat_expert_weight", type=float, default=0.0, help="Fuse a trainable flow-level metadata/statistics expert into the Tower-2 flow head. 0 disables it.")
+    ap.add_argument("--flow_stat_aux_weight", type=float, default=0.0, help="Auxiliary CE weight for the flow metadata/statistics expert.")
     ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0, help="Positive weight minimizes entropy of --flow_pooling multi_view gates, encouraging automatic branch down-weighting.")
     ap.add_argument("--contrastive_mode", choices=["standard", "confusion", "confusion_weighted"], default="standard", help="standard uses all non-self negatives; confusion uses configured hard negatives; confusion_weighted weights hard negatives by a confusion matrix.")
     ap.add_argument("--confusion_groups", default="vpn_app", help="Groups used by --contrastive_mode confusion. Use 'vpn_app', 'none', or semicolon groups.")
@@ -1417,6 +1658,8 @@ def main():
     ap.add_argument("--paired_view_dataset", default="", help="Optional second-view Tower2 dataset aligned by flow_id, e.g. ip/port randomized or masked view.")
     ap.add_argument("--paired_view_weight", type=float, default=0.0, help="Flow CE weight for --paired_view_dataset.")
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired flow logits.")
+    ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0, help="Adversarially remove clean-vs-paired view information from flow embeddings in --train_level flow.")
+    ap.add_argument("--domain_adversarial_lambda", type=float, default=1.0, help="Gradient reversal strength for --view_domain_adversarial_weight.")
     ap.add_argument("--valid_ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -1438,8 +1681,15 @@ def main():
         print("WARNING: --contrastive_mode confusion_weighted has no --confusion_matrix_json; falling back to binary group weights.")
     if args.paired_view_dataset and args.train_level != "flow":
         print("WARNING: --paired_view_dataset is only used with --train_level flow.")
-    if args.paired_view_dataset and args.paired_view_weight <= 0 and args.paired_consistency_weight <= 0:
+    if (
+        args.paired_view_dataset
+        and args.paired_view_weight <= 0
+        and args.paired_consistency_weight <= 0
+        and args.view_domain_adversarial_weight <= 0
+    ):
         print("WARNING: --paired_view_dataset is set but paired losses are both 0.")
+    if args.view_domain_adversarial_weight > 0 and not args.paired_view_dataset:
+        print("WARNING: --view_domain_adversarial_weight requires --paired_view_dataset and will be inactive.")
     if args.model_type == "seq":
         train_seq_flow(args) if args.train_level == "flow" else train_seq(args)
     else:

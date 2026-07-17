@@ -70,13 +70,23 @@ def infer_fold(path: Path) -> Optional[int]:
     return None
 
 
-def score_key(acc: Optional[float], f1: Optional[float], rank_metric: str) -> Tuple[float, float, float]:
+def score_key(
+    acc: Optional[float],
+    f1: Optional[float],
+    rank_metric: str,
+    target_acc: float = 0.0,
+    target_f1: float = 0.0,
+) -> Tuple[float, ...]:
     a = acc if acc is not None else -1.0
     f = f1 if f1 is not None else -1.0
     if rank_metric == "accuracy":
         return (a, f, min(a, f))
     if rank_metric == "macro_f1":
         return (f, a, min(a, f))
+    if rank_metric == "target_gap":
+        acc_gap = a - target_acc
+        f1_gap = f - target_f1
+        return (min(acc_gap, f1_gap), acc_gap, f1_gap, a, f)
     return (min(a, f), a, f)
 
 
@@ -89,7 +99,7 @@ def iter_result_files(dataset_dir: Path, patterns: Iterable[str]) -> Iterable[Pa
                 yield path
 
 
-def scan_dataset(dataset: str, patterns: List[str], rank_metric: str) -> Dict[str, Any]:
+def scan_dataset(dataset: str, patterns: List[str], rank_metric: str, target_acc: float, target_f1: float) -> Dict[str, Any]:
     root = Path("reasoningDataset") / dataset
     fold_rows: Dict[int, List[Dict[str, Any]]] = {0: [], 1: [], 2: []}
     ignored = []
@@ -112,7 +122,7 @@ def scan_dataset(dataset: str, patterns: List[str], rank_metric: str) -> Dict[st
                 "path": str(path),
                 "accuracy": acc,
                 "macro_f1": f1,
-                "score": score_key(acc, f1, rank_metric),
+                "score": score_key(acc, f1, rank_metric, target_acc, target_f1),
             }
         )
     best = {}
@@ -263,7 +273,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", action="append", choices=sorted(DATASET_CONFIG), default=[])
     ap.add_argument("--pattern", action="append", default=["test*.json"], help="Glob under reasoningDataset/DATASET. Can be repeated.")
-    ap.add_argument("--rank_metric", choices=["accuracy", "macro_f1", "target_margin"], default="target_margin")
+    ap.add_argument("--rank_metric", choices=["accuracy", "macro_f1", "target_margin", "target_gap"], default="target_gap")
     ap.add_argument("--target_acc", type=float, default=None, help="Override dataset target accuracy.")
     ap.add_argument("--target_f1", type=float, default=None, help="Override dataset target macro-F1.")
     ap.add_argument("--emit_commands_for_pass", action="store_true")
@@ -276,7 +286,10 @@ def main() -> None:
     reports = []
     scans = {}
     for dataset in datasets:
-        scan = scan_dataset(dataset, args.pattern, args.rank_metric)
+        config = DATASET_CONFIG[dataset]
+        target_acc = args.target_acc if args.target_acc is not None else config["target_acc"]
+        target_f1 = args.target_f1 if args.target_f1 is not None else config["target_f1"]
+        scan = scan_dataset(dataset, args.pattern, args.rank_metric, target_acc, target_f1)
         scans[dataset] = scan
         reports.append(build_report(dataset, scan, args))
     payload = {"reports": reports, "scans": scans}

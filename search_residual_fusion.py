@@ -137,7 +137,7 @@ def iter_candidates(patterns: Iterable[str], exclude: Path) -> List[Tuple[Path, 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True, help="Dominant probability JSON.")
-    ap.add_argument("--candidate_glob", action="append", default=["reasoningDataset/vpn-app/test*.json"])
+    ap.add_argument("--candidate_glob", action="append", default=None)
     ap.add_argument("--label_map", default="")
     ap.add_argument("--top_candidates", type=int, default=50)
     ap.add_argument("--combo_size", type=int, default=3, choices=[2, 3])
@@ -147,6 +147,8 @@ def main() -> None:
     ap.add_argument("--output_json", required=True)
     ap.add_argument("--best_output_json", default="", help="Optional path for the selected fused probability JSON.")
     args = ap.parse_args()
+    if not args.candidate_glob:
+        args.candidate_glob = ["reasoningDataset/vpn-app/test*.json"]
 
     base_path = Path(args.base)
     base_payload = load_payload(str(base_path))
