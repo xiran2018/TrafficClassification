@@ -193,6 +193,49 @@ classify as nonVPN with high confidence. Correcting them with flow-neighbor
 information would violate the strict one-packet inference protocol, so this
 result is not presented as 100%.
 
+The strict-current-packet identifiability audit confirms that this is not a
+single-fold optimization accident. After endpoint, route, checksum, TCP
+sequence/acknowledgement, and timestamp-option fields are removed, six of the
+eight misclassified FIN/ACK packets have byte-identical signatures carrying
+**both labels in every training fold**. Their per-fold label counts include
+`7/6`, `13/11`, and `8/6` for one signature; the other two unseen fine-grained
+signatures map to the same cross-label protocol-semantic group. The remaining
+error is a previously unseen 29-byte UDP signature. This diagnostic uses test
+labels only after prediction to characterize errors; it is never used for
+training, model selection, threshold selection, or correction.
+
+Two further ablations did not improve the headline result:
+
+- Flow-aware supervised contrastive training (`weight=0.05`, eight packets per
+  training flow) was run on all three folds. Its cross-fold mean remained
+  `0.9999186213/0.9999186068` with the identical nine-error set.
+- Endpoint/session-field masked consistency plus flow contrastive training was
+  tested on fold0. It retained all eight FIN/ACK errors and introduced eight
+  nonVPN errors, reducing test accuracy and macro-F1 to
+  `0.9998553267/0.9998553008`; it was therefore not expanded to all folds.
+- A 999-point binary threshold sweep selected by pooled three-fold validation
+  accuracy or macro-F1 chose the unchanged threshold `0.5` under both criteria;
+  the shared-test result consequently remained nine errors.
+
+Reproduce the post-hoc, strict-one-packet audit without CUDA:
+
+```bash
+for fold in 0 1 2; do
+  conda run --no-capture-output -n llm-factory \
+    python audit_packet_identifiability.py \
+      --train_index reasoningDataset/packet-level/vpn-binary/fold${fold}/train/packet_index.jsonl \
+      --test_index reasoningDataset/packet-level/vpn-binary/fold0/test/packet_index.jsonl \
+      --prediction_npz reasoningDataset/packet-level/vpn-binary/test_dual_crossfold_mean.npz \
+      --output_json reasoningDataset/packet-level/vpn-binary/fold${fold}/strict_packet_identifiability_audit.json
+done
+```
+
+The audit reports four nested signatures: exact raw bytes, endpoint-invariant
+bytes, session-invariant bytes, and a compact protocol-semantic signature. The
+reported test-signature oracle is only the best possible lookup **after
+compressing packets to that particular signature**, not an upper bound for a
+model that retains richer current-packet information.
+
 The first protocol-correct VPN-app result uses one packet per inference sample.
 The structural expert reads only the current packet's normalized L3 byte prefix
 and parsed header fields; reconstructed flow IDs are used for split auditing,

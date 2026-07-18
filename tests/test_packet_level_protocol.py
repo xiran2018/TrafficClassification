@@ -7,6 +7,11 @@ import numpy as np
 import pytest
 import torch
 
+from audit_packet_identifiability import (
+    build_report,
+    normalized_packet_bytes,
+    packet_signature,
+)
 from calibrate_prediction_prior import main as calibrate_prior_main
 from fuse_packet_crossfold import main as fuse_crossfold_main
 from packet_eval_utils import encode_packet_logits_with_backoff, packet_classification_metrics
@@ -161,6 +166,73 @@ def test_feature_expert_does_not_consume_flow_identity():
     other_flow = {**row, "flow_id": "flow-b"}
 
     assert np.array_equal(packet_features(row, 32, False), packet_features(other_flow, 32, False))
+
+
+def test_identifiability_session_signature_masks_session_fields():
+    first = {
+        "label_id": 0,
+        "meta": {
+            "l3_hex_prefix": tcp_packet("10.0.0.1", "20.0.0.1", 50000, 443, seq=1, ack=2).hex(),
+            "l3": "IPv4",
+            "l4": "TCP",
+            "packet_len": 40,
+            "ip_header_len": 20,
+            "tcp_data_offset": 20,
+            "payload_len": 0,
+            "tcp_flags": "A",
+        },
+    }
+    second = {
+        "label_id": 1,
+        "meta": {
+            "l3_hex_prefix": tcp_packet("10.1.1.1", "30.1.1.1", 51000, 8443, seq=99, ack=100).hex(),
+            "l3": "IPv4",
+            "l4": "TCP",
+            "packet_len": 40,
+            "ip_header_len": 20,
+            "tcp_data_offset": 20,
+            "payload_len": 0,
+            "tcp_flags": "A",
+        },
+    }
+
+    assert normalized_packet_bytes(first, "raw") != normalized_packet_bytes(second, "raw")
+    assert packet_signature(first, "session") == packet_signature(second, "session")
+
+
+def test_identifiability_report_exposes_conflicts_and_error_strata():
+    def row(label, packet, uid):
+        return {
+            "label_id": label,
+            "packet_uid": uid,
+            "flow_id": uid.split("_")[0],
+            "meta": {
+                "l3_hex_prefix": packet.hex(),
+                "l3": "IPv4",
+                "l4": "TCP",
+                "packet_len": 40,
+                "ip_header_len": 20,
+                "tcp_data_offset": 20,
+                "payload_len": 0,
+                "tcp_flags": "A",
+            },
+        }
+
+    train = [
+        row(0, tcp_packet("10.0.0.1", "20.0.0.1", 50000, 443, seq=1), "a_0"),
+        row(1, tcp_packet("10.0.0.2", "20.0.0.2", 50001, 8443, seq=2), "b_0"),
+    ]
+    test = [row(0, tcp_packet("10.0.0.3", "20.0.0.3", 50002, 9443, seq=3), "c_0")]
+    probabilities = np.asarray([[0.1, 0.9]], dtype=np.float32)
+
+    report = build_report(train, test, probabilities)
+
+    assert report["levels"]["session"]["train"]["conflicting_signatures"] == 1
+    assert report["levels"]["session"]["test_seen_rate"] == 1.0
+    assert report["model_error_strata"]["all"]["errors"] == 1
+    assert report["model_error_strata"]["tcp_control"]["errors"] == 1
+    counts = report["model_error_strata"]["error_examples"][0]["train_signature_label_counts"]
+    assert counts["session"] == {"0": 1, "1": 1}
 
 
 def test_feature_expert_can_mask_endpoint_shortcuts():
