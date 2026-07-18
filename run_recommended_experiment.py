@@ -40,15 +40,6 @@ DATASET_PRESETS = {
         "final_selector_rank_select_metric": "macro_f1",
         "final_selector_rank_candidate_limit": 64,
     },
-    "ustc-app": {
-        "num_classes": 20,
-        "label_map": "reasoningDataset/ustc-app/train_tower1_flowaware_change_weight/label_map.json",
-        "base_selector_input": DEFAULT_PAPER_SAFE_RESULTS["ustc-app"],
-        "slot_stacker_inputs": [
-            ("proto_emb", "reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json"),
-        ],
-        "max_prediction_change_rate": 0.05,
-    },
 }
 
 
@@ -544,7 +535,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Autopilot for the next recommended unified Stage-8 experiment.")
     ap.add_argument("--dataset", default="vpn-app")
     ap.add_argument("--num_classes", type=int, default=0, help="Defaults from dataset presets when 0.")
-    ap.add_argument("--extra_recommendation_dataset", action="append", default=["vpn-app", "tls-120", "ustc-app"])
+    ap.add_argument("--extra_recommendation_dataset", action="append", default=["vpn-app", "tls-120"])
     ap.add_argument("--embedding_suffix", default="rawproj_flowaware_change_weight")
     ap.add_argument("--paired_output_suffix", default="flowaware_ipport_rand_change_weight")
     ap.add_argument("--paired_embedding_suffix", default="rawproj_flowaware_ipport_rand_change_weight")

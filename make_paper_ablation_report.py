@@ -77,24 +77,6 @@ DEFAULT_CASES = [
         "reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json",
         "class-bias calibrated soft gate",
     ),
-    (
-        "ustc-app",
-        "base residual",
-        "reasoningDataset/ustc-app/test_fusion_graph_seq_emb_rawproj_flowaware_change_weight_s200_pb8_step150_stage8_flowaware_safe_prior_residual.json",
-        "base",
-    ),
-    (
-        "ustc-app",
-        "proto embedding expert",
-        "reasoningDataset/ustc-app/test_flow_embedding_classifier_flowproto_full_s200_w002_step150_message_header_ports_valid_macro.json",
-        "Tower-1 prototype",
-    ),
-    (
-        "ustc-app",
-        "safe selector",
-        "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_bootstrap_shift_tol001_valid_macro.json",
-        "class-precision gate",
-    ),
 ]
 
 

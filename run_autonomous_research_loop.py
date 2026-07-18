@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from paper_framework_defaults import DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
+from paper_framework_defaults import DEFAULT_FLOW_DATASETS, DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
 from recommend_next_experiment import cuda_summary
 from summarize_experiment_results import DEFAULT_TARGETS, RANK_METRICS, collect_dataset, parse_target
 
@@ -495,7 +495,7 @@ def paper_safe_status_from_evidence(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Autonomous research loop for the unified traffic framework.")
-    ap.add_argument("--datasets", default="vpn-app,tls-120,ustc-app")
+    ap.add_argument("--datasets", default=",".join(DEFAULT_FLOW_DATASETS))
     ap.add_argument("--goal_datasets", default="vpn-app,tls-120")
     ap.add_argument("--target", action="append", default=[], help="Optional DATASET:ACC:MACRO_F1 target override.")
     ap.add_argument("--max_iters", type=int, default=1)

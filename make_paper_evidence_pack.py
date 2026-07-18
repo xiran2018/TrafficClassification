@@ -216,11 +216,11 @@ def paper_positioning(claims: List[Dict[str, Any]], ablations: List[Dict[str, An
     risk_controls = [
         "Use bootstrap and target-shift guards to prevent validation-favorable but target-unstable experts from overriding the base model.",
         "Report harmful expert candidates as negative ablations instead of hiding them; they motivate the gated-selector design.",
-        "Separate strong performance claims from cross-dataset framework evidence when confidence intervals are wide.",
+        "Separate strong performance claims from exploratory evidence when confidence intervals are wide.",
     ]
     next_experiments = [
         "Run fresh A800 Stage-8 paired-view experiments with flow-aware embeddings instead of old-embedding paired probes.",
-        "Add larger or repeated USTC splits before making strong USTC performance claims.",
+        "Keep per-packet-split datasets outside the flow-level main table unless a leakage-free per-flow split is released.",
         "For VPN, prioritize representation learning improvements because probability-level expert switching is already gated off by target-shift evidence.",
     ]
     return {

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-from paper_framework_defaults import DEFAULT_PAPER_SAFE_RESULTS
+from paper_framework_defaults import DEFAULT_FLOW_DATASETS, DEFAULT_PAPER_SAFE_RESULTS
 from summarize_experiment_results import DEFAULT_TARGETS, collect_dataset, metric_from_payload
 
 
@@ -221,7 +221,7 @@ def main() -> None:
         targets[dataset] = (float(acc), float(f1))
 
     cuda = cuda_summary()
-    datasets = args.dataset or ["vpn-app", "tls-120", "ustc-app"]
+    datasets = args.dataset or list(DEFAULT_FLOW_DATASETS)
     safe_overrides = paper_safe_overrides(args.paper_safe_result)
     report = {"cuda": cuda, "datasets": []}
     for dataset in datasets:

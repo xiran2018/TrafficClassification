@@ -1206,7 +1206,7 @@ python calibrate_prediction_prior.py \
 
 ### Stage 8: target-prior ensemble and representation regularization
 
-### Unified paper framework: shared modules across VPN/TLS/USTC
+### Unified paper framework: shared modules across VPN/TLS
 
 For the paper, use one shared framework instead of dataset-specific model switches:
 
@@ -1221,7 +1221,7 @@ packet preprocessing
 -> final flow-level prediction
 ```
 
-The important point is that the residual calibration/expert module, validation-gated selector, and cross-fold consensus are always available, but their weights or source choices are selected without target labels. They can receive a non-zero contribution on VPN or USTC, while TLS-120 can automatically favor the fold-stable log-mean path. This keeps one unified framework diagram while allowing data-driven weights. In paper wording, do not claim that every module is forced on for every dataset; claim that every dataset passes through the same candidate framework and harmful modules are validation-gated down to zero, to the base identity path, or to a conservative cross-fold consensus.
+The residual calibration/expert module, validation-gated selector, and cross-fold consensus are available to both VPN and TLS-120, but their weights or source choices are selected without target labels. This keeps one unified framework diagram while allowing data-driven weights. Do not claim that every module is forced on at non-zero weight; claim that both datasets pass through the same candidate framework and harmful modules are validation-gated down to zero, to the base identity path, or to a conservative cross-fold consensus.
 
 Current unified-framework target status:
 
@@ -1242,14 +1242,14 @@ tls-120:
   test macro-F1 = 0.8292
   target acc>=0.7800, macro-F1>=0.7000 -> PASS
 
-ustc-app:
-  result file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json
-  modules: graph/seq Tower-2 + flow-embedding expert + safe target-prior residual candidate + validation-gated expert selector
-  selected selector: class_precision, alpha=0.5, metric_margin=0.0; passes bootstrap win-rate 0.66 and target prediction change 0.05
-  test accuracy = 0.7000
-  test macro-F1 = 0.6250
-  note: 20 test flows only; use as cross-dataset framework evidence and continue improving representation learning
 ```
+
+USTC is excluded from the current flow-level paper scope. Its available
+train/valid/test artifacts originate from a packet-level split, so aggregating
+those packets into flows after splitting cannot prove flow-level independence
+and may place packets from one session in multiple partitions. Historical USTC
+smoke results remain documented below, but they are not used in the framework
+table, target gates, ablations, or generalization claims.
 
 Best-result snapshot:
 
@@ -1732,7 +1732,7 @@ ustc-binary:
   test  /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-binary/test
 ```
 
-`ustc-app` and `ustc-binary` use a flat layout where each root-level `ClassName.pcap` is treated as one labeled pcap source. The preprocessing code supports both this flat layout and the VPN/TLS class-directory layout. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
+`ustc-app` and `ustc-binary` are retained only as legacy packet-level pipeline smoke inputs. Their current partition is not accepted for the flow-level paper because it does not establish independent flow splits. Do not include the following USTC numbers in the VPN/TLS main table or use them as cross-dataset flow-level evidence. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
 
 USTC app has now been run with full no-limit preprocessing. Each split generated 1280 packet records and a 20-class label map. The first 5-step Tower-1 smoke checkpoint only reached `0.15` accuracy / `0.065` macro-F1 after graph+seq fusion, so it should remain a pipeline smoke test. An 80-step Tower-1 run with `packet_batch_size=2` improved graph+seq+embedding-expert fusion to `0.55` accuracy / `0.475` macro-F1, but its packet contrastive loss stayed inactive because `flows_per_batch=1`.
 
@@ -1759,7 +1759,7 @@ Tower-1 training signal:
   step=200 supcon=0.0632, pkt_acc=0.8125
 ```
 
-Interpretation for paper experiments: packet-level training accuracy alone is not a sufficient checkpoint-selection criterion. The final `step_200` adapter has stronger packet training accuracy, but `step_150` gives better downstream flow-level generalization on USTC. Keep downstream validation-aware checkpoint selection as part of the unified framework and report the `step_200` result as an ablation.
+Historical smoke-test interpretation only: packet-level training accuracy alone was not a sufficient checkpoint-selection criterion in this USTC run. Because the partition is not accepted for the current flow-level paper, neither `step_150` nor `step_200` is used as paper evidence.
 
 This is not yet a strong USTC result, but it is an important ablation: when Tower-1 batches contain multiple flows, the flow-aware SupCon term becomes active and downstream validation-aware checkpoint selection improves flow-level generalization.
 
@@ -1950,16 +1950,6 @@ conda run --no-capture-output -n llm-factory \
     --dry_run \
     --no_progress
 
-conda run --no-capture-output -n llm-factory \
-  python run_stage8_flowaware_pipeline.py \
-    --dataset ustc-app \
-    --num_classes 20 \
-    --stage all \
-    --dry_run \
-    --preprocess_max_flows 2 \
-    --tower1_max_steps 2 \
-    --model_types graph \
-    --no_progress
 
 conda run --no-capture-output -n llm-factory \
   python run_stage8_flowaware_pipeline.py \
@@ -2089,7 +2079,7 @@ conda run --no-capture-output -n llm-factory \
     --no_progress
 ```
 
-Use the same command shape for TLS-120 and USTC by changing `--dataset`, `--num_classes`, and the suffixes. This is the preferred paper-facing experiment over additional probability-level tuning because it tests whether endpoint-invariant representations improve flow classification before the validation-gated selector stage.
+Use the same command shape for TLS-120 by changing `--dataset`, `--num_classes`, and the suffixes. This is the preferred paper-facing experiment over additional probability-level tuning because it tests whether endpoint-invariant representations improve flow classification before the validation-gated selector stage.
 
 CPU-feasible probes on the old `rawproj_change_weight` embeddings show that paired-view regularization alone is not enough; it should be paired with fresh Stage-8 Tower-1 flow-aware embeddings before being considered a final method:
 
@@ -2142,7 +2132,7 @@ This keeps the strongest base model dominant when the validation split is too sm
 
 For source-level expert selection, `validation_gated_selector.py` compares probability JSONs on the validation split and then chooses either a single source, a class-precision-gated source, a confidence-threshold switch, a reliability-weighted soft fusion, or a validation-set class-bias calibration candidate. The reliability fusion estimates each expert's validation precision for its predicted class with shrinkage, then weights expert probabilities by validation reliability and confidence. The class-bias calibration candidate estimates the validation true-class prior divided by the model's mean predicted prior and applies that bias to candidate probabilities.
 
-The final selector uses three safety gates: `--min_valid_gain_over_base` for deterministic validation gain, bootstrap gain stability through `--bootstrap_samples`, and an unlabeled target-shift constraint through `--max_prediction_change_rate`. The current unified report uses a small bootstrap quantile tolerance; TLS uses `--bootstrap_min_gain_quantile -0.0015` for the soft-gate candidate because its validation gain is low-shift but the 5% bootstrap lower bound is only slightly below zero. The same candidate family is evaluated on every dataset, while `--max_prediction_change_rate` is dataset-specific: VPN uses a strict no-target-change setting, TLS allows a tiny low-shift switch/calibration, and USTC allows the class-precision gate. The recommended Stage-8 runner now passes `--final_selector_unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker,soft_gate`, so every dataset exposes the same selector expert slots; missing slots are filled from the base probabilities as identity experts and are recorded in `feature_config.input_slot_status`. For legacy best-result JSONs without slot records, the paper report marks the same mapping as `inferred_identity_compatible` instead of pretending the old run recorded it. By default the selector sorts candidates by validation score, skips unsafe candidates, and accepts the first candidate that passes all active guards; if none pass, it falls back to the first input. For paper-grade robustness searches, `--rank_metric bootstrap_gain_quantile` can instead rank the top validation candidates by their bootstrap lower-bound gain before the same safety gates are applied. `--rank_select_metric` lets this robust ranking target accuracy while the accepted selector still optimizes macro-F1. `--calibration_penalty_weight` optionally subtracts a validation calibration penalty (`ece`, `nll`, or `brier`) from the ranking score, using the shared `probability_metrics.py` definition; this prefers less overconfident candidates when validation scores are close, but the accepted candidate must still pass the same gain/bootstrap/target-shift gates. Use `--rank_candidate_limit` to keep this robust ranking practical on large candidate grids. This is the same module used across datasets:
+The final selector uses three safety gates: `--min_valid_gain_over_base` for deterministic validation gain, bootstrap gain stability through `--bootstrap_samples`, and an unlabeled target-shift constraint through `--max_prediction_change_rate`. The current unified report uses a small bootstrap quantile tolerance; TLS uses `--bootstrap_min_gain_quantile -0.0015` for the soft-gate candidate because its validation gain is low-shift but the 5% bootstrap lower bound is only slightly below zero. The same candidate family is evaluated on VPN and TLS-120, while `--max_prediction_change_rate` is dataset-specific: VPN uses a strict no-target-change setting and TLS allows a tiny low-shift switch/calibration. The recommended Stage-8 runner now passes `--final_selector_unified_expert_slots base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker,soft_gate`, so both datasets expose the same selector expert slots; missing slots are filled from the base probabilities as identity experts and are recorded in `feature_config.input_slot_status`. For legacy best-result JSONs without slot records, the paper report marks the same mapping as `inferred_identity_compatible` instead of pretending the old run recorded it. By default the selector sorts candidates by validation score, skips unsafe candidates, and accepts the first candidate that passes all active guards; if none pass, it falls back to the first input. For paper-grade robustness searches, `--rank_metric bootstrap_gain_quantile` can instead rank the top validation candidates by their bootstrap lower-bound gain before the same safety gates are applied. `--rank_select_metric` lets this robust ranking target accuracy while the accepted selector still optimizes macro-F1. `--calibration_penalty_weight` optionally subtracts a validation calibration penalty (`ece`, `nll`, or `brier`) from the ranking score, using the shared `probability_metrics.py` definition; this prefers less overconfident candidates when validation scores are close, but the accepted candidate must still pass the same gain/bootstrap/target-shift gates. Use `--rank_candidate_limit` to keep this robust ranking practical on large candidate grids. This is the same module used across both datasets:
 
 ```text
 VPN:
@@ -2157,14 +2147,9 @@ TLS-120:
   test accuracy = 0.7996
   test macro-F1 = 0.7869
 
-USTC:
-  safe selector file: reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json
-  selected path: class_precision selector, alpha=0.5, metric_margin=0.0; bootstrap win_rate=0.66, target prediction change=0.05
-  test accuracy = 0.7000
-  test macro-F1 = 0.6250
 ```
 
-The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. The unsafe reliability-fusion ablation selected `alpha=5.0`, `reliability_power=4.0`, `confidence_power=1.0`, `temperature=0.5`; it improved validation macro-F1 but dropped target-test performance to `0.6956` accuracy / `0.6633` macro-F1. Bootstrap alone did not reject this VPN candidate because its validation gain was internally stable, but the target-shift guard rejected it because it changed too many target predictions. A broader calibration-enabled candidate search also found a lower-shift VPN threshold switch, but it still dropped to `0.7339` accuracy / `0.7241` macro-F1, so calibration remains an ablation rather than the default final path. On TLS-120, the unified-slot stacker reached `0.7991` accuracy / `0.7897` macro-F1 by itself; a trainable soft expert gate over the same unified slots reached `0.7973` / `0.7843`, with mean test weights dominated by `slot_stacker=0.593` and a base-identity branch `emb_et=0.358`. The current paper-safe selector then applies validation-set class-bias calibration to the soft gate and reaches `0.7996` accuracy / `0.7869` macro-F1 while keeping target prediction change below 4%. A calibration-aware ranking probe with `--calibration_penalty_weight 0.10 --calibration_penalty_metric ece` kept the same accepted TLS and USTC selector decisions but did not improve Acc/F1, so it remains a neutral calibration/stability ablation. This is why the paper method should emphasize validation-gated expert selection with validation stability, trainable expert gating, calibration observability, and unlabeled target-shift safety, not unconditional expert switching.
+The negative VPN selector ablation with a looser `--min_valid_gain_over_base 0.03` selected an embedding-LR expert and dropped to `0.6812` accuracy / `0.6475` macro-F1. The unsafe reliability-fusion ablation selected `alpha=5.0`, `reliability_power=4.0`, `confidence_power=1.0`, `temperature=0.5`; it improved validation macro-F1 but dropped target-test performance to `0.6956` accuracy / `0.6633` macro-F1. Bootstrap alone did not reject this VPN candidate because its validation gain was internally stable, but the target-shift guard rejected it because it changed too many target predictions. A broader calibration-enabled candidate search also found a lower-shift VPN threshold switch, but it still dropped to `0.7339` accuracy / `0.7241` macro-F1, so calibration remains an ablation rather than the default final path. On TLS-120, the unified-slot stacker reached `0.7991` accuracy / `0.7897` macro-F1 by itself; a trainable soft expert gate over the same unified slots reached `0.7973` / `0.7843`, with mean test weights dominated by `slot_stacker=0.593` and a base-identity branch `emb_et=0.358`. The current paper-safe selector then applies validation-set class-bias calibration to the soft gate and reaches `0.7996` accuracy / `0.7869` macro-F1 while keeping target prediction change below 4%. A calibration-aware ranking probe with `--calibration_penalty_weight 0.10 --calibration_penalty_metric ece` kept the accepted TLS selector decision but did not improve Acc/F1, so it remains a neutral calibration/stability ablation. This is why the paper method should emphasize validation-gated expert selection with validation stability, trainable expert gating, calibration observability, and unlabeled target-shift safety, not unconditional expert switching.
 
 Reproduce the TLS-120 unified-slot stacker, soft expert gate, and guarded selector result:
 
@@ -2485,6 +2470,49 @@ content-clean merge:
   missing_content_hash_windows = 0
 ```
 
+For within-split exact-content deduplication, add `--dedupe_content`. The first
+flow for each PCAP SHA256 keeps all of its windows; later path aliases with the
+same content are dropped as complete flows, and conflicting labels are rejected:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python combine_tower2_datasets.py \
+    --inputs reasoningDataset/vpn-app/train_tower2_rawproj_change_weight_split1_t1paired_s80/seq_dataset.pt \
+    --flow_embedding_indices reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight_split1_t1paired_s80/flow_embedding_index.jsonl \
+    --dedupe_content \
+    --output /tmp/two_tower_runs/content_clean/vpn_fold1_train_seq.pt
+```
+
+Recompute headline metrics with each exact PCAP content counted once and obtain
+content-group bootstrap confidence intervals:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python evaluate_content_unique_predictions.py \
+    --prediction_json reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json \
+    --flow_embedding_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --output_json reasoningDataset/vpn-app/test_crossfold_consensus_content_unique_summary.json \
+    --bootstrap_samples 2000 \
+    --summary_only
+```
+
+Observed paper-audit results:
+
+```text
+VPN: 1672 paths -> 1645 unique PCAP contents
+  original acc/F1 = 0.7512/0.7522
+  content-unique acc/F1 = 0.7532/0.7570
+  95% CI: acc=[0.7325, 0.7745], macro-F1=[0.7246, 0.7836]
+
+TLS-120: 11542 paths -> 11542 unique PCAP contents
+  original and content-unique acc/F1 = 0.8461/0.8292
+  95% CI: acc=[0.8397, 0.8525], macro-F1=[0.8197, 0.8359]
+```
+
+Thus the shared-test headline is not inflated by exact-content duplicates. The
+large duplicate counts remain important for training/validation effective sample
+size and must still be disclosed.
+
 Training the same Stage-8 Tower-2 settings on the content-clean merged set gives a more honest but weaker ablation:
 
 ```text
@@ -2742,7 +2770,7 @@ Guarded trainable stacker:
   active under default gates and gives test acc=0.7696, macro-F1=0.7417.
   Run it from the Stage-8 runner with `--stage stacker`; the runner builds the
   graph/seq fusion payloads and then calls the guarded stacker with the same
-  module family for VPN/TLS/USTC.
+  module family for VPN/TLS.
 
 Guarded unified expert selector:
   `validation_gated_selector.py` now supports explicit `--base_input` and both
@@ -2866,6 +2894,22 @@ Source-environment risk/alignment negative ablation:
   and must not interpret duplicated training/validation rows as independent
   evidence.
 
+Content-clean training, guarded flow pooling, and reliability-consensus
+negative ablations:
+  Within fold1, exact-content deduplication reduces train flows from 698 to 352
+  and validation flows from 352 to 176. A mean-pooling Tower-2 trained on these
+  unique flows reaches validation acc=0.8523/macro-F1=0.8500 but only shared-test
+  acc=0.6160/macro-F1=0.5860, confirming a real environment shift rather than
+  duplicate-weight inflation. `select_flow_eval_pooling.py` compares pooling
+  modes on validation in one model load and requires a default 0.005 gain before
+  replacing the checkpoint head. The unguarded 0.0012 validation-F1 gain from
+  mean logits lowers test to 0.6639/0.6333; the guard correctly retains the
+  0.6675/0.6380 checkpoint output. Cross-fold class-reliability voting,
+  validation-confusion EM, EM-only tie breaking, and class-reliability tie
+  breaking give VPN acc/F1 of 0.7362/0.7401, 0.7267/0.7327,
+  0.7446/0.7437, and 0.7464/0.7440. All remain below the unchanged
+  vote-priority consensus at 0.7512/0.7522, so none is promoted.
+
 Cross-fold stability selector:
   `cross_fold_stability_selector.py` audits same-named candidates across multiple
   folds by comparing valid gain, shared-test gain, and target prediction shift
@@ -2876,7 +2920,7 @@ Cross-fold stability selector:
   main bottleneck is validation/test shift, not lack of candidate expert capacity.
 ```
 
-Research conclusion: single-fold post-hoc probability fusion is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, and many weak-fold errors are complementary across the three ready-made train/valid partitions. The useful paper-facing direction is therefore cross-split-stable representation learning plus label-free target-prior stabilization, local confusion refinement, and a final same-dataset cross-fold consensus. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus repeated prior passes pushes the VPN cross-fold macro-F1 minimum above the 0.65 target, but only the cross-fold consensus pushes every VPN fold above the 0.74 accuracy target. The current next model iteration should distill this consensus back into the unified trainable framework: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold consensus or consensus-distillation that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS/USTC; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
+Research conclusion: single-fold post-hoc probability fusion is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, and many weak-fold errors are complementary across the three ready-made train/valid partitions. The useful paper-facing direction is therefore cross-split-stable representation learning plus label-free target-prior stabilization, local confusion refinement, and a final same-dataset cross-fold consensus. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus repeated prior passes pushes the VPN cross-fold macro-F1 minimum above the 0.65 target, but only the cross-fold consensus pushes every VPN fold above the 0.74 accuracy target. The current next model iteration should distill this consensus back into the unified trainable framework: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold consensus or consensus-distillation that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
 
 The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, guarded stacker, safe prior, and guarded unified expert selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
 
@@ -2887,7 +2931,6 @@ conda run --no-capture-output -n llm-factory \
   python summarize_experiment_results.py \
     --dataset vpn-app \
     --dataset tls-120 \
-    --dataset ustc-app \
     --top_k 5 \
     --output_json reasoningDataset/goal_metric_summary.json
 ```
@@ -2897,7 +2940,6 @@ Current target-gate status:
 ```text
 vpn-app: acc=0.7488, macro-F1=0.7558, target acc>=0.7400 and macro-F1>=0.6500 -> PASS
 tls-120: acc=0.7996, macro-F1=0.7869, target acc>=0.7800 and macro-F1>=0.7000 -> PASS
-ustc-app: acc=0.7000, macro-F1=0.6250, cross-dataset evidence on the 20-flow test split
 ```
 
 Generate the next-experiment recommendation report after each new run:
@@ -2907,7 +2949,6 @@ conda run --no-capture-output -n llm-factory \
   python recommend_next_experiment.py \
     --dataset vpn-app \
     --dataset tls-120 \
-    --dataset ustc-app \
     --output_json reasoningDataset/next_experiment_recommendation.json \
     --output_md reasoningDataset/next_experiment_recommendation.md
 ```
@@ -2917,7 +2958,6 @@ Current recommendation summary:
 ```text
 vpn-app: target PASS; old-embedding paired-view probes are negative, so do not spend more CPU time on graph paired-view training. Run the documented A800 Stage-8 paired-view path with fresh `rawproj_flowaware_*` embeddings.
 tls-120: target PASS; only accept new modules when validation-gated selection and target-shift guards keep or improve the current best.
-ustc-app: evidence result; prioritize representation learning before additional probability-level fusion.
 ```
 
 Use the autopilot wrapper to generate the exact next-run command plan. It writes a JSON plan and defaults to dry-run when CUDA is unavailable:
@@ -2939,19 +2979,16 @@ The generated final-selector command carries the same robustness controls as the
 
 The recommended experiment runner now includes CPU `slot_stacker` and `soft_expert_gate` stages between `paired_prior` and `final_selector`. It first trains `train_prediction_stacker.py` over the same unified expert slots, using dataset preset inputs plus the current paired candidate, then trains `train_expert_gate.py` over the base and stacker probability sources. The final `validation_gated_selector.py` receives both `slot_stacker` and `soft_gate` experts. This makes the TLS-120 stacker/soft-gate improvement part of the automatic cross-dataset framework instead of a one-off manual probe. Use `--no-enable_slot_stacker` or `--no-enable_soft_expert_gate` only for ablations that intentionally remove these trainable candidates.
 
-The same wrapper has dataset presets for class count, label map, current best selector input, and target-shift guard. To build the corresponding plans for TLS-120 or USTC, only change `--dataset`:
+The same wrapper has VPN and TLS-120 presets for class count, label map, current best selector input, and target-shift guard. To build the TLS-120 plan, change `--dataset`:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
   python run_recommended_experiment.py \
     --dataset tls-120
 
-conda run --no-capture-output -n llm-factory \
-  python run_recommended_experiment.py \
-    --dataset ustc-app
 ```
 
-To generate the unified VPN/TLS/USTC command suite in one step:
+To generate the unified VPN/TLS command suite in one step:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -3063,7 +3100,6 @@ Current generated table:
 |---|---:|---:|---|---|---:|---|---|---|
 | vpn-app | 0.7488 | 0.7558 | 0.7400/0.6500 | PASS | 1672 | base=active; selector=active; expert=gated_off:reliability_fusion; calib=evaluated; slots=inferred_identity_compatible:10;provided:4;identity:6;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | fallback to base; rejected reliability_fusion (target_change=0.1268>0.0000) | bootstrap win=1.00, q=0.0310; target change=0.1268, JS=0.0149 |
 | tls-120 | 0.7996 | 0.7869 | 0.7800/0.7000 | PASS | 11542 | base=active; selector=active; expert=active:class_bias_calibration; calib=evaluated; slots=recorded:10;provided:2;identity:8;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | class_bias_calibration | bootstrap win=0.89, q=-0.0014; target change=0.0396, JS=0.0014 |
-| ustc-app | 0.7000 | 0.6250 | - | evidence | 20 | base=active; selector=active; expert=active:class_precision; calib=evaluated; slots=inferred_identity_compatible:10;provided:2;identity:8;extra:0; mv_gate=not_observed; guards=boot:active,shift:active | class_precision alpha=0.5, margin=0.0 | bootstrap win=0.66, q=0.0000; target change=0.0500, JS=0.0500 |
 ```
 
 Framework consistency audit:
@@ -3072,7 +3108,6 @@ Framework consistency audit:
 status: PASS
 vpn-app:  same module family, expert candidate = gated_off:reliability_fusion
 tls-120:  same module family, expert candidate = active:class_bias_calibration
-ustc-app: same module family, expert candidate = active:class_precision
 ```
 
 Flow-level bootstrap uncertainty with 300 resamples:
@@ -3082,7 +3117,6 @@ Flow-level bootstrap uncertainty with 300 resamples:
 |---|---:|---:|
 | vpn-app | [0.7252, 0.7685] | [0.7249, 0.7865] |
 | tls-120 | [0.7923, 0.8082] | [0.7788, 0.7933] |
-| ustc-app | [0.5000, 0.9000] | [0.4240, 0.8103] |
 ```
 
 Generate the paper ablation table:
@@ -3110,9 +3144,6 @@ Current ablation table:
 | tls-120 | guarded slot-stacker selector | 0.7945 | +0.0036 | 0.7807 | +0.0038 | threshold_switch:slot_stacker | low-shift stacker switch |
 | tls-120 | soft expert gate | 0.7973 | +0.0065 | 0.7843 | +0.0073 | soft_expert_gate | trainable expert weighting |
 | tls-120 | soft-gate calibrated selector | 0.7996 | +0.0088 | 0.7869 | +0.0100 | class_bias_calibration | class-bias calibrated soft gate |
-| ustc-app | base residual | 0.6500 | 0.0000 | 0.5750 | 0.0000 | base=0.91, prior=0.09 | base |
-| ustc-app | proto embedding expert | 0.6500 | 0.0000 | 0.6083 | +0.0333 | - | Tower-1 prototype |
-| ustc-app | safe selector | 0.7000 | +0.0500 | 0.6250 | +0.0500 | class_precision:a=0.5 | class-precision gate |
 ```
 
 Paired bootstrap delta vs each dataset baseline with 300 resamples for the latest CPU-feasible ablation table:
@@ -3127,7 +3158,6 @@ Paired bootstrap delta vs each dataset baseline with 300 resamples for the lates
 | tls-120 | guarded slot-stacker selector | 300 | [+0.0017, +0.0056] | [+0.0018, +0.0058] |
 | tls-120 | soft expert gate | 300 | [+0.0040, +0.0091] | [+0.0048, +0.0098] |
 | tls-120 | soft-gate calibrated selector | 300 | [+0.0060, +0.0117] | [+0.0071, +0.0134] |
-| ustc-app | safe selector | 300 | [0.0000, +0.1500] | [0.0000, +0.1331] |
 ```
 
 Generate the compact paper evidence pack. It carries the framework report's unified module usage, unified expert-slot coverage, selector, guard, CI, and multi-view gate evidence into one JSON/Markdown artifact:
@@ -3144,7 +3174,6 @@ Current evidence-pack claim status:
 ```text
 vpn-app:  point_pass_ci_mixed  (point target passes; bootstrap acc lower bound is below 0.74)
 tls-120:  strong               (point target and bootstrap lower bounds both pass)
-ustc-app: evidence_only        (tiny 20-flow test split; framework evidence, not a strong performance claim)
 ```
 
 Paper positioning from the evidence pack:
@@ -3153,7 +3182,7 @@ Paper positioning from the evidence pack:
 main claim: unified candidate-expert traffic classification framework with validation-gated safety controls
 strong performance claim: TLS-120
 qualified performance claim: VPN point estimate passes, but bootstrap lower bound is mixed
-cross-dataset framework evidence: USTC, with small-test-split caveat
+dataset scope: VPN and TLS-120 only; packet-level-split USTC is excluded from flow-level claims
 reviewer-risk control: report harmful experts as negative ablations and use bootstrap/target-shift guards
 ```
 
@@ -3174,7 +3203,7 @@ conda run --no-capture-output -n llm-factory \
     --best_output_json reasoningDataset/vpn-app/test_residual_fusion_search_stage8_minbase90_top12_valid_acc.json
 ```
 
-The current top-12 residual search selected `base=1.0`, so the existing fusion/statistics/embedding experts do not provide enough validation-supported residual signal to push VPN beyond the stronger aspirational `75%` mark. The next meaningful improvement should therefore come from representation learning rather than more probability-level fusion: resume GPU Stage-8 Tower-1 flow-aware contrastive training, re-extract embeddings, and rerun Tower-2/fusion on VPN first, then verify the same protocol on TLS-120 and USTC.
+The current top-12 residual search selected `base=1.0`, so the existing fusion/statistics/embedding experts do not provide enough validation-supported residual signal to push VPN beyond the stronger aspirational `75%` mark. The next meaningful improvement should therefore come from representation learning rather than more probability-level fusion: resume GPU Stage-8 Tower-1 flow-aware contrastive training, re-extract embeddings, and rerun Tower-2/fusion on VPN first, then verify the same protocol on TLS-120.
 
 Tower-2 also supports a multi-view flow aggregation head through `--flow_pooling multi_view`. It pools each flow with mean, max, standard deviation, and attention statistics, then fuses those views with a gated MLP. This is useful as a multi-instance ablation, but on the current old VPN embeddings it overfits the validation split and does not improve the target test result:
 

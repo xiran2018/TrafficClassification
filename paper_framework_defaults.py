@@ -8,10 +8,11 @@ DEFAULT_TARGETS = {
     "tls": (0.78, 0.70),
 }
 
+DEFAULT_FLOW_DATASETS = ("vpn-app", "tls-120")
+
 DEFAULT_PAPER_SAFE_RESULTS = {
     "vpn-app": "reasoningDataset/vpn-app/test_selector_best_prior_embedding_experts_calib_shift000_valid_macro.json",
     "tls-120": "reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json",
-    "ustc-app": "reasoningDataset/ustc-app/test_selector_base_flowproto_full_s200_w002_step150_calib_shift005_valid_macro.json",
 }
 
 DEFAULT_UNIFIED_EXPERT_SLOTS = [
@@ -43,11 +44,5 @@ def default_framework_results() -> list[tuple[str, str, float | None, float | No
             DEFAULT_PAPER_SAFE_RESULTS["tls-120"],
             DEFAULT_TARGETS["tls-120"][0],
             DEFAULT_TARGETS["tls-120"][1],
-        ),
-        (
-            "ustc-app",
-            DEFAULT_PAPER_SAFE_RESULTS["ustc-app"],
-            None,
-            None,
         ),
     ]

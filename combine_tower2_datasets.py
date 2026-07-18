@@ -47,6 +47,66 @@ def flow_content_hashes(index_paths: list[str], cache: dict[str, str]) -> dict[s
     return hashes
 
 
+def merge_items(
+    input_paths: list[str],
+    excluded_flow_ids: set[str],
+    flow_content: dict[str, str],
+    excluded_content_hashes: set[str],
+    dedupe_content: bool,
+) -> tuple[list[dict], dict[str, int]]:
+    merged = []
+    seen_windows = set()
+    content_owner: dict[str, str] = {}
+    content_label: dict[str, int] = {}
+    stats = {
+        "content_excluded_windows": 0,
+        "content_duplicate_flows": 0,
+        "content_duplicate_windows": 0,
+        "missing_content_hash_windows": 0,
+        "label_conflicts": 0,
+    }
+    duplicate_flows = set()
+    for path in input_paths:
+        for item in load_pt(path):
+            flow_id = str(item.get("flow_id", ""))
+            if flow_id in excluded_flow_ids:
+                continue
+            content_hash = flow_content.get(flow_id, "")
+            if excluded_content_hashes:
+                if not content_hash:
+                    stats["missing_content_hash_windows"] += 1
+                elif content_hash in excluded_content_hashes:
+                    stats["content_excluded_windows"] += 1
+                    continue
+            if dedupe_content:
+                if not content_hash:
+                    stats["missing_content_hash_windows"] += 1
+                    continue
+                label = int(item.get("label", -1))
+                owner = content_owner.get(content_hash)
+                if owner is None:
+                    content_owner[content_hash] = flow_id
+                    content_label[content_hash] = label
+                elif content_label[content_hash] != label:
+                    stats["label_conflicts"] += 1
+                    raise ValueError(
+                        f"Content hash {content_hash} has conflicting labels "
+                        f"{content_label[content_hash]} and {label}."
+                    )
+                elif owner != flow_id:
+                    duplicate_flows.add(flow_id)
+                    stats["content_duplicate_windows"] += 1
+                    continue
+            window = tuple(item.get("window", ()))
+            key = (flow_id, window, int(item.get("label", -1)))
+            if key in seen_windows:
+                continue
+            seen_windows.add(key)
+            merged.append(item)
+    stats["content_duplicate_flows"] = len(duplicate_flows)
+    return merged, stats
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--inputs", nargs="+", required=True, help="Input Tower2 .pt dataset files.")
@@ -69,6 +129,11 @@ def main() -> None:
         default=[],
         help="Optional flow_embedding_index.jsonl files whose pcap SHA256 hashes are excluded from the merged output.",
     )
+    ap.add_argument(
+        "--dedupe_content",
+        action="store_true",
+        help="Keep all windows for the first flow with each PCAP SHA256 and drop later content-identical flow IDs.",
+    )
     args = ap.parse_args()
 
     excluded_flow_ids = set()
@@ -83,29 +148,15 @@ def main() -> None:
     flow_content = flow_content_hashes(args.flow_embedding_indices, hash_cache)
     excluded_content_hashes = set(flow_content_hashes(args.exclude_content_from_indices, hash_cache).values())
 
-    merged = []
-    seen = set()
-    content_excluded = 0
-    missing_content_hash = 0
-    for path in args.inputs:
-        data = load_pt(path)
-        for item in data:
-            flow_id = str(item.get("flow_id", ""))
-            if flow_id in excluded_flow_ids:
-                continue
-            if excluded_content_hashes:
-                content_hash = flow_content.get(flow_id, "")
-                if not content_hash:
-                    missing_content_hash += 1
-                elif content_hash in excluded_content_hashes:
-                    content_excluded += 1
-                    continue
-            window = tuple(item.get("window", ()))
-            key = (flow_id, window, int(item.get("label", -1)))
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(item)
+    if args.dedupe_content and not args.flow_embedding_indices:
+        raise ValueError("--dedupe_content requires --flow_embedding_indices")
+    merged, stats = merge_items(
+        args.inputs,
+        excluded_flow_ids,
+        flow_content,
+        excluded_content_hashes,
+        args.dedupe_content,
+    )
 
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -115,8 +166,11 @@ def main() -> None:
         f"saved {len(merged)} windows from {flow_count} flows to {out}; "
         f"excluded_flows={len(excluded_flow_ids)}; "
         f"excluded_content_hashes={len(excluded_content_hashes)}; "
-        f"content_excluded_windows={content_excluded}; "
-        f"missing_content_hash_windows={missing_content_hash}"
+        f"content_excluded_windows={stats['content_excluded_windows']}; "
+        f"content_duplicate_flows={stats['content_duplicate_flows']}; "
+        f"content_duplicate_windows={stats['content_duplicate_windows']}; "
+        f"missing_content_hash_windows={stats['missing_content_hash_windows']}; "
+        f"label_conflicts={stats['label_conflicts']}"
     )
 
 

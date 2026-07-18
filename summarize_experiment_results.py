@@ -4,13 +4,24 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Tuple
 
 from sklearn.metrics import accuracy_score, f1_score
 
 from paper_framework_defaults import DEFAULT_TARGETS
+from summarize_cross_split_results import result_scope
 
 RANK_METRICS = ("accuracy", "macro_f1", "balanced", "target_margin")
+LEGACY_CONSENSUS_ALIAS_RE = re.compile(r"_fold\d+$")
+
+
+def skip_result_file(path: Path, data: Dict[str, Any]) -> bool:
+    """Ignore deprecated fold-named aliases of one cross-fold ensemble."""
+    return (
+        result_scope(data) == "cross_fold_consensus"
+        and LEGACY_CONSENSUS_ALIAS_RE.search(path.stem) is not None
+    )
 
 
 def parse_target(raw: str) -> Tuple[str, float, float]:
@@ -94,6 +105,8 @@ def collect_dataset(
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        if skip_result_file(path, data):
+            continue
         acc, macro_f1 = metric_from_payload(data)
         if acc is None:
             continue
@@ -119,7 +132,7 @@ def main() -> None:
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
 
-    datasets = args.dataset or ["vpn-app", "tls-120", "ustc-app", "ustc-binary"]
+    datasets = args.dataset or ["vpn-app", "tls-120"]
     targets = DEFAULT_TARGETS.copy()
     for raw in args.target:
         dataset, acc, macro_f1 = parse_target(raw)

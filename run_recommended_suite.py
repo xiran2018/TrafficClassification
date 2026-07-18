@@ -209,7 +209,7 @@ def write_suite_plan(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Run or dry-run the recommended autopilot across multiple datasets.")
-    ap.add_argument("--datasets", default="vpn-app,tls-120,ustc-app")
+    ap.add_argument("--datasets", default="vpn-app,tls-120")
     ap.add_argument("--run_tag", default="paired_ipport")
     ap.add_argument("--model_types", default="graph,seq")
     ap.add_argument("--tower2_epochs", type=int, default=30)

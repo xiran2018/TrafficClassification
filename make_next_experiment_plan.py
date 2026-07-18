@@ -232,7 +232,7 @@ def render_markdown(plan: Dict[str, Any]) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build a CI-gap-aware next experiment plan from the paper evidence pack.")
     ap.add_argument("--evidence_pack", default="reasoningDataset/paper_evidence_pack.json")
-    ap.add_argument("--datasets", default="vpn-app,tls-120,ustc-app")
+    ap.add_argument("--datasets", default="vpn-app,tls-120")
     ap.add_argument("--goal_datasets", default="vpn-app,tls-120")
     ap.add_argument("--max_iters", type=int, default=4)
     ap.add_argument("--run_tag", default="stage8_flowaware")

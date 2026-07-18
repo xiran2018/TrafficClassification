@@ -4,7 +4,8 @@
 The SWEET split folders expose a shared test set with several train/valid
 partitions. This script treats fold-specific models as a stability ensemble:
 all inputs must predict the same shared test flow ids, and the output is a
-label-free consensus over those fold models.
+test-label-free consensus over those fold models. Some optional modes estimate
+reliability from each fold's held-out validation labels.
 """
 from __future__ import annotations
 
@@ -74,7 +75,82 @@ def align_test(data: Dict[str, Any], fids: List[str]) -> Tuple[np.ndarray, np.nd
     return y, p
 
 
-def fuse_probs(probs: List[np.ndarray], mode: str) -> np.ndarray:
+def validation_class_reliability(
+    data: Dict[str, Any],
+    num_classes: int,
+    smoothing: float = 4.0,
+) -> np.ndarray:
+    y_true = np.asarray(data.get("valid_y_true", []), dtype=np.int64)
+    valid_prob = np.asarray(data.get("valid_prob", []), dtype=np.float64)
+    if y_true.size == 0 or valid_prob.ndim != 2 or valid_prob.shape[0] != y_true.size:
+        raise ValueError("class_reliability modes require valid_y_true and valid_prob in every input")
+    y_pred = valid_prob.argmax(axis=1)
+    global_accuracy = float((y_true == y_pred).mean())
+    reliability = np.zeros(num_classes, dtype=np.float64)
+    smoothing = max(float(smoothing), 0.0)
+    for cls in range(num_classes):
+        tp = float(np.sum((y_true == cls) & (y_pred == cls)))
+        predicted = float(np.sum(y_pred == cls))
+        support = float(np.sum(y_true == cls))
+        precision = (tp + smoothing * global_accuracy) / max(predicted + smoothing, 1e-12)
+        recall = (tp + smoothing * global_accuracy) / max(support + smoothing, 1e-12)
+        reliability[cls] = 2.0 * precision * recall / max(precision + recall, 1e-12)
+    return np.clip(reliability, 1e-3, 1.0)
+
+
+def validation_confusion_likelihood(
+    data: Dict[str, Any],
+    num_classes: int,
+    smoothing: float = 1.0,
+) -> np.ndarray:
+    y_true = np.asarray(data.get("valid_y_true", []), dtype=np.int64)
+    valid_prob = np.asarray(data.get("valid_prob", []), dtype=np.float64)
+    if y_true.size == 0 or valid_prob.ndim != 2 or valid_prob.shape != (y_true.size, num_classes):
+        raise ValueError("confusion_em requires valid_y_true and valid_prob in every input")
+    counts = np.full((num_classes, num_classes), max(float(smoothing), 0.0), dtype=np.float64)
+    for label, prob in zip(y_true, normalize_prob(valid_prob)):
+        if 0 <= label < num_classes:
+            counts[label] += prob
+    return counts / np.maximum(counts.sum(axis=1, keepdims=True), 1e-12)
+
+
+def confusion_em_fusion(
+    probs: List[np.ndarray],
+    confusion_likelihoods: List[np.ndarray],
+    prior_anchor_weight: float = 0.05,
+    max_iter: int = 100,
+    tol: float = 1e-8,
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    num_classes = probs[0].shape[1]
+    uniform = np.full(num_classes, 1.0 / num_classes, dtype=np.float64)
+    prior = normalize_prob(np.mean(probs, axis=0)).mean(axis=0)
+    prior = prior / prior.sum()
+    posterior = np.tile(prior, (probs[0].shape[0], 1))
+    iterations = 0
+    for iteration in range(max(1, int(max_iter))):
+        log_posterior = np.log(np.clip(prior, 1e-12, 1.0))[None, :].repeat(len(posterior), axis=0)
+        for prob, confusion in zip(probs, confusion_likelihoods):
+            likelihood = normalize_prob(prob) @ confusion.T
+            log_posterior += np.log(np.clip(likelihood, 1e-12, 1.0))
+        log_posterior -= log_posterior.max(axis=1, keepdims=True)
+        posterior = normalize_prob(np.exp(log_posterior))
+        updated = posterior.mean(axis=0)
+        anchor = max(float(prior_anchor_weight), 0.0)
+        updated = (updated + anchor * uniform) / (1.0 + anchor)
+        updated /= updated.sum()
+        iterations = iteration + 1
+        if np.max(np.abs(updated - prior)) < tol:
+            prior = updated
+            break
+        prior = updated
+    return posterior, prior, iterations
+
+
+def fuse_probs(
+    probs: List[np.ndarray],
+    mode: str,
+    class_reliability: List[np.ndarray] | None = None,
+) -> np.ndarray:
     if mode == "mean":
         return normalize_prob(np.mean(probs, axis=0))
     if mode == "log_mean":
@@ -93,6 +169,25 @@ def fuse_probs(probs: List[np.ndarray], mode: str) -> np.ndarray:
             out[tied] += 0.0
             out[np.where(tied)[0], priority_pred[tied]] += 1e-3
         out += 1e-6
+        return normalize_prob(out)
+    if mode in {"class_reliability_mean", "class_reliability_log_mean", "class_reliability_vote"}:
+        if not class_reliability or len(class_reliability) != len(probs):
+            raise ValueError(f"{mode} requires one validation reliability vector per input")
+        weights = np.stack(class_reliability, axis=0)
+        weights = weights / np.maximum(weights.sum(axis=0, keepdims=True), 1e-12)
+        if mode == "class_reliability_mean":
+            stacked = np.stack(probs, axis=0)
+            return normalize_prob((stacked * weights[:, None, :]).sum(axis=0))
+        if mode == "class_reliability_log_mean":
+            stacked_log = np.stack([np.log(np.clip(p, 1e-12, 1.0)) for p in probs], axis=0)
+            logp = (stacked_log * weights[:, None, :]).sum(axis=0)
+            logp -= logp.max(axis=1, keepdims=True)
+            return normalize_prob(np.exp(logp))
+        out = np.zeros_like(probs[0], dtype=np.float64)
+        for model_idx, p in enumerate(probs):
+            pred = p.argmax(axis=1)
+            out[np.arange(len(pred)), pred] += class_reliability[model_idx][pred]
+        out += 1e-3 * np.mean(probs, axis=0)
         return normalize_prob(out)
     raise ValueError(mode)
 
@@ -113,8 +208,21 @@ def write_payload(path: Path, payload: Dict[str, Any]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", nargs=2, action="append", metavar=("NAME", "JSON"), required=True)
-    ap.add_argument("--mode", choices=["mean", "log_mean", "vote", "vote_priority", "auto_confidence"], default="auto_confidence")
+    ap.add_argument(
+        "--mode",
+        choices=[
+            "mean", "log_mean", "vote", "vote_priority", "auto_confidence",
+            "class_reliability_mean", "class_reliability_log_mean", "class_reliability_vote",
+            "class_reliability_tie_break",
+            "confusion_em", "confusion_em_tie_break",
+        ],
+        default="auto_confidence",
+    )
     ap.add_argument("--confidence_threshold", type=float, default=0.9)
+    ap.add_argument("--reliability_smoothing", type=float, default=4.0)
+    ap.add_argument("--confusion_smoothing", type=float, default=1.0)
+    ap.add_argument("--confusion_prior_anchor_weight", type=float, default=0.05)
+    ap.add_argument("--confusion_em_max_iter", type=int, default=100)
     ap.add_argument("--label_map", default="")
     ap.add_argument("--output_json", required=True)
     ap.add_argument(
@@ -133,6 +241,8 @@ def main() -> None:
         raise ValueError("No common flow ids across inputs.")
 
     probs = []
+    class_reliability = []
+    confusion_likelihoods = []
     y_ref = None
     input_reports = []
     for name, data, path in payloads:
@@ -143,16 +253,66 @@ def main() -> None:
             raise ValueError(f"Labels do not align for input {name}.")
         pred = p.argmax(axis=1).astype(np.int64)
         probs.append(p)
+        reliability = (
+            validation_class_reliability(data, p.shape[1], args.reliability_smoothing)
+            if args.mode.startswith("class_reliability_")
+            else np.ones(p.shape[1], dtype=np.float64)
+        )
+        class_reliability.append(reliability)
+        confusion = (
+            validation_confusion_likelihood(data, p.shape[1], args.confusion_smoothing)
+            if args.mode in {"confusion_em", "confusion_em_tie_break"}
+            else np.eye(p.shape[1], dtype=np.float64)
+        )
+        confusion_likelihoods.append(confusion)
         input_reports.append({
             "name": name,
             "path": path,
             "metrics": compute_metrics(y.tolist(), pred.tolist()),
             "mean_confidence": float(p.max(axis=1).mean()),
+            "validation_class_reliability": reliability.tolist(),
+            "validation_confusion_likelihood": confusion.tolist()
+            if args.mode in {"confusion_em", "confusion_em_tie_break"} else None,
         })
 
     assert y_ref is not None
     mode = selected_mode(probs, args.mode, args.confidence_threshold)
-    fused = fuse_probs(probs, mode)
+    estimated_target_prior = None
+    em_iterations = 0
+    em_tie_count = 0
+    if mode == "class_reliability_tie_break":
+        fused = fuse_probs(probs, "vote_priority")
+        hard_predictions = np.stack([prob.argmax(axis=1) for prob in probs], axis=1)
+        tie_mask = np.asarray([len(set(row.tolist())) == len(probs) for row in hard_predictions])
+        for row_idx in np.flatnonzero(tie_mask):
+            candidates = hard_predictions[row_idx]
+            scores = np.asarray([
+                class_reliability[model_idx][class_id]
+                for model_idx, class_id in enumerate(candidates)
+            ])
+            selected_model = int(scores.argmax())
+            selected_class = int(candidates[selected_model])
+            fused[row_idx] = 1e-6 * np.mean([prob[row_idx] for prob in probs], axis=0)
+            fused[row_idx, selected_class] += 1.0
+        fused = normalize_prob(fused)
+        em_tie_count = int(tie_mask.sum())
+    elif mode in {"confusion_em", "confusion_em_tie_break"}:
+        em_prob, estimated_target_prior, em_iterations = confusion_em_fusion(
+            probs,
+            confusion_likelihoods,
+            args.confusion_prior_anchor_weight,
+            args.confusion_em_max_iter,
+        )
+        if mode == "confusion_em":
+            fused = em_prob
+        else:
+            fused = fuse_probs(probs, "vote_priority")
+            hard_predictions = np.stack([prob.argmax(axis=1) for prob in probs], axis=1)
+            tie_mask = np.asarray([len(set(row.tolist())) == len(probs) for row in hard_predictions])
+            fused[tie_mask] = em_prob[tie_mask]
+            em_tie_count = int(tie_mask.sum())
+    else:
+        fused = fuse_probs(probs, mode, class_reliability)
     pred = fused.argmax(axis=1).astype(np.int64)
     metrics = compute_metrics(y_ref.tolist(), pred.tolist())
     label_names, label_map = load_label_names(args.label_map)
@@ -161,6 +321,13 @@ def main() -> None:
         "requested_mode": args.mode,
         "selected_mode": mode,
         "confidence_threshold": args.confidence_threshold,
+        "reliability_smoothing": args.reliability_smoothing,
+        "confusion_smoothing": args.confusion_smoothing,
+        "confusion_prior_anchor_weight": args.confusion_prior_anchor_weight,
+        "confusion_em_iterations": em_iterations,
+        "confusion_em_tie_count": em_tie_count,
+        "tie_break_count": em_tie_count,
+        "estimated_target_prior": estimated_target_prior.tolist() if estimated_target_prior is not None else None,
         "mean_input_confidence": float(np.mean([r["mean_confidence"] for r in input_reports])),
         "num_inputs": len(input_reports),
         "num_flows": len(common),
