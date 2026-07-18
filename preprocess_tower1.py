@@ -19,6 +19,7 @@ from tqdm import tqdm
 from traffic_utils import (
     corrupt_ipv4_checksum_only,
     corrupt_ipv4_total_len_keep_ip_checksum_valid,
+    extract_packet_classification_flows,
     extract_flow_packets,
     iter_labeled_pcaps,
     make_label_map,
@@ -156,15 +157,24 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input_dir", required=True)
     ap.add_argument("--output_dir", required=True)
-    ap.add_argument("--max_packets_per_flow", type=int, default=64)
+    ap.add_argument("--input_layout", choices=["flow_pcaps", "class_packet_pcaps"], default="flow_pcaps", help="flow_pcaps: one PCAP is one flow; class_packet_pcaps: one SWEET packet-level PCAP contains many real flows of one class.")
+    ap.add_argument("--max_packets_per_flow", type=int, default=64, help="Maximum packets retained per real flow. In class_packet_pcaps mode, 0 keeps every packet.")
     ap.add_argument("--payload_prefix_len", type=int, default=128)
     ap.add_argument("--l3_prefix_len", type=int, default=512)
     ap.add_argument("--max_flows", type=int, default=0)
     ap.add_argument("--label_map_in", default="", help="Use the train label_map.json for valid/test to keep label ids consistent.")
     ap.add_argument("--write_label_map", action="store_true", help="Write label_map.json to output_dir.")
-    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port", "mask_ip_port"], default="full", help="Header policy for packet_index prompts used during embedding extraction; QA/SFT prompts stay unchanged.")
+    ap.add_argument(
+        "--embedding_header_policy",
+        choices=["full", "randomize_ip_port", "mask_ip_port", "mask_session_fields"],
+        default="full",
+        help="Header policy for packet_index prompts used during embedding extraction; QA/SFT prompts stay unchanged.",
+    )
+    ap.add_argument("--classification_only", action="store_true", help="Write packet_index and packet_auxiliary only; skip the much larger protocol QA/validity corpora.")
     ap.add_argument("--no_progress", action="store_true", help="Disable pcap preprocessing progress bar.")
     args = ap.parse_args()
+    if args.input_layout == "flow_pcaps" and args.max_packets_per_flow <= 0:
+        ap.error("--max_packets_per_flow must be positive for --input_layout flow_pcaps")
     os.makedirs(args.output_dir, exist_ok=True)
 
     show_progress = not args.no_progress
@@ -187,73 +197,100 @@ def main() -> None:
          open(validity_path, "w", encoding="utf-8") as vf, \
          open(auxiliary_path, "w", encoding="utf-8") as af:
         pbar = tqdm(pcaps, desc="preprocess tower1", unit="pcap", disable=not show_progress)
+        stop = False
         for label, pcap in pbar:
             if label not in label_map:
                 msg = f"skip label not in label_map: {label}"
                 tqdm.write(msg) if show_progress else print(msg)
                 continue
-            if args.max_flows and n_flows >= args.max_flows:
+            if stop or (args.max_flows and n_flows >= args.max_flows):
                 break
-            flow_id = stable_id(str(pcap.resolve()))
             try:
-                metas, qa_prompts, embed_prompts = extract_flow_packets(
-                    pcap,
-                    max_packets=args.max_packets_per_flow,
-                    payload_prefix_len=args.payload_prefix_len,
-                    l3_prefix_len=args.l3_prefix_len,
-                    embedding_header_policy=args.embedding_header_policy,
-                    header_random_salt=flow_id,
-                )
+                if args.input_layout == "class_packet_pcaps":
+                    flow_rows = extract_packet_classification_flows(
+                        pcap,
+                        max_packets_per_flow=args.max_packets_per_flow,
+                        payload_prefix_len=args.payload_prefix_len,
+                        l3_prefix_len=args.l3_prefix_len,
+                        embedding_header_policy=args.embedding_header_policy,
+                    )
+                else:
+                    flow_id = stable_id(str(pcap.resolve()))
+                    metas, qa_prompts, embed_prompts = extract_flow_packets(
+                        pcap,
+                        max_packets=args.max_packets_per_flow,
+                        payload_prefix_len=args.payload_prefix_len,
+                        l3_prefix_len=args.l3_prefix_len,
+                        embedding_header_policy=args.embedding_header_policy,
+                        header_random_salt=flow_id,
+                    )
+                    flow_rows = [(flow_id, metas, qa_prompts, embed_prompts)]
             except Exception as exc:
                 msg = f"skip {pcap}: {exc}"
                 tqdm.write(msg) if show_progress else print(msg)
                 continue
-            if not metas:
-                continue
-            for meta_obj, qa_prompt, embed_prompt in zip(metas, qa_prompts, embed_prompts):
-                meta = asdict(meta_obj)
-                row = {
-                    "flow_id": flow_id,
-                    "pcap_path": str(pcap),
-                    "label": label,
-                    "label_id": label_map[label],
-                    "packet_id": meta["packet_id"],
-                    "packet_uid": f"{flow_id}_{meta['packet_id']}",
-                    "prompt": embed_prompt,
-                    "qa_prompt": qa_prompt,
-                    "embedding_header_policy": args.embedding_header_policy,
-                    "meta": meta,
-                }
-                pidx.write(json.dumps(row, ensure_ascii=False) + "\n")
-                aux_row = {
-                    "flow_id": flow_id,
-                    "pcap_path": str(pcap),
-                    "label": label,
-                    "label_id": label_map[label],
-                    "packet_id": meta["packet_id"],
-                    "packet_uid": f"{flow_id}_{meta['packet_id']}",
-                    "prompt": embed_prompt,
-                    "embedding_header_policy": args.embedding_header_policy,
-                    "packet_weight": packet_information_weight(meta_obj),
-                    "meta": {
-                        "direction": meta.get("direction"),
-                        "l4": meta.get("l4"),
-                        "packet_len": meta.get("packet_len"),
-                        "payload_len": meta.get("payload_len"),
-                        "tcp_flags": meta.get("tcp_flags"),
-                        "iat": meta.get("iat"),
-                    },
-                }
-                af.write(json.dumps(aux_row, ensure_ascii=False) + "\n")
-                n_aux += 1
-                n_packets += 1
-                for sample in qa_samples_for_packet(qa_prompt, meta, flow_id, label):
-                    qaf.write(json.dumps(sample, ensure_ascii=False) + "\n")
-                    n_qa += 1
-                for sample in validity_samples_for_packet(qa_prompt, meta, flow_id, label):
-                    vf.write(json.dumps(sample, ensure_ascii=False) + "\n")
-                    n_validity += 1
-            n_flows += 1
+            try:
+                for flow_id, metas, qa_prompts, embed_prompts in flow_rows:
+                    if args.max_flows and n_flows >= args.max_flows:
+                        stop = True
+                        break
+                    if not metas:
+                        continue
+                    for meta_obj, qa_prompt, embed_prompt in zip(metas, qa_prompts, embed_prompts):
+                        meta = asdict(meta_obj)
+                        packet_uid = f"{flow_id}_{meta['packet_id']}"
+                        row = {
+                            "flow_id": flow_id,
+                            "pcap_path": str(pcap),
+                            "label": label,
+                            "label_id": label_map[label],
+                            "packet_id": meta["packet_id"],
+                            "packet_uid": packet_uid,
+                            "prompt": embed_prompt,
+                            "qa_prompt": qa_prompt,
+                            "embedding_header_policy": args.embedding_header_policy,
+                            "input_layout": args.input_layout,
+                            "sample_unit": "packet" if args.input_layout == "class_packet_pcaps" else "flow_packet",
+                            "packet_context_policy": "single_packet" if args.input_layout == "class_packet_pcaps" else "flow_context",
+                            "meta": meta,
+                        }
+                        pidx.write(json.dumps(row, ensure_ascii=False) + "\n")
+                        aux_row = {
+                            "flow_id": flow_id,
+                            "pcap_path": str(pcap),
+                            "label": label,
+                            "label_id": label_map[label],
+                            "packet_id": meta["packet_id"],
+                            "packet_uid": packet_uid,
+                            "prompt": embed_prompt,
+                            "embedding_header_policy": args.embedding_header_policy,
+                            "input_layout": args.input_layout,
+                            "sample_unit": "packet" if args.input_layout == "class_packet_pcaps" else "flow_packet",
+                            "packet_context_policy": "single_packet" if args.input_layout == "class_packet_pcaps" else "flow_context",
+                            "packet_weight": packet_information_weight(meta_obj),
+                            "meta": {
+                                "direction": meta.get("direction"),
+                                "l4": meta.get("l4"),
+                                "packet_len": meta.get("packet_len"),
+                                "payload_len": meta.get("payload_len"),
+                                "tcp_flags": meta.get("tcp_flags"),
+                                "iat": meta.get("iat"),
+                            },
+                        }
+                        af.write(json.dumps(aux_row, ensure_ascii=False) + "\n")
+                        n_aux += 1
+                        n_packets += 1
+                        if not args.classification_only:
+                            for sample in qa_samples_for_packet(qa_prompt, meta, flow_id, label):
+                                qaf.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                                n_qa += 1
+                            for sample in validity_samples_for_packet(qa_prompt, meta, flow_id, label):
+                                vf.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                                n_validity += 1
+                    n_flows += 1
+            except Exception as exc:
+                msg = f"skip remaining flows in {pcap}: {exc}"
+                tqdm.write(msg) if show_progress else print(msg)
             if show_progress:
                 pbar.set_postfix(
                     flows=n_flows,

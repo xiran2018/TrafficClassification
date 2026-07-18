@@ -98,6 +98,7 @@ class ParsedPacket:
     time: float
     frame_len: int
     l3_bytes: bytes
+    l3: str
     src_ip: str
     dst_ip: str
     ip_id: int
@@ -248,6 +249,23 @@ def ipv4_offset(frame: bytes, linktype: int) -> Optional[int]:
     return None
 
 
+def ipv6_offset(frame: bytes, linktype: int) -> Optional[int]:
+    if linktype in {101, 229}:  # LINKTYPE_RAW / LINKTYPE_IPV6
+        return 0 if frame and (frame[0] >> 4) == 6 else None
+    if linktype == 1:
+        if len(frame) < 14:
+            return None
+        eth_type = int.from_bytes(frame[12:14], "big")
+        offset = 14
+        while eth_type in {0x8100, 0x88A8} and len(frame) >= offset + 4:
+            eth_type = int.from_bytes(frame[offset + 2:offset + 4], "big")
+            offset += 4
+        return offset if eth_type == 0x86DD else None
+    if linktype == 113 and len(frame) >= 16:
+        return 16 if int.from_bytes(frame[14:16], "big") == 0x86DD else None
+    return None
+
+
 def tcp_flags_to_str(flags: int) -> str:
     names = [(0x01, "F"), (0x02, "S"), (0x04, "R"), (0x08, "P"), (0x10, "A"), (0x20, "U"), (0x40, "E"), (0x80, "C")]
     return "".join(name for bit, name in names if flags & bit)
@@ -275,6 +293,7 @@ def parse_ipv4_packet(ts: float, frame: bytes, linktype: int) -> Optional[Parsed
         time=ts,
         frame_len=len(frame),
         l3_bytes=captured_l3,
+        l3="IPv4",
         src_ip=src_ip,
         dst_ip=dst_ip,
         ip_id=ip_id,
@@ -311,6 +330,62 @@ def parse_ipv4_packet(ts: float, frame: bytes, linktype: int) -> Optional[Parsed
     return pkt
 
 
+def parse_ipv6_packet(ts: float, frame: bytes, linktype: int) -> Optional[ParsedPacket]:
+    off = ipv6_offset(frame, linktype)
+    if off is None or len(frame) < off + 40:
+        return None
+    l3 = frame[off:]
+    if l3[0] >> 4 != 6:
+        return None
+    payload_len = int.from_bytes(l3[4:6], "big")
+    next_header = l3[6]
+    total_len = 40 + payload_len
+    captured_l3 = l3[: min(len(l3), total_len)]
+    src_ip = socket.inet_ntop(socket.AF_INET6, l3[8:24])
+    dst_ip = socket.inet_ntop(socket.AF_INET6, l3[24:40])
+    l4_bytes = captured_l3[40:]
+    pkt = ParsedPacket(
+        time=ts,
+        frame_len=len(frame),
+        l3_bytes=captured_l3,
+        l3="IPv6",
+        src_ip=src_ip,
+        dst_ip=dst_ip,
+        ip_id=-1,
+        ip_ttl=l3[7],
+        ip_total_len=total_len,
+        ip_header_len=40,
+        ip_proto=next_header,
+        ip_checksum=-1,
+        l4="OTHER",
+    )
+    if next_header == 6 and len(l4_bytes) >= 20:
+        dataofs = (l4_bytes[12] >> 4) * 4
+        if dataofs >= 20 and len(l4_bytes) >= dataofs:
+            pkt.l4 = "TCP"
+            pkt.sport = int.from_bytes(l4_bytes[0:2], "big")
+            pkt.dport = int.from_bytes(l4_bytes[2:4], "big")
+            pkt.seq = int.from_bytes(l4_bytes[4:8], "big")
+            pkt.ack = int.from_bytes(l4_bytes[8:12], "big")
+            pkt.tcp_data_offset = dataofs
+            pkt.tcp_flags = tcp_flags_to_str(l4_bytes[13])
+            pkt.tcp_window = int.from_bytes(l4_bytes[14:16], "big")
+            pkt.l4_checksum = int.from_bytes(l4_bytes[16:18], "big")
+            pkt.payload = l4_bytes[dataofs:]
+    elif next_header == 17 and len(l4_bytes) >= 8:
+        pkt.l4 = "UDP"
+        pkt.sport = int.from_bytes(l4_bytes[0:2], "big")
+        pkt.dport = int.from_bytes(l4_bytes[2:4], "big")
+        pkt.udp_len = int.from_bytes(l4_bytes[4:6], "big")
+        pkt.l4_checksum = int.from_bytes(l4_bytes[6:8], "big")
+        pkt.payload = l4_bytes[8:]
+    return pkt
+
+
+def parse_ip_packet(ts: float, frame: bytes, linktype: int) -> Optional[ParsedPacket]:
+    return parse_ipv4_packet(ts, frame, linktype) or parse_ipv6_packet(ts, frame, linktype)
+
+
 def get_server_ip(packets: List[ParsedPacket]) -> Optional[str]:
     for pkt in packets:
         if pkt.l4 in {"TCP", "UDP"}:
@@ -333,11 +408,21 @@ def get_direction(pkt: ParsedPacket, server_ip: Optional[str]) -> str:
     return "S2C" if pkt.src_ip == server_ip else "C2S"
 
 
+def bidirectional_flow_key(pkt: ParsedPacket) -> Tuple[str, int, str, int, str]:
+    """Return a direction-invariant endpoint key for one parsed packet."""
+    sport = pkt.sport if pkt.l4 in {"TCP", "UDP"} else -1
+    dport = pkt.dport if pkt.l4 in {"TCP", "UDP"} else -1
+    left, right = sorted(((pkt.src_ip, sport), (pkt.dst_ip, dport)))
+    return left[0], int(left[1]), right[0], int(right[1]), pkt.l4
+
+
 def is_full_l3_captured(pkt: ParsedPacket) -> bool:
     return pkt.ip_total_len > 0 and len(pkt.l3_bytes) >= pkt.ip_total_len
 
 
 def ip_checksum_valid(pkt: ParsedPacket) -> Optional[bool]:
+    if pkt.l3 != "IPv4":
+        return None
     try:
         ihl = pkt.ip_header_len
         buf = bytearray(pkt.l3_bytes[:ihl])
@@ -440,54 +525,61 @@ def format_packet_embedding_prompt(
     It includes raw header fields and payload prefix, but not checksum validity labels.
     """
     src_ip, dst_ip = m.src_ip, m.dst_ip
-    sport, dport = m.sport, m.dport
+    sport, dport = str(m.sport), str(m.dport)
+    direction = m.direction
+    ip_id = str(m.ip_id)
+    ip_ttl = str(m.ip_ttl)
+    ip_checksum = f"0x{m.ip_checksum:04x}"
+    seq, ack = str(m.seq), str(m.ack)
+    l4_checksum = f"0x{m.l4_checksum:04x}"
     if header_policy == "randomize_ip_port":
         salt = header_random_salt or "default"
         src_ip = pseudo_ipv4(m.src_ip, salt)
         dst_ip = pseudo_ipv4(m.dst_ip, salt)
-        sport = pseudo_port(m.sport, f"{salt}|src")
-        dport = pseudo_port(m.dport, f"{salt}|dst")
+        sport = str(pseudo_port(m.sport, f"{salt}|src"))
+        dport = str(pseudo_port(m.dport, f"{salt}|dst"))
     elif header_policy == "mask_ip_port":
         src_ip = dst_ip = "[MASK_IP]"
         sport = dport = "[MASK_PORT]"
+    elif header_policy == "mask_session_fields":
+        src_ip = dst_ip = "[MASK_IP]"
+        sport = dport = "[MASK_PORT]"
+        direction = "[MASK_DIRECTION]"
+        ip_id = "[MASK_IP_ID]"
+        ip_ttl = "[MASK_TTL]"
+        ip_checksum = "[MASK_CHECKSUM]"
+        seq = ack = "[MASK_SEQ]"
+        l4_checksum = "[MASK_CHECKSUM]"
     elif header_policy != "full":
         raise ValueError(f"Unknown embedding header policy: {header_policy}")
     if m.l4 == "TCP":
         l4_line = (
-            f"TCP: sport={sport} dport={dport} seq={m.seq} ack={m.ack} "
-            f"flags={m.tcp_flags} data_offset={m.tcp_data_offset} window={m.tcp_window} checksum=0x{m.l4_checksum:04x}"
+            f"TCP: sport={sport} dport={dport} seq={seq} ack={ack} "
+            f"flags={m.tcp_flags} data_offset={m.tcp_data_offset} window={m.tcp_window} checksum={l4_checksum}"
         )
     elif m.l4 == "UDP":
-        l4_line = f"UDP: sport={sport} dport={dport} length={m.udp_len} checksum=0x{m.l4_checksum:04x}"
+        l4_line = f"UDP: sport={sport} dport={dport} length={m.udp_len} checksum={l4_checksum}"
     else:
         l4_line = f"L4: {m.l4}"
     return f"""[Packet]
-Direction: {m.direction}
+Direction: {direction}
 L3: {m.l3}
-IP: src={src_ip} dst={dst_ip} id={m.ip_id} ttl={m.ip_ttl} proto={m.l4} total_len={m.ip_total_len} ihl={m.ip_header_len} checksum=0x{m.ip_checksum:04x}
+IP: src={src_ip} dst={dst_ip} id={ip_id} ttl={ip_ttl} proto={m.l4} total_len={m.ip_total_len} ihl={m.ip_header_len} checksum={ip_checksum}
 {l4_line}
 Observed: packet_len={m.packet_len} captured_l3_len={m.l3_captured_len} full_l3_captured={m.full_l3_captured} payload_len={m.payload_len} entropy={m.payload_entropy} iat={m.iat} payload_truncated={m.payload_truncated}
 PayloadPrefix: {payload_prefix}
 [EndPacket]""".strip()
 
 
-def extract_flow_packets(
-    pcap_path: str | Path,
-    max_packets: int = 128,
-    payload_prefix_len: int = 128,
-    l3_prefix_len: int = 512,
-    embedding_header_policy: str = "full",
-    header_random_salt: str = "",
+def build_packet_views(
+    packets: List[ParsedPacket],
+    payload_prefix_len: int,
+    l3_prefix_len: int,
+    embedding_header_policy: str,
+    header_random_salt: str,
+    single_packet_context: bool = False,
 ) -> Tuple[List[PacketMeta], List[str], List[str]]:
-    """Return packet metadata, raw QA prompts, and structured embedding prompts."""
-    packets: List[ParsedPacket] = []
-    for ts, frame, linktype in iter_pcap_records(pcap_path):
-        pkt = parse_ipv4_packet(ts, frame, linktype)
-        if pkt is None:
-            continue
-        packets.append(pkt)
-        if len(packets) >= max_packets:
-            break
+    """Build metadata and prompts for packets known to belong to one flow."""
     server_ip = get_server_ip(packets)
     metas: List[PacketMeta] = []
     qa_prompts: List[str] = []
@@ -496,16 +588,16 @@ def extract_flow_packets(
     for pkt in packets:
         pid = len(metas)
         t = float(pkt.time)
-        iat = 0.0 if prev_t is None else max(0.0, round(t - prev_t, 6))
+        iat = 0.0 if single_packet_context or prev_t is None else max(0.0, round(t - prev_t, 6))
         prev_t = t
+        packet_server_ip = get_server_ip([pkt]) if single_packet_context else server_ip
         l3_bytes = pkt.l3_bytes
         payload = pkt.payload
-        l4 = pkt.l4
         payload_prefix = hex_bytes(payload, payload_prefix_len)
         m = PacketMeta(
             packet_id=pid,
             time=t,
-            direction=get_direction(pkt, server_ip),
+            direction=get_direction(pkt, packet_server_ip),
             packet_len=pkt.frame_len,
             l3_captured_len=len(l3_bytes),
             full_l3_captured=is_full_l3_captured(pkt),
@@ -513,8 +605,8 @@ def extract_flow_packets(
             payload_prefix_len=min(len(payload), payload_prefix_len),
             payload_truncated=len(payload) > payload_prefix_len,
             payload_entropy=round(entropy_bytes(payload), 4),
-            l3="IPv4",
-            l4=l4,
+            l3=pkt.l3,
+            l4=pkt.l4,
             l3_hex_prefix=hex_bytes(l3_bytes, l3_prefix_len),
             src_ip=pkt.src_ip,
             dst_ip=pkt.dst_ip,
@@ -546,10 +638,81 @@ def extract_flow_packets(
                 m,
                 payload_prefix,
                 header_policy=embedding_header_policy,
-                header_random_salt=header_random_salt or stable_id(str(Path(pcap_path).resolve())),
+                header_random_salt=header_random_salt,
             )
         )
     return metas, qa_prompts, embedding_prompts
+
+
+def extract_packet_classification_flows(
+    pcap_path: str | Path,
+    max_packets_per_flow: int = 0,
+    payload_prefix_len: int = 128,
+    l3_prefix_len: int = 512,
+    embedding_header_policy: str = "full",
+) -> Iterable[Tuple[str, List[PacketMeta], List[str], List[str]]]:
+    """Recover real flows from a SWEET packet-classification class PCAP.
+
+    SWEET writes all packets of one class and partition into one PCAP after it
+    performs the Per-flow Split. Grouping by the class PCAP path would therefore
+    collapse many independent flows into one. This function reconstructs the
+    direction-invariant endpoint key before computing flow-local metadata.
+    """
+    pcap_path = Path(pcap_path)
+    grouped: Dict[Tuple[str, int, str, int, str], List[ParsedPacket]] = {}
+    for ts, frame, linktype in iter_pcap_records(pcap_path):
+        pkt = parse_ip_packet(ts, frame, linktype)
+        if pkt is None:
+            continue
+        key = bidirectional_flow_key(pkt)
+        packets = grouped.setdefault(key, [])
+        if max_packets_per_flow <= 0 or len(packets) < max_packets_per_flow:
+            packets.append(pkt)
+
+    for key, packets in grouped.items():
+        if not packets:
+            continue
+        # The class filename is stable across prepared folds, unlike the parent
+        # train/val/test path. This makes accidental cross-split flow overlap
+        # directly auditable while keeping identical endpoint tuples in two
+        # different classes distinct.
+        flow_id = stable_id(f"{pcap_path.name}|{key!r}")
+        metas, qa_prompts, embedding_prompts = build_packet_views(
+            packets,
+            payload_prefix_len=payload_prefix_len,
+            l3_prefix_len=l3_prefix_len,
+            embedding_header_policy=embedding_header_policy,
+            header_random_salt=flow_id,
+            single_packet_context=True,
+        )
+        yield flow_id, metas, qa_prompts, embedding_prompts
+
+
+def extract_flow_packets(
+    pcap_path: str | Path,
+    max_packets: int = 128,
+    payload_prefix_len: int = 128,
+    l3_prefix_len: int = 512,
+    embedding_header_policy: str = "full",
+    header_random_salt: str = "",
+) -> Tuple[List[PacketMeta], List[str], List[str]]:
+    """Return packet metadata, raw QA prompts, and structured embedding prompts."""
+    packets: List[ParsedPacket] = []
+    for ts, frame, linktype in iter_pcap_records(pcap_path):
+        pkt = parse_ip_packet(ts, frame, linktype)
+        if pkt is None:
+            continue
+        packets.append(pkt)
+        if len(packets) >= max_packets:
+            break
+    return build_packet_views(
+        packets,
+        payload_prefix_len=payload_prefix_len,
+        l3_prefix_len=l3_prefix_len,
+        embedding_header_policy=embedding_header_policy,
+        header_random_salt=header_random_salt or stable_id(str(Path(pcap_path).resolve())),
+        single_packet_context=False,
+    )
 
 
 def corrupt_ipv4_total_len_keep_ip_checksum_valid(l3_hex_prefix: str) -> Optional[str]:

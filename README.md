@@ -20,18 +20,272 @@ Compared with v2, v3 adds a real **Tower-1 multi-objective training script**. To
 
 ---
 
-DataSet
+## SWEET dataset layout
 
-tls-120：
-train：/home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/train
-valid：/home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/val
-test：/home/jing/download/sweet/flow-level-classification/tls/test
+SWEET distinguishes the **split unit** from the **classification unit**:
 
-vpn：
+- **Per-packet Split** randomly assigns packets to train/valid/test. Packets
+  from one flow can therefore appear in different partitions.
+- **Per-flow Split** assigns each complete bidirectional flow to exactly one
+  partition. It can support either packet-level classification (one prediction
+  per packet) or flow-level classification (one prediction per flow).
 
-train：/home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/train
-valid：/home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/val
-test：/home/jing/download/sweet/flow-level-classification/vpn-app/test
+The reference split/preprocessing implementation is located at:
+
+```text
+/home/jing/Debunk_Traffic_Representation-master/process_finetune_data/Split
+```
+
+The prepared **Per-flow Split + packet-level classification** datasets are
+located at:
+
+```text
+/home/jing/download/sweet/packet-level-classification/per-flow-split
+
+datasets: vpn-app, vpn-binary, vpn-service, tls, ustc-app, ustc-binary
+layout:   <dataset>/train_val_split_{0,1,2}/{train,val}
+          <dataset>/test
+```
+
+In these packet-level artifacts, each `<label>.pcap` contains packets from
+multiple disjoint flows of the same class. The PCAP file itself must not be
+treated as one flow. Packet-level preprocessing must recover the real
+bidirectional flow ID (IP endpoints, ports, and protocol) before computing
+flow-aware training losses or split-overlap audits. The packet classifier input
+itself remains one packet: it does not consume inter-arrival time or any
+feature computed from another packet in the flow.
+
+The prepared **Per-flow Split + flow-level classification** datasets used by
+the current Tower1/Tower2 flow pipeline are located at:
+
+```text
+/home/jing/download/sweet/flow-level-classification
+
+vpn-app:
+  train /home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/train
+  valid /home/jing/download/sweet/flow-level-classification/vpn-app/train_val_split_0/val
+  test  /home/jing/download/sweet/flow-level-classification/vpn-app/test
+
+tls-120:
+  train /home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/train
+  valid /home/jing/download/sweet/flow-level-classification/tls/train_val_split_0/val
+  test  /home/jing/download/sweet/flow-level-classification/tls/test
+```
+
+For fold-wise experiments, replace `train_val_split_0` with
+`train_val_split_1` or `train_val_split_2`; all three folds use the same
+dataset-level `test` directory.
+
+### Per-flow Split packet-level pipeline
+
+`run_packet_level_pipeline.py` applies the same strict-one-packet framework to
+all six SWEET packet-level datasets. Each dataset/fold is trained independently.
+The recommended `packet_best` stage combines a local Byte Transformer and a
+current-packet structural expert; a fully nested, validation-only reliability
+gate may fuse the channels or shut an unhelpful channel off. Dataset-specific
+behavior is learned from each fold rather than implemented as dataset-specific
+model branches.
+
+The packet branch is:
+
+```text
+class-level PCAP
+-> recover real bidirectional flow IDs for split audit/training batches only
+-> one packet per model input (no sequence/window/inter-arrival features)
+-> local byte mixer + downsampled Transformer + parsed-meta gated fusion
+-> validation-selected current-packet tree expert
+-> nested OOF temperature/reliability selection on validation only
+-> one prediction per packet on the shared test set
+```
+
+Run a path audit before starting GPU work:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_packet_level_pipeline.py \
+    --dataset vpn-app \
+    --fold 0 \
+    --stage all \
+    --local_files_only \
+    --dry_run
+```
+
+Run all three folds separately. `packet_best` assumes preprocessing and the
+flow-overlap audit have completed. Do not merge the prepared fold directories:
+each `train_val_split_i` contains its own training/validation partition, and
+all folds use the same `test/` set.
+
+```bash
+for fold in 0 1 2; do
+  conda run --no-capture-output -n llm-factory \
+    python run_packet_level_pipeline.py \
+      --dataset vpn-app \
+      --fold ${fold} \
+      --stage preprocess \
+      --max_packets_per_flow 1000
+
+  conda run --no-capture-output -n llm-factory \
+    python run_packet_level_pipeline.py \
+      --dataset vpn-app \
+      --fold ${fold} \
+      --stage audit
+
+  CUDA_VISIBLE_DEVICES=${fold} conda run --no-capture-output -n llm-factory \
+    python run_packet_level_pipeline.py \
+      --dataset vpn-app \
+      --fold ${fold} \
+      --stage packet_best \
+      --byte_max_bytes 64 \
+      --byte_epochs 12 \
+      --byte_batch_size 512 \
+      --byte_eval_batch_size 2048
+done
+```
+
+Supported `--dataset` values use the same pipeline:
+
+```text
+vpn-app, vpn-binary, vpn-service, tls-120, ustc-app, ustc-binary
+```
+
+The underlying preprocessing command must use
+`--input_layout class_packet_pcaps`. `--classification_only` avoids generating
+the much larger QA corpus when packet classification is the only objective;
+`--max_packets_per_flow 0` keeps all packets, while `1000` follows the SWEET
+long-flow cap. The existing flow-level commands keep the default
+`--input_layout flow_pcaps` and are behaviorally unchanged.
+
+The original Qwen-LoRA packet head remains available through `--stage train`
+and `--stage test` as a semantic ablation. It is not forced into the final
+fusion when validation evidence favors the smaller byte or structural channel.
+
+### Current packet-level results
+
+The first protocol-correct VPN-app result uses one packet per inference sample.
+The structural expert reads only the current packet's normalized L3 byte prefix
+and parsed header fields; reconstructed flow IDs are used for split auditing,
+never as model input. Each fold selects byte-prefix length and tree leaf size
+using only its validation macro-F1. The final rule is a pre-specified arithmetic
+mean of the three independently trained fold probabilities.
+
+```text
+fold0: selected prefix=128, leaf=1, test accuracy=0.8981, macro-F1=0.7917
+fold1: selected prefix=64,  leaf=2, test accuracy=0.8919, macro-F1=0.7926
+fold2: selected prefix=64,  leaf=1, test accuracy=0.8935, macro-F1=0.7596
+
+three-fold structural probability mean (complete IPv4+IPv6 test set):
+  accuracy = 0.9066
+  macro-F1 = 0.8112
+  VPN packet target accuracy>=0.9000, macro-F1>=0.7600 -> PASS
+```
+
+The count-correct result above contains all 111,678 test packets. An earlier
+legacy artifact reported `0.9115/0.8190` over 111,670 packets and is not used as
+the headline because eight IPv6 packets were missing. The session-field-masked
+structural view reached `0.8653/0.7446`; the Qwen semantic channel reached
+`0.8027/0.6977` on fold0 test, and its validation-selected fusion reduced test
+performance to `0.8927/0.7881`. The 64-byte Transformer reached validation
+`0.6903/0.6636`, so the one-standard-error rule selected the structural channel
+alone. These are generalization and automatic-channel-shutdown ablations, not
+headline improvements.
+
+For TLS-120, the same 64-byte Transformer configuration was trained on all
+three supplied folds. Each fold's nested gate was selected without test labels:
+
+```text
+fold0 byte test: acc=0.8451, macro-F1=0.8115
+fold1 byte test: acc=0.8404, macro-F1=0.8065
+fold2 byte test: acc=0.8484, macro-F1=0.8123
+
+fold0 byte+structural gate: acc=0.8550, macro-F1=0.8267
+fold1 byte+structural gate: acc=0.8588, macro-F1=0.8279
+fold2 byte+structural gate: acc=0.8736, macro-F1=0.8463
+
+pooled-validation crossfold gate:
+  accuracy = 0.8744
+  macro-F1 = 0.8479
+  TLS packet target accuracy>=0.8500, macro-F1>=0.7800 -> PASS
+```
+
+The previous three-fold structural-only TLS result was `0.7998/0.7656`.
+Pooled-validation fusion concatenates only fold-specific validation predictions
+to select calibration and the gate, then applies the fixed rule to the mean of
+the three aligned test probability sets. Test labels are used only for the final
+reported metrics. The strong-header-masking/SupCon byte ablation reached only
+`0.7151/0.6893` on fold2 validation; therefore these regularizers remain
+available research controls but are not enabled in the current TLS best.
+
+After running `packet_best` for TLS folds 0/1/2, reproduce the pooled result:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python fuse_packet_crossfold.py \
+    --inputs \
+      reasoningDataset/packet-level/tls-120/fold0/test_byte_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold1/test_byte_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold2/test_byte_probs.npz \
+    --label_map reasoningDataset/packet-level/tls-120/fold0/train/label_map.json \
+    --output_json reasoningDataset/packet-level/tls-120/test_byte_crossfold_mean.json \
+    --output_npz reasoningDataset/packet-level/tls-120/test_byte_crossfold_mean.npz
+
+conda run --no-capture-output -n llm-factory \
+  python fuse_packet_crossfold.py \
+    --inputs \
+      reasoningDataset/packet-level/tls-120/fold0/test_feature_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold1/test_feature_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold2/test_feature_probs.npz \
+    --label_map reasoningDataset/packet-level/tls-120/fold0/train/label_map.json \
+    --output_json reasoningDataset/packet-level/tls-120/test_feature_crossfold_mean.json \
+    --output_npz reasoningDataset/packet-level/tls-120/test_feature_crossfold_mean.npz
+
+conda run --no-capture-output -n llm-factory \
+  python concat_packet_probabilities.py \
+    --inputs \
+      reasoningDataset/packet-level/tls-120/fold0/valid_byte_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold1/valid_byte_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold2/valid_byte_probs.npz \
+    --output_npz reasoningDataset/packet-level/tls-120/valid_byte_pooled.npz
+
+conda run --no-capture-output -n llm-factory \
+  python concat_packet_probabilities.py \
+    --inputs \
+      reasoningDataset/packet-level/tls-120/fold0/valid_feature_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold1/valid_feature_probs.npz \
+      reasoningDataset/packet-level/tls-120/fold2/valid_feature_probs.npz \
+    --output_npz reasoningDataset/packet-level/tls-120/valid_feature_pooled.npz
+
+conda run --no-capture-output -n llm-factory \
+  python fuse_packet_experts.py \
+    --valid_semantic reasoningDataset/packet-level/tls-120/valid_byte_pooled.npz \
+    --valid_structural reasoningDataset/packet-level/tls-120/valid_feature_pooled.npz \
+    --test_semantic reasoningDataset/packet-level/tls-120/test_byte_crossfold_mean.npz \
+    --test_structural reasoningDataset/packet-level/tls-120/test_feature_crossfold_mean.npz \
+    --label_map reasoningDataset/packet-level/tls-120/fold0/train/label_map.json \
+    --output_json reasoningDataset/packet-level/tls-120/test_byte_structural_crossfold_gate.json \
+    --gate_out checkpoints/packet-level/tls-120/byte_structural_crossfold_gate.joblib
+```
+
+The exact audit includes both IPv4 and IPv6 and matches the SWEET packet
+counts: fold0 train has 33,088 packets/4,713 reconstructed flows, validation
+has 7,568 packets/1,706 flows, and the shared test has 111,678 packets/6,681
+flows. Train/validation/test reconstructed-flow intersections are all zero.
+
+Saved local VPN structural evidence (ignored by git because datasets and
+checkpoints are local artifacts):
+
+```text
+reasoningDataset/packet-level/vpn-app/fold0_feature_expert.json
+reasoningDataset/packet-level/vpn-app/fold1_feature_expert.json
+reasoningDataset/packet-level/vpn-app/fold2_feature_expert.json
+reasoningDataset/packet-level/vpn-app/packet_feature_crossfold_mean.json
+checkpoints/packet-level/vpn-app/fold{0,1,2}/feature_expert.joblib
+```
+
+This is the current strong packet baseline, not the final CCF-A method claim.
+The unified model iteration adds the same semantic Tower1 channel,
+header-randomized consistency channel, and validation-gated semantic/structural
+fusion to every packet dataset. Modules remain present for all datasets, while
+learned gates can reduce an unhelpful channel's contribution toward zero.
 
 ## Cross-dataset pipeline
 
@@ -1244,12 +1498,14 @@ tls-120:
 
 ```
 
-USTC is excluded from the current flow-level paper scope. Its available
-train/valid/test artifacts originate from a packet-level split, so aggregating
-those packets into flows after splitting cannot prove flow-level independence
-and may place packets from one session in multiple partitions. Historical USTC
-smoke results remain documented below, but they are not used in the framework
-table, target gates, ablations, or generalization claims.
+USTC is excluded from the current **flow-level** paper scope because the
+available USTC artifacts target packet-level classification: every class PCAP
+aggregates packets from multiple flows and is not a flow-level sample. Their
+train/valid/test partitions are correctly generated with a Per-flow Split and
+remain suitable for a future packet-level evaluation branch. Historical USTC
+flow-pipeline smoke results below incorrectly treated each class PCAP as one
+flow, so they are not used in the framework table, target gates, ablations, or
+generalization claims.
 
 Best-result snapshot:
 
@@ -1732,7 +1988,7 @@ ustc-binary:
   test  /home/jing/download/sweet/packet-level-classification/per-flow-split/ustc-binary/test
 ```
 
-`ustc-app` and `ustc-binary` are retained only as legacy packet-level pipeline smoke inputs. Their current partition is not accepted for the flow-level paper because it does not establish independent flow splits. Do not include the following USTC numbers in the VPN/TLS main table or use them as cross-dataset flow-level evidence. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
+`ustc-app` and `ustc-binary` are retained only as legacy flow-pipeline smoke inputs. Their partitions do establish disjoint flows, but each `<label>.pcap` is a packet-level class container holding multiple flows rather than one flow-level sample. Do not include the following USTC numbers in the VPN/TLS flow-level main table or use them as cross-dataset flow-level evidence. They can be used after implementing a dedicated packet-level reader and evaluator that reconstruct real flow IDs. For datasets other than `vpn-app`, the runner defaults `--coarse_groups none` and `--confusion_groups none`; pass explicit groups only after building dataset-specific coarse labels.
 
 USTC app has now been run with full no-limit preprocessing. Each split generated 1280 packet records and a 20-class label map. The first 5-step Tower-1 smoke checkpoint only reached `0.15` accuracy / `0.065` macro-F1 after graph+seq fusion, so it should remain a pipeline smoke test. An 80-step Tower-1 run with `packet_batch_size=2` improved graph+seq+embedding-expert fusion to `0.55` accuracy / `0.475` macro-F1, but its packet contrastive loss stayed inactive because `flows_per_batch=1`.
 
@@ -3182,7 +3438,7 @@ Paper positioning from the evidence pack:
 main claim: unified candidate-expert traffic classification framework with validation-gated safety controls
 strong performance claim: TLS-120
 qualified performance claim: VPN point estimate passes, but bootstrap lower bound is mixed
-dataset scope: VPN and TLS-120 only; packet-level-split USTC is excluded from flow-level claims
+dataset scope: VPN and TLS-120 flow-level tasks only; Per-flow Split USTC packet-level artifacts are excluded from flow-level claims
 reviewer-risk control: report harmful experts as negative ablations and use bootstrap/target-shift guards
 ```
 

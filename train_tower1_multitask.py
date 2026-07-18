@@ -237,6 +237,37 @@ def infer_num_classes(label_map_path: str) -> int:
     return len(label_map)
 
 
+def load_label_names(label_map_path: str) -> List[str]:
+    with open(label_map_path, "r", encoding="utf-8") as f:
+        label_map = {str(k): int(v) for k, v in json.load(f).items()}
+    names = [""] * len(label_map)
+    for name, idx in label_map.items():
+        names[idx] = name
+    return names
+
+
+def configure_packet_weights(rows: List[dict], weighting: str, beta: float, disable_information_weights: bool) -> Dict[int, float]:
+    counts: Dict[int, int] = {}
+    for row in rows:
+        label = int(row["label_id"])
+        counts[label] = counts.get(label, 0) + 1
+    if weighting == "inverse":
+        class_weights = {label: 1.0 / max(count, 1) for label, count in counts.items()}
+    elif weighting == "effective":
+        class_weights = {
+            label: (1.0 - beta) / max(1.0 - beta ** count, 1e-12)
+            for label, count in counts.items()
+        }
+    else:
+        class_weights = {label: 1.0 for label in counts}
+    mean_weight = sum(class_weights.values()) / max(len(class_weights), 1)
+    class_weights = {label: weight / max(mean_weight, 1e-12) for label, weight in class_weights.items()}
+    for row in rows:
+        information_weight = 1.0 if disable_information_weights else float(row.get("packet_weight", 1.0))
+        row["packet_weight"] = information_weight * class_weights[int(row["label_id"])]
+    return class_weights
+
+
 def percentile_value(values: List[int], percentile: float) -> int:
     if not values:
         return 0
@@ -307,19 +338,29 @@ def main() -> None:
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-1.5B-Instruct")
     ap.add_argument("--label_map", required=True)
     ap.add_argument("--packet_aux_jsonl", required=True, help="packet_auxiliary.jsonl from preprocess_tower1.py")
+    ap.add_argument("--valid_packet_aux_jsonl", default="", help="Optional held-out packet validation JSONL used for best-checkpoint selection.")
     ap.add_argument("--sft_jsonl", nargs="*", default=[], help="packet_instruction.jsonl and packet_validity.jsonl")
     ap.add_argument("--no_sft", action="store_true", help="Train only packet cls + SupCon without generative QA loss.")
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--init_checkpoint_dir", default="", help="Optional Tower-1 checkpoint dir containing adapter/ and tower1_heads.pt for continued training.")
+    ap.add_argument(
+        "--init_adapter_only",
+        action="store_true",
+        help="Warm-start the shared LoRA adapter but initialize dataset-specific packet/projection heads.",
+    )
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--max_steps", type=int, default=0, help="Override epochs if >0.")
     ap.add_argument("--sft_batch_size", type=int, default=2)
     ap.add_argument("--packet_batch_size", type=int, default=16)
+    ap.add_argument("--valid_batch_size", type=int, default=0, help="Validation batch size; 0 reuses --packet_batch_size.")
     ap.add_argument("--max_sft_length", type=int, default=1792)
     ap.add_argument("--max_packet_length", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--head_lr", type=float, default=1e-4)
     ap.add_argument("--weight_decay", type=float, default=0.01)
+    ap.add_argument("--class_weighting", choices=["none", "inverse", "effective"], default="none")
+    ap.add_argument("--class_weight_beta", type=float, default=0.9999)
+    ap.add_argument("--disable_packet_information_weights", action="store_true", help="Give ACK/control packets full CE weight; recommended when packet classification is the primary task.")
     ap.add_argument("--cls_weight", type=float, default=0.1)
     ap.add_argument("--contrastive_weight", type=float, default=0.3)
     ap.add_argument("--temperature", type=float, default=0.07)
@@ -343,6 +384,8 @@ def main() -> None:
     ap.add_argument("--gradient_checkpointing", action="store_true")
     ap.add_argument("--log_steps", type=int, default=20)
     ap.add_argument("--save_steps", type=int, default=0)
+    ap.add_argument("--eval_steps", type=int, default=0, help="Validation interval. 0 evaluates once per packet-loader epoch.")
+    ap.add_argument("--select_metric", choices=["macro_f1", "accuracy"], default="macro_f1")
     ap.add_argument("--no_load_progress", action="store_true", help="Disable JSONL loading progress bars.")
     ap.add_argument("--stop_on_nonfinite_loss", action="store_true", help="Raise an error instead of skipping a NaN/Inf loss step.")
     ap.add_argument("--auto_max_sft_length", action="store_true", help="Scan SFT token lengths and raise --max_sft_length to the requested percentile.")
@@ -359,6 +402,7 @@ def main() -> None:
     print(f"device={device}, dtype={args.dtype}", flush=True)
     print(f"loading label map: {args.label_map}", flush=True)
     num_classes = infer_num_classes(args.label_map)
+    label_names = load_label_names(args.label_map)
     print(f"num_classes={num_classes}", flush=True)
 
     print("importing model code", flush=True)
@@ -378,12 +422,14 @@ def main() -> None:
         projection_dim=args.projection_dim,
         local_files_only=args.local_files_only,
     )
-    if args.init_checkpoint_dir:
+    if args.init_checkpoint_dir and not args.init_adapter_only:
         load_packet_heads(model, Path(args.init_checkpoint_dir) / "tower1_heads.pt")
     print("base model loaded", flush=True)
     if args.gradient_checkpointing:
         print("enabling gradient checkpointing", flush=True)
         model.backbone.gradient_checkpointing_enable()
+        if hasattr(model.backbone, "enable_input_require_grads"):
+            model.backbone.enable_input_require_grads()
     print(f"moving model to {device}", flush=True)
     model.to(device)
     model.train()
@@ -410,6 +456,13 @@ def main() -> None:
         show_progress=show_load_progress,
         paired_path=args.paired_packet_aux_jsonl,
     )
+    class_weights = configure_packet_weights(
+        packet_ds.rows,
+        weighting=args.class_weighting,
+        beta=args.class_weight_beta,
+        disable_information_weights=args.disable_packet_information_weights,
+    )
+    print(f"packet class weights ({args.class_weighting})={class_weights}", flush=True)
     if args.flow_balanced_packet_batches:
         packet_sampler = FlowBalancedPacketBatchSampler(
             packet_ds.rows,
@@ -437,6 +490,18 @@ def main() -> None:
         )
     print(f"packet samples={len(packet_ds)}, packet batches/epoch={len(packet_loader)}", flush=True)
     packet_iter = cycle(packet_loader)
+
+    valid_loader = None
+    if args.valid_packet_aux_jsonl:
+        valid_ds = PacketAuxDataset(args.valid_packet_aux_jsonl, show_progress=show_load_progress)
+        valid_loader = DataLoader(
+            valid_ds,
+            batch_size=args.valid_batch_size or args.packet_batch_size,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+        )
+        print(f"validation packet samples={len(valid_ds)}, batches={len(valid_loader)}", flush=True)
 
     sft_loader = None
     if not args.no_sft:
@@ -485,6 +550,9 @@ def main() -> None:
 
     running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
     skipped_nonfinite = 0
+    best_key = None
+    eval_interval = args.eval_steps if args.eval_steps > 0 else steps_per_epoch
+    history_path = Path(args.output_dir) / "packet_validation_history.jsonl"
     for step in pbar:
         sft_batch = next(sft_iter) if sft_iter is not None else None
         packet_batch = next(packet_iter)
@@ -575,6 +643,37 @@ def main() -> None:
         if args.save_steps and (step + 1) % args.save_steps == 0:
             save_model(model, args.output_dir, suffix=f"step_{step+1}")
 
+        should_eval = valid_loader is not None and ((step + 1) % eval_interval == 0 or step + 1 == total_steps)
+        if should_eval:
+            from packet_eval_utils import evaluate_packet_model
+
+            metrics = evaluate_packet_model(
+                model,
+                valid_loader,
+                device=device,
+                num_classes=num_classes,
+                label_names=label_names,
+                desc=f"valid step {step + 1}",
+            )
+            metrics.pop("y_true", None)
+            metrics.pop("y_pred", None)
+            record = {"step": step + 1, "select_metric": args.select_metric, "metrics": metrics}
+            with open(history_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
+            improved = best_key is None or key > best_key
+            print(
+                f"validation step={step + 1} loss={metrics['loss']:.4f} "
+                f"accuracy={metrics['accuracy']:.4f} macro_f1={metrics['macro_f1']:.4f} "
+                f"select={args.select_metric}:{metrics[args.select_metric]:.4f} improved={improved}",
+                flush=True,
+            )
+            if improved:
+                best_key = key
+                save_model(model, args.output_dir, suffix="best")
+                with open(Path(args.output_dir) / "best_packet_validation_metrics.json", "w", encoding="utf-8") as f:
+                    json.dump(record, f, indent=2, ensure_ascii=False)
+
     print(f"training finished; skipped_nonfinite={skipped_nonfinite}", flush=True)
     save_model(model, args.output_dir)
 
@@ -592,6 +691,7 @@ def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "
                 "base_model": model.base_model_name_or_path,
                 "num_classes": model.num_classes,
                 "hidden_size": model.hidden_size,
+                "projection_dim": model.projection_head.net[-1].out_features,
                 "embedding_pooling": "last_token",
                 "loss": "L_QA + alpha*L_packet_cls + beta*L_supcon + gamma*L_flow_proto + delta*L_paired_consistency",
                 "supports_flow_aware_supcon": True,
