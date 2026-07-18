@@ -33,8 +33,11 @@ def main() -> None:
     config = checkpoint["config"]
     inference_config = checkpoint.get("inference_config", {"raw_weight": 1.0})
     raw_weight = float(inference_config.get("raw_weight", 1.0))
+    router_enabled = bool(inference_config.get("router_enabled", False))
     evaluate_invariant_view = (
-        inference_config.get("selection_scope") == "validation_only" or raw_weight < 1.0
+        inference_config.get("selection_scope") == "validation_only"
+        or raw_weight < 1.0
+        or router_enabled
     )
     model = PacketByteTransformer(**config).to(device)
     model.load_state_dict(checkpoint["state_dict"])
@@ -55,17 +58,27 @@ def main() -> None:
         pin_memory=device.type == "cuda",
     )
     label_names = load_label_names(args.label_map)
-    y_true, raw_probabilities, masked_probabilities = predict_packet_views(
+    y_true, raw_probabilities, masked_probabilities, routed_reliability = predict_packet_views(
         model,
         loader,
         device,
         include_masked=evaluate_invariant_view,
+        include_identifiability=router_enabled,
     )
-    probabilities = (
-        raw_probabilities
-        if masked_probabilities is None
-        else raw_weight * raw_probabilities + (1.0 - raw_weight) * masked_probabilities
-    )
+    if router_enabled:
+        assert masked_probabilities is not None and routed_reliability is not None
+        invariant_scale = float(inference_config.get("invariant_scale", 0.0))
+        masked_weight = invariant_scale * routed_reliability.reshape(-1, 1)
+        probabilities = (
+            (1.0 - masked_weight) * raw_probabilities
+            + masked_weight * masked_probabilities
+        )
+    else:
+        probabilities = (
+            raw_probabilities
+            if masked_probabilities is None
+            else raw_weight * raw_probabilities + (1.0 - raw_weight) * masked_probabilities
+        )
     metrics = packet_classification_metrics(
         y_true, probabilities.argmax(axis=1), len(label_names), label_names
     )

@@ -193,9 +193,11 @@ def effective_class_weights(labels: torch.Tensor, num_classes: int, beta: float)
 
 
 @torch.no_grad()
-def predict_packet_views(model, loader, device, include_masked=False):
+def predict_packet_views(
+    model, loader, device, include_masked=False, include_identifiability=False
+):
     model.eval()
-    ys, raw_probabilities, masked_probabilities = [], [], []
+    ys, raw_probabilities, masked_probabilities, identifiability = [], [], [], []
     for batch in tqdm(loader, desc="eval byte transformer", leave=False):
         payload_tokens = batch["payload_tokens"].to(device) if model.use_payload_channel else None
         payload_lengths = batch["payload_length"].to(device) if model.use_payload_channel else None
@@ -209,20 +211,31 @@ def predict_packet_views(model, loader, device, include_masked=False):
         ys.extend(batch["label"].tolist())
         raw_probabilities.append(torch.softmax(raw_logits.float(), dim=-1).cpu().numpy())
         if include_masked:
-            masked_logits, _, _ = model(
-                batch["masked_tokens"].to(device),
-                batch["length"].to(device),
-                batch["masked_meta"].to(device),
-                payload_tokens,
-                payload_lengths,
-            )
+            if include_identifiability:
+                masked_logits, _, _, reliability_logit = model.forward_with_identifiability(
+                    batch["masked_tokens"].to(device),
+                    batch["length"].to(device),
+                    batch["masked_meta"].to(device),
+                    payload_tokens,
+                    payload_lengths,
+                )
+                identifiability.append(torch.sigmoid(reliability_logit.float()).cpu().numpy())
+            else:
+                masked_logits, _, _ = model(
+                    batch["masked_tokens"].to(device),
+                    batch["length"].to(device),
+                    batch["masked_meta"].to(device),
+                    payload_tokens,
+                    payload_lengths,
+                )
             masked_probabilities.append(
                 torch.softmax(masked_logits.float(), dim=-1).cpu().numpy()
             )
     y_true = np.asarray(ys, dtype=np.int64)
     raw = np.concatenate(raw_probabilities)
     masked = np.concatenate(masked_probabilities) if masked_probabilities else None
-    return y_true, raw, masked
+    reliability = np.concatenate(identifiability) if identifiability else None
+    return y_true, raw, masked, reliability
 
 
 def select_invariant_blend(
@@ -256,6 +269,38 @@ def select_invariant_blend(
     return best[1], best[2], best[3]
 
 
+def select_routed_invariant_blend(
+    y_true: np.ndarray,
+    raw_probabilities: np.ndarray,
+    masked_probabilities: np.ndarray,
+    reliability: np.ndarray,
+    num_classes: int,
+    label_names: list[str],
+    metric: str = "macro_f1",
+    grid_size: int = 21,
+) -> tuple[float, dict, np.ndarray]:
+    if grid_size < 2:
+        raise ValueError("routed invariant blend grid size must be at least 2")
+    reliability = np.asarray(reliability, dtype=np.float32).reshape(-1, 1)
+    best = None
+    for invariant_scale in np.linspace(0.0, 1.0, grid_size):
+        masked_weight = invariant_scale * reliability
+        probabilities = (1.0 - masked_weight) * raw_probabilities + masked_weight * masked_probabilities
+        metrics = packet_classification_metrics(
+            y_true, probabilities.argmax(axis=1), num_classes, label_names
+        )
+        key = (
+            float(metrics[metric]),
+            float(metrics["macro_f1"]),
+            float(metrics["accuracy"]),
+            -float(invariant_scale),
+        )
+        if best is None or key > best[0]:
+            best = (key, float(invariant_scale), metrics, probabilities)
+    assert best is not None
+    return best[1], best[2], best[3]
+
+
 @torch.no_grad()
 def evaluate(
     model,
@@ -267,7 +312,7 @@ def evaluate(
     raw_weight: float = 1.0,
 ):
     use_masked = raw_weight < 1.0
-    y_true, raw, masked = predict_packet_views(
+    y_true, raw, masked, _ = predict_packet_views(
         model, loader, device, include_masked=use_masked
     )
     probabilities = raw if masked is None else raw_weight * raw + (1.0 - raw_weight) * masked
@@ -379,6 +424,8 @@ def main() -> None:
         choices=["accuracy", "macro_f1"],
         default="macro_f1",
     )
+    ap.add_argument("--learned_identifiability_router", action="store_true")
+    ap.add_argument("--identifiability_loss_weight", type=float, default=0.1)
     ap.add_argument("--contrastive_weight", type=float, default=0.05)
     ap.add_argument("--temperature", type=float, default=0.1)
     ap.add_argument("--packets_per_flow", type=int, default=2)
@@ -388,6 +435,8 @@ def main() -> None:
     args = ap.parse_args()
     if not 0.0 <= args.ambiguity_gate_strength <= 1.0:
         ap.error("--ambiguity_gate_strength must be in [0, 1]")
+    if args.learned_identifiability_router and not args.ambiguity_aware_targets:
+        ap.error("--learned_identifiability_router requires --ambiguity_aware_targets")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -395,7 +444,11 @@ def main() -> None:
     label_names = load_label_names(args.label_map)
     num_classes = len(label_names)
     device = torch.device(args.device)
-    needs_training_view = args.masked_ce_weight > 0 or args.consistency_weight > 0
+    needs_training_view = (
+        args.masked_ce_weight > 0
+        or args.consistency_weight > 0
+        or args.learned_identifiability_router
+    )
     payload_width = args.max_payload_bytes if args.use_payload_channel else 0
     train_dataset = PacketByteDataset(
         args.train_index,
@@ -408,7 +461,7 @@ def main() -> None:
     valid_dataset = PacketByteDataset(
         args.valid_index,
         args.max_bytes,
-        include_augmented=args.select_invariant_blend,
+        include_augmented=args.select_invariant_blend or args.learned_identifiability_router,
         max_payload_bytes=payload_width,
         num_classes=num_classes,
     )
@@ -438,6 +491,7 @@ def main() -> None:
         "dropout": args.dropout,
         "use_payload_channel": args.use_payload_channel,
         "max_payload_bytes": args.max_payload_bytes,
+        "use_identifiability_head": args.learned_identifiability_router,
     }
     model = PacketByteTransformer(**config).to(device)
     class_weights = effective_class_weights(train_dataset.labels, num_classes, args.class_weight_beta).to(device)
@@ -474,10 +528,16 @@ def main() -> None:
                 ce = F.cross_entropy(clean_logits, labels, weight=class_weights)
                 masked_ce = clean_logits.sum() * 0.0
                 consistency = clean_logits.sum() * 0.0
+                identifiability_loss = clean_logits.sum() * 0.0
                 if needs_training_view:
-                    view_logits, _, _ = model(
-                        view_tokens, lengths, view_meta, payload_tokens, payload_lengths
-                    )
+                    if args.learned_identifiability_router:
+                        view_logits, _, _, reliability_logit = model.forward_with_identifiability(
+                            view_tokens, lengths, view_meta, payload_tokens, payload_lengths
+                        )
+                    else:
+                        view_logits, _, _ = model(
+                            view_tokens, lengths, view_meta, payload_tokens, payload_lengths
+                        )
                     if args.ambiguity_aware_targets:
                         hard_targets = F.one_hot(labels, num_classes=num_classes).float()
                         ambiguity_targets = batch["ambiguity_target"].to(device)
@@ -490,6 +550,16 @@ def main() -> None:
                             invariant_reliability,
                             torch.ones_like(invariant_reliability),
                         )
+                        if args.learned_identifiability_router:
+                            supervised_router = (use_mask & enough_support).float()
+                            per_sample_router_loss = F.smooth_l1_loss(
+                                torch.sigmoid(reliability_logit.float()),
+                                invariant_reliability,
+                                reduction="none",
+                            )
+                            identifiability_loss = (
+                                per_sample_router_loss * supervised_router
+                            ).sum() / supervised_router.sum().clamp_min(1.0)
                         if args.ambiguity_supervision == "empirical_soft":
                             masked_targets = torch.where(
                                 (use_mask & enough_support)[:, None],
@@ -519,6 +589,7 @@ def main() -> None:
                 )
                 loss = ce + args.masked_ce_weight * masked_ce + args.consistency_weight * consistency
                 loss = loss + args.contrastive_weight * contrastive
+                loss = loss + args.identifiability_loss_weight * identifiability_loss
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -527,20 +598,39 @@ def main() -> None:
             scheduler.step()
             losses.append(float(loss.detach().cpu()))
         inference_config = {"raw_weight": 1.0, "selection_scope": "raw_only"}
-        if args.select_invariant_blend:
-            y_valid, raw_valid, masked_valid = predict_packet_views(
-                model, valid_loader, device, include_masked=True
+        if args.select_invariant_blend or args.learned_identifiability_router:
+            y_valid, raw_valid, masked_valid, routed_reliability = predict_packet_views(
+                model,
+                valid_loader,
+                device,
+                include_masked=True,
+                include_identifiability=args.learned_identifiability_router,
             )
             assert masked_valid is not None
-            raw_weight, valid_metrics, _ = select_invariant_blend(
-                y_valid,
-                raw_valid,
-                masked_valid,
-                num_classes,
-                label_names,
-                args.invariant_blend_metric,
-                args.invariant_blend_grid_size,
-            )
+            if args.learned_identifiability_router:
+                assert routed_reliability is not None
+                invariant_scale, valid_metrics, _ = select_routed_invariant_blend(
+                    y_valid,
+                    raw_valid,
+                    masked_valid,
+                    routed_reliability,
+                    num_classes,
+                    label_names,
+                    args.invariant_blend_metric,
+                    args.invariant_blend_grid_size,
+                )
+                raw_weight = 1.0
+            else:
+                raw_weight, valid_metrics, _ = select_invariant_blend(
+                    y_valid,
+                    raw_valid,
+                    masked_valid,
+                    num_classes,
+                    label_names,
+                    args.invariant_blend_metric,
+                    args.invariant_blend_grid_size,
+                )
+                invariant_scale = 0.0
             raw_metrics = packet_classification_metrics(
                 y_valid, raw_valid.argmax(axis=1), num_classes, label_names
             )
@@ -549,6 +639,8 @@ def main() -> None:
             )
             inference_config = {
                 "raw_weight": raw_weight,
+                "router_enabled": args.learned_identifiability_router,
+                "invariant_scale": invariant_scale,
                 "selection_scope": "validation_only",
                 "select_metric": args.invariant_blend_metric,
                 "grid_size": args.invariant_blend_grid_size,
@@ -602,7 +694,7 @@ def main() -> None:
         test_dataset = PacketByteDataset(
             args.test_index,
             args.max_bytes,
-            include_augmented=args.select_invariant_blend,
+            include_augmented=args.select_invariant_blend or args.learned_identifiability_router,
             max_payload_bytes=payload_width,
             num_classes=num_classes,
         )
@@ -613,17 +705,25 @@ def main() -> None:
             num_workers=args.num_workers,
             pin_memory=device.type == "cuda",
         )
-        y_true, raw_test, masked_test = predict_packet_views(
+        router_enabled = bool(result["inference_config"].get("router_enabled", False))
+        y_true, raw_test, masked_test, routed_reliability = predict_packet_views(
             model,
             test_loader,
             device,
-            include_masked=args.select_invariant_blend,
+            include_masked=args.select_invariant_blend or router_enabled,
+            include_identifiability=router_enabled,
         )
-        probabilities = (
-            raw_test
-            if masked_test is None
-            else selected_raw_weight * raw_test + (1.0 - selected_raw_weight) * masked_test
-        )
+        if router_enabled:
+            assert masked_test is not None and routed_reliability is not None
+            invariant_scale = float(result["inference_config"].get("invariant_scale", 0.0))
+            masked_weight = invariant_scale * routed_reliability.reshape(-1, 1)
+            probabilities = (1.0 - masked_weight) * raw_test + masked_weight * masked_test
+        else:
+            probabilities = (
+                raw_test
+                if masked_test is None
+                else selected_raw_weight * raw_test + (1.0 - selected_raw_weight) * masked_test
+            )
         test_metrics = packet_classification_metrics(
             y_true, probabilities.argmax(axis=1), num_classes, label_names
         )

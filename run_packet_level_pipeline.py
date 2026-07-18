@@ -77,6 +77,12 @@ def main() -> None:
     ap.add_argument("--byte_consistency_weight", type=float, default=0.1)
     ap.add_argument("--byte_ambiguity_gate_strength", type=float, default=1.0)
     ap.add_argument(
+        "--byte_learned_identifiability_router",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    ap.add_argument("--byte_identifiability_loss_weight", type=float, default=0.1)
+    ap.add_argument(
         "--byte_select_invariant_blend",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -90,6 +96,11 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()
+    if args.byte_learned_identifiability_router and not args.byte_ambiguity_aware_targets:
+        ap.error(
+            "--byte_learned_identifiability_router requires "
+            "--byte_ambiguity_aware_targets"
+        )
 
     dataset_dir = DATASET_DIRS[args.dataset]
     source = Path(args.source_root) / dataset_dir
@@ -218,6 +229,14 @@ def main() -> None:
                     "reliability_gate",
                     "--ambiguity_gate_strength",
                     str(args.byte_ambiguity_gate_strength),
+                ]
+            )
+        if args.byte_learned_identifiability_router:
+            byte_command.extend(
+                [
+                    "--learned_identifiability_router",
+                    "--identifiability_loss_weight",
+                    str(args.byte_identifiability_loss_weight),
                 ]
             )
         if args.byte_select_invariant_blend:

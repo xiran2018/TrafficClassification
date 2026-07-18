@@ -266,10 +266,18 @@ The direct empirical soft target is a negative ablation: forcing an ambiguous
 signature distribution into the shared encoder reduces macro-F1 relative to
 ordinary hard-label masking. Reliability gating avoids that failure, but the
 validation-optimal global strength does not maximize shared-test F1. Therefore
-the paper-facing next step is a learned per-packet reliability/router trained
-without target labels, followed by three-fold and TLS-120 verification. The
-current `0.9066/0.8112` VPN-app structural cross-fold result remains the
-headline until that unified learned router is validated across folds.
+the learned per-packet router was also tested on all three folds. Every fold
+selected invariant scale `0` on validation. Its fold0/fold1/fold2 shared-test
+results were `0.8262/0.6513`, `0.8228/0.6488`, and `0.8172/0.6502`; their
+probability mean reached only `0.8316/0.6660`. This is a reproducible negative
+ablation: predicting signature identifiability is a useful diagnostic auxiliary
+task, but routing predictions through the weak masked-logit expert increases
+cross-environment representation shift. The option remains default-off for
+ablation reproduction. The paper-facing next step should keep identifiability
+as a training constraint while protecting the full current-packet classifier,
+and select checkpoints by cross-fold stability rather than one-fold validation
+peaks. The current `0.9066/0.8112` VPN-app structural cross-fold result remains
+the headline.
 
 The first protocol-correct VPN-app result uses one packet per inference sample.
 The structural expert reads only the current packet's normalized L3 byte prefix

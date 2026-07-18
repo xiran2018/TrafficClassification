@@ -21,12 +21,14 @@ class PacketByteTransformer(nn.Module):
         projection_dim: int = 128,
         use_payload_channel: bool = False,
         max_payload_bytes: int = 128,
+        use_identifiability_head: bool = False,
     ) -> None:
         super().__init__()
         self.max_bytes = int(max_bytes)
         self.pool_stride = int(pool_stride)
         self.use_payload_channel = bool(use_payload_channel)
         self.max_payload_bytes = int(max_payload_bytes)
+        self.use_identifiability_head = bool(use_identifiability_head)
         self.byte_embedding = nn.Embedding(258, hidden_dim, padding_idx=256)
         self.local_mixer = nn.Sequential(
             nn.Conv1d(hidden_dim, hidden_dim, kernel_size=5, padding=2, groups=hidden_dim),
@@ -90,6 +92,13 @@ class PacketByteTransformer(nn.Module):
             nn.Linear(hidden_dim, projection_dim),
         )
         self.classifier = nn.Linear(hidden_dim, num_classes)
+        if self.use_identifiability_head:
+            self.identifiability_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 1),
+            )
         nn.init.normal_(self.cls_token, std=0.02)
         nn.init.normal_(self.position_embedding, std=0.02)
         if self.use_payload_channel:
@@ -125,14 +134,14 @@ class PacketByteTransformer(nn.Module):
         x = transformer(x, src_key_padding_mask=torch.cat([cls_mask, padding_mask], dim=1))
         return norm(x[:, 0])
 
-    def forward(
+    def _encode_fused(
         self,
         byte_tokens: torch.Tensor,
         byte_lengths: torch.Tensor,
         meta_features: torch.Tensor,
         payload_tokens: torch.Tensor | None = None,
         payload_lengths: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         byte_repr = self._encode_byte_stream(
             byte_tokens,
             byte_lengths,
@@ -163,5 +172,43 @@ class PacketByteTransformer(nn.Module):
         meta_repr = self.meta_encoder(meta_features)
         gate = self.fusion_gate(torch.cat([byte_repr, meta_repr], dim=-1))
         fused = self.fusion_norm(gate * byte_repr + (1.0 - gate) * meta_repr)
+        return fused, gate
+
+    def forward(
+        self,
+        byte_tokens: torch.Tensor,
+        byte_lengths: torch.Tensor,
+        meta_features: torch.Tensor,
+        payload_tokens: torch.Tensor | None = None,
+        payload_lengths: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        fused, gate = self._encode_fused(
+            byte_tokens,
+            byte_lengths,
+            meta_features,
+            payload_tokens,
+            payload_lengths,
+        )
         projected = F.normalize(self.projector(fused).float(), dim=-1)
         return self.classifier(fused), projected, gate
+
+    def forward_with_identifiability(
+        self,
+        byte_tokens: torch.Tensor,
+        byte_lengths: torch.Tensor,
+        meta_features: torch.Tensor,
+        payload_tokens: torch.Tensor | None = None,
+        payload_lengths: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.use_identifiability_head:
+            raise RuntimeError("identifiability head is disabled")
+        fused, gate = self._encode_fused(
+            byte_tokens,
+            byte_lengths,
+            meta_features,
+            payload_tokens,
+            payload_lengths,
+        )
+        projected = F.normalize(self.projector(fused).float(), dim=-1)
+        reliability_logit = self.identifiability_head(fused).squeeze(-1)
+        return self.classifier(fused), projected, gate, reliability_logit

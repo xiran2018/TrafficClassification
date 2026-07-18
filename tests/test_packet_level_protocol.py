@@ -30,6 +30,7 @@ from train_packet_byte_transformer import (
     interpolate_identifiability_reliability,
     mask_session_tokens,
     select_invariant_blend,
+    select_routed_invariant_blend,
 )
 from train_packet_feature_expert import packet_features
 from traffic_utils import PacketMeta, extract_packet_classification_flows, format_packet_embedding_prompt
@@ -320,6 +321,43 @@ def test_identifiability_gate_strength_interpolates_from_hard_to_reliable():
     assert torch.equal(
         interpolate_identifiability_reliability(reliability, 1.0), reliability
     )
+
+
+def test_routed_invariant_blend_uses_per_packet_reliability_and_safe_zero_scale():
+    y_true = np.asarray([0, 1], dtype=np.int64)
+    raw = np.asarray([[0.9, 0.1], [0.8, 0.2]], dtype=np.float32)
+    masked = np.asarray([[0.1, 0.9], [0.1, 0.9]], dtype=np.float32)
+    reliability = np.asarray([0.0, 1.0], dtype=np.float32)
+
+    scale, metrics, probabilities = select_routed_invariant_blend(
+        y_true, raw, masked, reliability, 2, ["a", "b"], grid_size=11
+    )
+
+    assert scale > 0.0
+    assert metrics["accuracy"] == 1.0
+    assert np.array_equal(probabilities.argmax(axis=1), y_true)
+
+
+def test_byte_transformer_identifiability_head_is_optional():
+    model = PacketByteTransformer(
+        num_classes=2,
+        max_bytes=16,
+        meta_dim=28,
+        hidden_dim=16,
+        num_layers=1,
+        num_heads=4,
+        use_identifiability_head=True,
+    )
+    tokens = torch.full((2, 16), 256, dtype=torch.long)
+    logits, projected, gate, reliability_logit = model.forward_with_identifiability(
+        tokens, torch.zeros(2, dtype=torch.long), torch.zeros(2, 28)
+    )
+
+    assert logits.shape == (2, 2)
+    assert projected.shape[0] == 2
+    assert gate.shape == (2, 16)
+    assert reliability_logit.shape == (2,)
+    assert torch.isfinite(reliability_logit).all()
 
 
 def test_feature_expert_can_mask_endpoint_shortcuts():
