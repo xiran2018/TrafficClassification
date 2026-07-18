@@ -1546,7 +1546,6 @@ conda run --no-capture-output -n llm-factory \
     --confidence_threshold 0.9 \
     --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
     --output_json reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json \
-    --fold_alias 0 --fold_alias 1 --fold_alias 2 \
     --no_report
 
 conda run --no-capture-output -n llm-factory \
@@ -1558,7 +1557,6 @@ conda run --no-capture-output -n llm-factory \
     --confidence_threshold 0.9 \
     --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
     --output_json reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json \
-    --fold_alias 0 --fold_alias 1 --fold_alias 2 \
     --no_report
 ```
 
@@ -2569,17 +2567,24 @@ Current fold-level status from the latest summary:
 
 ```text
 VPN targets: accuracy >= 0.7400, macro-F1 >= 0.6500
-  fold0: pass, acc=0.7512, macro-F1=0.7522
-  fold1: pass, acc=0.7512, macro-F1=0.7522
-  fold2: pass, acc=0.7512, macro-F1=0.7522
-  mean: acc=0.7512, macro-F1=0.7522
-  min:  acc=0.7512, macro-F1=0.7522
+  fold0: pass, acc=0.7488, macro-F1=0.7558
+  fold1: weak, acc=0.6944, macro-F1=0.6768
+  fold2: weak, acc=0.7063, macro-F1=0.7030
+  cross-fold consensus ensemble: acc=0.7512, macro-F1=0.7522
 
 TLS-120 targets: accuracy >= 0.7800, macro-F1 >= 0.7000
-  fold0: pass, acc=0.8461, macro-F1=0.8292
-  fold1: pass, acc=0.8461, macro-F1=0.8292
-  fold2: pass, acc=0.8461, macro-F1=0.8292
+  fold0: pass, acc=0.7996, macro-F1=0.7869
+  fold1: weak, acc=0.7539, macro-F1=0.7268
+  fold2: weak, acc=0.7701, macro-F1=0.7421
+  cross-fold consensus ensemble: acc=0.8461, macro-F1=0.8292
 ```
+
+The consensus number is a three-model ensemble on the shared test flows; it is
+not an independent per-fold result. `summarize_cross_split_results.py` keeps
+single-fold evidence and cross-fold consensus in separate report fields. The
+historical `_fold0/_fold1/_fold2` consensus aliases are ignored by the scanner
+and must not be used to claim that every independent fold reaches the ensemble
+score.
 
 The cross-split summary now ranks candidates by `target_gap` by default: the
 primary score is the weaker of `(accuracy - target_accuracy)` and
@@ -2832,6 +2837,34 @@ Softened target-prior safety ablation:
   keeps acc=0.7063/macro-F1=0.7030. Interpretation: softened prior calibration
   is useful as a safety mechanism for the automatic loop, but it is not the next
   accuracy breakthrough.
+
+Paired semantic alignment and target-prototype adaptation negative ablations:
+  Packet embeddings for the randomized-IP/port view were re-extracted with the
+  same fold1 Tower-1 encoder as the clean view, removing the earlier encoder
+  mismatch confound. Tower-2 then used clean/randomized flow cosine alignment,
+  cross-view SupCon, variance preservation, and covariance decorrelation. Its
+  best fine-tuned model reached test acc=0.6621/macro-F1=0.6262, below the
+  direct t1paired baseline (0.6675/0.6380). A separate source-anchored,
+  confidence-weighted target-prototype adapter used no target labels, excluded
+  each target flow from its own prototype, and selected all settings on
+  validation. Both embedding-only and message/header variants selected the
+  identity fallback, preserving the current fold1 result at 0.6944/0.6768.
+  These results reject simple view alignment and transductive prototypes as the
+  main solution to the validation/test shift.
+
+Source-environment risk/alignment negative ablation:
+  `build_flow_environment_map.py` recovers the two source folds for a training
+  split by exact PCAP SHA256, and `train_tower2.py` optionally applies
+  environment-balanced class sampling, environment-risk variance, and
+  class-conditional embedding alignment. The audit found 698 fold1 training
+  rows but only 352 unique PCAP contents (346 duplicate rows), with complete and
+  balanced environment coverage (349 rows per source fold). On fold1, joint
+  fine-tuning dropped to 0.6579/0.6200 test acc/F1; from-scratch risk-only and
+  alignment-only runs reached 0.5999/0.5691 and 0.6011/0.5702. Keep the module
+  optional for cross-dataset ablation, but do not enable it in the best default.
+  More importantly, all paper tables must report exact-content duplicate audits
+  and must not interpret duplicated training/validation rows as independent
+  evidence.
 
 Cross-fold stability selector:
   `cross_fold_stability_selector.py` audits same-named candidates across multiple

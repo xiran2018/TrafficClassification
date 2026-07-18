@@ -427,7 +427,19 @@ def iter_balanced_group_batches(
         batch = []
         for label in chosen_labels:
             candidates = label_to_groups[label]
-            if len(candidates) >= samples_per_class:
+            environment_to_groups: Dict[int, List[dict]] = defaultdict(list)
+            for candidate in candidates:
+                environment = int(candidate.get("environment", -1))
+                if environment >= 0:
+                    environment_to_groups[environment].append(candidate)
+            if len(environment_to_groups) >= 2 and samples_per_class >= 2:
+                environments = list(environment_to_groups)
+                random.shuffle(environments)
+                selected = [random.choice(environment_to_groups[env]) for env in environments[:samples_per_class]]
+                while len(selected) < samples_per_class:
+                    selected.append(random.choice(candidates))
+                batch.extend(selected)
+            elif len(candidates) >= samples_per_class:
                 batch.extend(random.sample(candidates, samples_per_class))
             else:
                 batch.extend(random.choice(candidates) for _ in range(samples_per_class))
@@ -657,6 +669,89 @@ def dataset_flow_ids(ds: Dataset) -> List[str]:
 
 def group_flow_ids(groups: Sequence[dict]) -> List[str]:
     return [str(group["flow_id"]) for group in groups]
+
+
+def load_flow_environment_map(path: str) -> tuple[Dict[str, int], List[str]]:
+    if not path:
+        return {}, []
+    with open(path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    raw = payload.get("flow_to_environment", payload)
+    mapping = {str(flow_id): int(environment) for flow_id, environment in raw.items()}
+    names = [str(name) for name in payload.get("environment_names", [])]
+    return mapping, names
+
+
+def attach_flow_environments(groups: Sequence[dict], path: str, scope: str) -> tuple[int, int]:
+    mapping, names = load_flow_environment_map(path)
+    if not mapping:
+        return 0, len(groups)
+    matched = 0
+    counts: Dict[int, int] = defaultdict(int)
+    for group in groups:
+        environment = mapping.get(str(group["flow_id"]), -1)
+        group["environment"] = environment
+        if environment >= 0:
+            matched += 1
+            counts[environment] += 1
+    report = {
+        "scope": scope,
+        "matched": matched,
+        "total": len(groups),
+        "coverage": matched / max(1, len(groups)),
+        "counts": {
+            names[idx] if idx < len(names) else str(idx): count for idx, count in sorted(counts.items())
+        },
+    }
+    print("environment_coverage " + json.dumps(report, sort_keys=True), flush=True)
+    return matched, len(groups)
+
+
+def environment_risk_variance_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    environments: torch.Tensor,
+    class_weight: torch.Tensor | None,
+    weight: float,
+) -> torch.Tensor:
+    if weight <= 0:
+        return logits.sum() * 0.0
+    valid = (labels >= 0) & (environments >= 0)
+    unique = environments[valid].unique()
+    if unique.numel() < 2:
+        return logits.sum() * 0.0
+    per_sample = F.cross_entropy(logits[valid], labels[valid], weight=class_weight, reduction="none")
+    valid_environments = environments[valid]
+    risks = torch.stack([per_sample[valid_environments == env].mean() for env in unique])
+    return float(weight) * risks.var(unbiased=False)
+
+
+def class_conditional_environment_alignment_loss(
+    embeddings: torch.Tensor,
+    labels: torch.Tensor,
+    environments: torch.Tensor,
+    weight: float,
+) -> torch.Tensor:
+    if weight <= 0:
+        return embeddings.sum() * 0.0
+    losses = []
+    for label in labels.unique():
+        class_mask = labels == label
+        class_environments = environments[class_mask]
+        valid_environments = class_environments[class_environments >= 0].unique()
+        if valid_environments.numel() < 2:
+            continue
+        class_embeddings = embeddings[class_mask]
+        means = []
+        for environment in valid_environments:
+            means.append(class_embeddings[class_environments == environment].mean(dim=0))
+        means = F.normalize(torch.stack(means, dim=0).float(), dim=-1)
+        similarity = means @ means.T
+        pair_mask = ~torch.eye(len(means), dtype=torch.bool, device=means.device)
+        losses.append((1.0 - similarity[pair_mask]).mean())
+    if not losses:
+        return embeddings.sum() * 0.0
+    return float(weight) * torch.stack(losses).mean()
 
 
 def parse_label_groups(spec: str, num_classes: int) -> List[List[int]]:
@@ -1102,9 +1197,78 @@ def view_domain_adversarial_loss(
     return weight * F.cross_entropy(domain_head(z, lambd), y)
 
 
+def paired_semantic_alignment_enabled(args) -> bool:
+    return any(
+        float(value) > 0
+        for value in (
+            args.paired_alignment_weight,
+            args.paired_crossview_contrastive_weight,
+            args.paired_variance_weight,
+            args.paired_covariance_weight,
+        )
+    )
+
+
+def paired_semantic_alignment_loss(
+    clean_embs: torch.Tensor,
+    paired_embs: torch.Tensor | None,
+    labels: torch.Tensor,
+    args,
+) -> torch.Tensor:
+    """Learn endpoint-invariant flow semantics from two header views.
+
+    The clean and randomized-header views are aligned per flow. A joint
+    supervised contrastive term preserves class structure, while variance and
+    covariance regularizers prevent an invariance-only representation from
+    collapsing or concentrating on a few dimensions.
+    """
+    zero = clean_embs.sum() * 0.0
+    if not paired_semantic_alignment_enabled(args) or paired_embs is None:
+        return zero
+    if clean_embs.shape != paired_embs.shape or clean_embs.numel() == 0:
+        return zero
+
+    clean = F.normalize(clean_embs.float(), p=2, dim=-1)
+    paired = F.normalize(paired_embs.float(), p=2, dim=-1)
+    loss = zero
+
+    if args.paired_alignment_weight > 0:
+        alignment = (1.0 - (clean * paired).sum(dim=-1)).mean()
+        loss = loss + args.paired_alignment_weight * alignment
+
+    if args.paired_crossview_contrastive_weight > 0:
+        joint = torch.cat([clean, paired], dim=0)
+        joint_labels = torch.cat([labels, labels], dim=0)
+        crossview = supervised_contrastive_loss(
+            joint,
+            joint_labels,
+            temperature=args.paired_crossview_temperature,
+        )
+        loss = loss + args.paired_crossview_contrastive_weight * crossview
+
+    if args.paired_variance_weight > 0:
+        target = max(float(args.paired_variance_target), 0.0)
+        clean_std = torch.sqrt(clean.var(dim=0, unbiased=False) + 1e-4)
+        paired_std = torch.sqrt(paired.var(dim=0, unbiased=False) + 1e-4)
+        variance = 0.5 * (F.relu(target - clean_std).mean() + F.relu(target - paired_std).mean())
+        loss = loss + args.paired_variance_weight * variance
+
+    if args.paired_covariance_weight > 0 and clean.size(0) > 1:
+        def covariance_penalty(z: torch.Tensor) -> torch.Tensor:
+            centered = z - z.mean(dim=0, keepdim=True)
+            cov = centered.T @ centered / float(max(1, z.size(0) - 1))
+            eye = torch.eye(cov.size(0), dtype=torch.bool, device=cov.device)
+            return cov.masked_select(~eye).pow(2).mean()
+
+        covariance = 0.5 * (covariance_penalty(clean) + covariance_penalty(paired))
+        loss = loss + args.paired_covariance_weight * covariance
+    return loss
+
+
 def train_seq_flow(args):
     ds = SeqDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, SeqDataset, args)
+    attach_flow_environments(tr_groups, args.environment_map_json, "train_seq_flow")
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, SeqDataset)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     report_distillation_coverage("train_seq_flow", distill_targets, group_flow_ids(tr_groups))
@@ -1155,12 +1319,14 @@ def train_seq_flow(args):
             windows = []
             owners = []
             labels = []
+            environments = []
             flow_ids = []
             paired_windows = []
             paired_owners = []
             paired_labels = []
             for flow_idx, group in enumerate(flow_batch):
                 labels.append(int(group["label"]))
+                environments.append(int(group.get("environment", -1)))
                 flow_ids.append(str(group["flow_id"]))
                 for item in maybe_drop_windows(group["items"], args.window_dropout_prob):
                     windows.append(item)
@@ -1219,7 +1385,14 @@ def train_seq_flow(args):
                 flow_logits_aug = torch.stack(flow_logits_aug, dim=0)
             flow_embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
+            environment_ids = torch.tensor(environments, dtype=torch.long, device=args.device)
             loss = regularized_classification_loss(flow_logits, y, class_weight, args)
+            loss = loss + environment_risk_variance_loss(
+                flow_logits, y, environment_ids, class_weight, args.environment_risk_weight
+            )
+            loss = loss + class_conditional_environment_alignment_loss(
+                flow_embs, y, environment_ids, args.environment_alignment_weight
+            )
             loss = loss + distillation_kl_loss(flow_logits, flow_ids, distill_targets, args)
             loss = loss + class_prior_distillation_loss(flow_logits, y, distill_class_priors, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
@@ -1230,7 +1403,12 @@ def train_seq_flow(args):
                 loss = loss + stat_loss
             paired_logits = None
             paired_embs = None
-            if paired_windows and (args.paired_view_weight > 0 or args.paired_consistency_weight > 0 or args.view_domain_adversarial_weight > 0):
+            if paired_windows and (
+                args.paired_view_weight > 0
+                or args.paired_consistency_weight > 0
+                or args.view_domain_adversarial_weight > 0
+                or paired_semantic_alignment_enabled(args)
+            ):
                 paired_batch = collate_seq(paired_windows)
                 paired_out = model(
                     apply_input_augmentation(paired_batch["x"].to(args.device), args),
@@ -1262,6 +1440,7 @@ def train_seq_flow(args):
                         loss = loss + args.paired_view_weight * regularized_classification_loss(paired_logits, y, class_weight, args)
                     if args.paired_consistency_weight > 0:
                         loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(flow_logits, paired_logits, args.consistency_temperature)
+            loss = loss + paired_semantic_alignment_loss(flow_embs, paired_embs, y, args)
             if args.view_domain_adversarial_weight > 0:
                 loss = loss + view_domain_adversarial_loss(
                     domain_head,
@@ -1443,6 +1622,7 @@ def train_graph(args):
 def train_graph_flow(args):
     ds = GraphDataset(args.dataset)
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
+    attach_flow_environments(tr_groups, args.environment_map_json, "train_graph_flow")
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
     distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
     report_distillation_coverage("train_graph_flow", distill_targets, group_flow_ids(tr_groups))
@@ -1513,6 +1693,7 @@ def train_graph_flow(args):
             multi_view_gates = []
             stat_logits = []
             labels = []
+            environments = []
             flow_ids = []
             for group in flow_batch:
                 window_embs = []
@@ -1558,12 +1739,14 @@ def train_graph_flow(args):
                         pooled_aug = flow_head(torch.stack(window_embs_aug, dim=0), window_logits=torch.stack(window_logits_aug, dim=0))
                         flow_logits_aug.append(pooled_aug["logits"])
                     labels.append(int(group["label"]))
+                    environments.append(int(group.get("environment", -1)))
                     flow_ids.append(str(group["flow_id"]))
                     paired_group = paired_groups.get(str(group["flow_id"]))
                     if paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (
                         args.paired_view_weight > 0
                         or args.paired_consistency_weight > 0
                         or args.view_domain_adversarial_weight > 0
+                        or paired_semantic_alignment_enabled(args)
                     ):
                         paired_window_embs = []
                         paired_window_logits = []
@@ -1597,7 +1780,14 @@ def train_graph_flow(args):
                 paired_logits = apply_hierarchical_logits(paired_logits, paired_coarse_logits, class_to_coarse, effective_hierarchical_logit_weight(args))
             embs = torch.stack(flow_embs, dim=0)
             y = torch.tensor(labels, dtype=torch.long, device=args.device)
+            environment_ids = torch.tensor(environments, dtype=torch.long, device=args.device)
             loss = regularized_classification_loss(logits, y, class_weight, args)
+            loss = loss + environment_risk_variance_loss(
+                logits, y, environment_ids, class_weight, args.environment_risk_weight
+            )
+            loss = loss + class_conditional_environment_alignment_loss(
+                embs, y, environment_ids, args.environment_alignment_weight
+            )
             loss = loss + distillation_kl_loss(logits, flow_ids, distill_targets, args)
             loss = loss + class_prior_distillation_loss(logits, y, distill_class_priors, args)
             gate_loss = multi_view_gate_entropy_loss(multi_view_gates, args.multi_view_gate_entropy_weight)
@@ -1611,6 +1801,7 @@ def train_graph_flow(args):
                     loss = loss + args.paired_view_weight * regularized_classification_loss(paired_logits, y, class_weight, args)
                 if args.paired_consistency_weight > 0:
                     loss = loss + args.paired_consistency_weight * symmetric_consistency_kl(logits, paired_logits, args.consistency_temperature)
+            loss = loss + paired_semantic_alignment_loss(embs, paired_embs, y, args)
             if args.view_domain_adversarial_weight > 0:
                 loss = loss + view_domain_adversarial_loss(
                     domain_head,
@@ -1771,6 +1962,12 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "paired_view_dataset": args.paired_view_dataset,
         "paired_view_weight": args.paired_view_weight,
         "paired_consistency_weight": args.paired_consistency_weight,
+        "paired_alignment_weight": args.paired_alignment_weight,
+        "paired_crossview_contrastive_weight": args.paired_crossview_contrastive_weight,
+        "paired_crossview_temperature": args.paired_crossview_temperature,
+        "paired_variance_weight": args.paired_variance_weight,
+        "paired_variance_target": args.paired_variance_target,
+        "paired_covariance_weight": args.paired_covariance_weight,
         "view_domain_adversarial_weight": args.view_domain_adversarial_weight,
         "domain_adversarial_lambda": args.domain_adversarial_lambda,
         "distill_targets_json": args.distill_targets_json,
@@ -1779,6 +1976,9 @@ def save_ckpt(args, model, input_dim, edge_attr_dim=None, flow_head: FlowAggrega
         "distill_temperature": args.distill_temperature,
         "distill_min_confidence": args.distill_min_confidence,
         "distill_confidence_power": args.distill_confidence_power,
+        "environment_map_json": args.environment_map_json,
+        "environment_risk_weight": args.environment_risk_weight,
+        "environment_alignment_weight": args.environment_alignment_weight,
     }
     if edge_attr_dim is not None:
         payload["edge_attr_dim"] = edge_attr_dim
@@ -1848,6 +2048,12 @@ def main():
     ap.add_argument("--paired_view_dataset", default="", help="Optional second-view Tower2 dataset aligned by flow_id, e.g. ip/port randomized or masked view.")
     ap.add_argument("--paired_view_weight", type=float, default=0.0, help="Flow CE weight for --paired_view_dataset.")
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired flow logits.")
+    ap.add_argument("--paired_alignment_weight", type=float, default=0.0, help="Cosine alignment weight for clean/randomized-header flow embeddings.")
+    ap.add_argument("--paired_crossview_contrastive_weight", type=float, default=0.0, help="Supervised cross-view contrastive weight over clean/randomized-header flow embeddings.")
+    ap.add_argument("--paired_crossview_temperature", type=float, default=0.07, help="Temperature for --paired_crossview_contrastive_weight.")
+    ap.add_argument("--paired_variance_weight", type=float, default=0.0, help="Anti-collapse variance regularization weight for paired flow embeddings.")
+    ap.add_argument("--paired_variance_target", type=float, default=0.04, help="Minimum per-dimension std for normalized paired flow embeddings.")
+    ap.add_argument("--paired_covariance_weight", type=float, default=0.0, help="Off-diagonal covariance penalty for paired flow embeddings.")
     ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0, help="Adversarially remove clean-vs-paired view information from flow embeddings in --train_level flow.")
     ap.add_argument("--domain_adversarial_lambda", type=float, default=1.0, help="Gradient reversal strength for --view_domain_adversarial_weight.")
     ap.add_argument("--distill_targets_json", default="", help="Optional prediction/consensus JSON with flow_ids and flow_prob used as soft distillation targets.")
@@ -1856,6 +2062,9 @@ def main():
     ap.add_argument("--distill_temperature", type=float, default=2.0, help="Temperature for probability-target distillation.")
     ap.add_argument("--distill_min_confidence", type=float, default=0.0, help="Ignore teacher targets whose max probability is below this confidence.")
     ap.add_argument("--distill_confidence_power", type=float, default=0.0, help="If >0, weight distillation samples by teacher max-probability^power.")
+    ap.add_argument("--environment_map_json", default="", help="Optional flow_id-to-source-environment map used for cross-environment flow training.")
+    ap.add_argument("--environment_risk_weight", type=float, default=0.0, help="Weight for variance of flow classification risks across source environments.")
+    ap.add_argument("--environment_alignment_weight", type=float, default=0.0, help="Weight for class-conditional flow embedding alignment across source environments.")
     ap.add_argument("--valid_ratio", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -1882,8 +2091,11 @@ def main():
         and args.paired_view_weight <= 0
         and args.paired_consistency_weight <= 0
         and args.view_domain_adversarial_weight <= 0
+        and not paired_semantic_alignment_enabled(args)
     ):
-        print("WARNING: --paired_view_dataset is set but paired losses are both 0.")
+        print("WARNING: --paired_view_dataset is set but all paired-view losses are 0.")
+    if (args.environment_risk_weight > 0 or args.environment_alignment_weight > 0) and not args.environment_map_json:
+        print("WARNING: environment regularization is enabled without --environment_map_json; both losses will be inactive.")
     if args.view_domain_adversarial_weight > 0 and not args.paired_view_dataset:
         print("WARNING: --view_domain_adversarial_weight requires --paired_view_dataset and will be inactive.")
     if args.distill_targets_json and args.distill_weight <= 0:

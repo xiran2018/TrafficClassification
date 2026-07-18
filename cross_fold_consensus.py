@@ -117,7 +117,12 @@ def main() -> None:
     ap.add_argument("--confidence_threshold", type=float, default=0.9)
     ap.add_argument("--label_map", default="")
     ap.add_argument("--output_json", required=True)
-    ap.add_argument("--fold_alias", action="append", default=[], help="Also write a copy with _foldN before .json for summary scanners.")
+    ap.add_argument(
+        "--fold_alias",
+        action="append",
+        default=[],
+        help="Deprecated compatibility flag. Consensus outputs are never copied as single-fold results.",
+    )
     ap.add_argument("--no_report", action="store_true")
     args = ap.parse_args()
 
@@ -152,6 +157,7 @@ def main() -> None:
     metrics = compute_metrics(y_ref.tolist(), pred.tolist())
     label_names, label_map = load_label_names(args.label_map)
     config = {
+        "result_scope": "cross_fold_consensus",
         "requested_mode": args.mode,
         "selected_mode": mode,
         "confidence_threshold": args.confidence_threshold,
@@ -167,6 +173,7 @@ def main() -> None:
             print(classification_report(y_ref, pred, zero_division=0))
 
     payload = {
+        "result_scope": "cross_fold_consensus",
         "metrics": {"flow_level": metrics},
         "label_map": label_map,
         "flow_ids": common,
@@ -178,12 +185,11 @@ def main() -> None:
     }
     output = Path(args.output_json)
     write_payload(output, payload)
-    stem = output.with_suffix("")
-    for alias in args.fold_alias:
-        alias = str(alias).strip()
-        if not alias:
-            continue
-        write_payload(Path(f"{stem}_fold{alias}{output.suffix}"), payload)
+    if args.fold_alias:
+        print(
+            "warning: --fold_alias is deprecated and ignored; a cross-fold "
+            "ensemble must not be reported as an independent fold result."
+        )
 
 
 if __name__ == "__main__":

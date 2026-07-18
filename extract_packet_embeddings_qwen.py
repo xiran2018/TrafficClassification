@@ -141,6 +141,11 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--max_length", type=int, default=1024)
     ap.add_argument("--torch_dtype", default="float16", choices=["float16", "bfloat16", "float32"])
+    ap.add_argument(
+        "--device",
+        default="auto",
+        help="Model placement: auto or an explicit device such as cuda:0/cuda:1/cpu.",
+    )
     ap.add_argument("--tower1_heads", default="", help="Optional tower1_heads.pt saved by train_tower1_multitask.py")
     ap.add_argument("--embedding_mode", default="raw", choices=["raw", "projected", "concat"], help="raw: last-token hidden state; projected: contrastive projection head; concat: raw + projected.")
     ap.add_argument("--use_projected_embedding", action="store_true", help="Deprecated alias for --embedding_mode projected.")
@@ -166,7 +171,14 @@ def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True, local_files_only=args.local_files_only)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.base_model, torch_dtype=dtype, device_map="auto", trust_remote_code=True, local_files_only=args.local_files_only)
+    device_map = "auto" if args.device == "auto" else {"": args.device}
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype=dtype,
+        device_map=device_map,
+        trust_remote_code=True,
+        local_files_only=args.local_files_only,
+    )
     if args.lora_path:
         if PeftModel is None:
             raise RuntimeError("peft is not installed; pip install peft")
@@ -195,6 +207,7 @@ def main() -> None:
                 "tower1_heads": args.tower1_heads,
                 "embedding_mode": args.embedding_mode,
                 "max_length": args.max_length,
+                "device": args.device,
                 "num_shards": args.num_shards,
                 "shard_index": args.shard_index,
             },

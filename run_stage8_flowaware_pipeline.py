@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -199,7 +200,13 @@ def embedding_output_dir(args, split: str) -> str:
     return f"reasoningDataset/{args.dataset}/{split}_embeddings_{args.embedding_suffix}"
 
 
-def embedding_cmd(args, split: str, output_dir: str | None = None, shard_index: int | None = None) -> List[str]:
+def embedding_cmd(
+    args,
+    split: str,
+    output_dir: str | None = None,
+    shard_index: int | None = None,
+    device: str | None = None,
+) -> List[str]:
     cmd = [
         py(),
         "extract_packet_embeddings_qwen.py",
@@ -219,6 +226,8 @@ def embedding_cmd(args, split: str, output_dir: str | None = None, shard_index: 
         str(args.embedding_batch_size),
         "--max_length",
         str(args.embedding_max_length),
+        "--device",
+        device or args.embedding_device,
         "--local_files_only",
     ]
     if shard_index is not None:
@@ -263,6 +272,30 @@ def merge_embedding_shards(args, split: str) -> None:
     print(f"merged embedding shards: split={split}, flows={total}, index={merged_index}", flush=True)
 
 
+def expected_embedding_shard_counts(packet_index: Path, num_shards: int) -> List[int]:
+    counts = [0 for _ in range(num_shards)]
+    seen_flows = set()
+    with open(packet_index, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            flow_id = str(json.loads(line)["flow_id"])
+            if flow_id in seen_flows:
+                continue
+            seen_flows.add(flow_id)
+            digest = hashlib.sha1(flow_id.encode("utf-8", errors="ignore")).digest()
+            shard_index = int.from_bytes(digest[:8], "big") % num_shards
+            counts[shard_index] += 1
+    return counts
+
+
+def jsonl_row_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with open(path, "r", encoding="utf-8") as f:
+        return sum(1 for line in f if line.strip())
+
+
 def run_embedding_stage(args, split: str) -> None:
     if args.embedding_num_shards <= 1:
         run(embedding_cmd(args, split), dry_run=args.dry_run)
@@ -271,18 +304,39 @@ def run_embedding_stage(args, split: str) -> None:
     out_dir = Path(embedding_output_dir(args, split))
     shard_root = out_dir / "_shards"
     devices = [x.strip() for x in args.embedding_cuda_devices.split(",") if x.strip()]
+    packet_index = Path(f"reasoningDataset/{args.dataset}/{split}_tower1_{args.output_suffix}/packet_index.jsonl")
+    expected_counts = expected_embedding_shard_counts(packet_index, args.embedding_num_shards)
     procs: list[tuple[int, subprocess.Popen]] = []
     for shard_index in range(args.embedding_num_shards):
         shard_dir = shard_root / f"shard_{shard_index}"
-        cmd = embedding_cmd(args, split, output_dir=str(shard_dir), shard_index=shard_index)
-        env = os.environ.copy()
+        shard_index_path = shard_dir / "flow_embedding_index.jsonl"
+        actual_count = jsonl_row_count(shard_index_path)
+        if args.embedding_resume_shards and actual_count == expected_counts[shard_index]:
+            print(
+                f"skip completed embedding shard: split={split}, shard={shard_index}, flows={actual_count}",
+                flush=True,
+            )
+            continue
+        if actual_count:
+            print(
+                f"rerun incomplete embedding shard: split={split}, shard={shard_index}, "
+                f"flows={actual_count}/{expected_counts[shard_index]}",
+                flush=True,
+            )
+        device_arg = ""
         device = devices[shard_index % len(devices)] if devices else ""
-        prefix = f"CUDA_VISIBLE_DEVICES={shlex.quote(device)} " if device else ""
-        print("$ " + prefix + format_cmd(cmd), flush=True)
+        if device:
+            device_arg = device if device.startswith("cuda:") else f"cuda:{device}"
+        cmd = embedding_cmd(
+            args,
+            split,
+            output_dir=str(shard_dir),
+            shard_index=shard_index,
+            device=device_arg or args.embedding_device,
+        )
+        print("$ " + format_cmd(cmd), flush=True)
         if not args.dry_run:
-            if device:
-                env["CUDA_VISIBLE_DEVICES"] = device
-            procs.append((shard_index, subprocess.Popen(cmd, env=env)))
+            procs.append((shard_index, subprocess.Popen(cmd, env=os.environ.copy())))
 
     if args.dry_run:
         return
@@ -417,10 +471,31 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
             str(args.paired_view_weight),
             "--paired_consistency_weight",
             str(args.paired_consistency_weight),
+            "--paired_alignment_weight",
+            str(args.paired_alignment_weight),
+            "--paired_crossview_contrastive_weight",
+            str(args.paired_crossview_contrastive_weight),
+            "--paired_crossview_temperature",
+            str(args.paired_crossview_temperature),
+            "--paired_variance_weight",
+            str(args.paired_variance_weight),
+            "--paired_variance_target",
+            str(args.paired_variance_target),
+            "--paired_covariance_weight",
+            str(args.paired_covariance_weight),
             "--view_domain_adversarial_weight",
             str(args.view_domain_adversarial_weight),
             "--domain_adversarial_lambda",
             str(args.domain_adversarial_lambda),
+        ]
+    if args.environment_map_json:
+        cmd += [
+            "--environment_map_json",
+            args.environment_map_json,
+            "--environment_risk_weight",
+            str(args.environment_risk_weight),
+            "--environment_alignment_weight",
+            str(args.environment_alignment_weight),
         ]
     return cmd
 
@@ -759,8 +834,10 @@ def main() -> None:
     ap.add_argument("--embedding_mode", choices=["raw", "projected", "concat"], default="concat")
     ap.add_argument("--embedding_batch_size", type=int, default=8)
     ap.add_argument("--embedding_max_length", type=int, default=1024)
+    ap.add_argument("--embedding_device", default="auto", help="Device for unsharded embedding extraction.")
     ap.add_argument("--embedding_num_shards", type=int, default=1, help="Run embedding extraction as N deterministic flow-id shards and merge the shard indexes.")
     ap.add_argument("--embedding_cuda_devices", default="", help="Comma-separated CUDA device ids assigned round-robin to embedding shards, e.g. 0,1,2,3.")
+    ap.add_argument("--embedding_resume_shards", action=argparse.BooleanOptionalAction, default=True, help="Skip embedding shards whose index row count matches the expected flow count.")
     ap.add_argument("--window_size", type=int, default=32)
     ap.add_argument("--stride", type=int, default=16)
     ap.add_argument("--model_types", default="graph,seq")
@@ -800,8 +877,17 @@ def main() -> None:
     ap.add_argument("--paired_embedding_suffix", default="", help="Optional second-view Tower-2 dataset suffix aligned by flow_id.")
     ap.add_argument("--paired_view_weight", type=float, default=0.0, help="Flow CE weight for the paired view.")
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Symmetric KL weight between primary and paired-view flow logits.")
+    ap.add_argument("--paired_alignment_weight", type=float, default=0.0, help="Cosine alignment weight for clean/randomized-header flow embeddings.")
+    ap.add_argument("--paired_crossview_contrastive_weight", type=float, default=0.0, help="Cross-view supervised contrastive weight for endpoint-invariant flow semantics.")
+    ap.add_argument("--paired_crossview_temperature", type=float, default=0.07)
+    ap.add_argument("--paired_variance_weight", type=float, default=0.0, help="Anti-collapse variance weight for paired flow embeddings.")
+    ap.add_argument("--paired_variance_target", type=float, default=0.04)
+    ap.add_argument("--paired_covariance_weight", type=float, default=0.0, help="Off-diagonal covariance penalty for paired flow embeddings.")
     ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0, help="Adversarially remove primary-vs-paired view information from Tower-2 flow embeddings.")
     ap.add_argument("--domain_adversarial_lambda", type=float, default=1.0, help="Gradient reversal strength for Tower-2 view-domain adversarial training.")
+    ap.add_argument("--environment_map_json", default="", help="Optional flow environment map generated by build_flow_environment_map.py.")
+    ap.add_argument("--environment_risk_weight", type=float, default=0.0, help="Variance penalty for Tower-2 source-environment classification risks.")
+    ap.add_argument("--environment_alignment_weight", type=float, default=0.0, help="Class-conditional Tower-2 embedding alignment across source environments.")
     ap.add_argument("--prior_strengths", default="0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2")
     ap.add_argument("--prior_gate_modes", default="none,low_margin,high_entropy,low_confidence")
     ap.add_argument("--prior_gate_thresholds", default="0.4,0.45,0.5,0.55,0.6,0.62,0.64,0.66,0.68,0.7,0.72,0.75,0.78,0.8")

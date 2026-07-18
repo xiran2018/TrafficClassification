@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Summarize 3-fold traffic-classification results and emit rerun commands.
+"""Summarize independent 3-fold results and cross-fold ensembles separately.
 
 The SWEET flow-level datasets provide train_val_split_0/1/2 folders, each with
 its own train/val split and a shared test folder. This script treats those
 folders as the cross-split stability unit: it scans existing result JSON files,
 reports the best result per fold, and writes commands for missing/weak folds.
+Cross-fold consensus files are never counted as independent fold evidence.
 """
 
 from __future__ import annotations
@@ -70,6 +71,34 @@ def infer_fold(path: Path) -> Optional[int]:
     return None
 
 
+def result_scope(data: Dict[str, Any]) -> str:
+    """Return the evaluation unit recorded by a result payload.
+
+    Older consensus files did not contain ``result_scope`` but did record
+    multiple inputs and ``config.num_inputs``. Recognize both forms so stale
+    ``_foldN`` aliases cannot inflate the stability ledger.
+    """
+    scope = data.get("result_scope")
+    if isinstance(scope, str) and scope:
+        return scope
+    config = data.get("config")
+    if isinstance(config, dict):
+        scope = config.get("result_scope")
+        if isinstance(scope, str) and scope:
+            return scope
+        consensus_modes = {"mean", "log_mean", "vote", "vote_priority", "auto_confidence"}
+        requested_mode = config.get("requested_mode")
+        selected_mode = config.get("selected_mode")
+        try:
+            if int(config.get("num_inputs", 0)) > 1 and (
+                requested_mode in consensus_modes or selected_mode in consensus_modes
+            ):
+                return "cross_fold_consensus"
+        except (TypeError, ValueError):
+            pass
+    return "single_fold"
+
+
 def score_key(
     acc: Optional[float],
     f1: Optional[float],
@@ -102,6 +131,7 @@ def iter_result_files(dataset_dir: Path, patterns: Iterable[str]) -> Iterable[Pa
 def scan_dataset(dataset: str, patterns: List[str], rank_metric: str, target_acc: float, target_f1: float) -> Dict[str, Any]:
     root = Path("reasoningDataset") / dataset
     fold_rows: Dict[int, List[Dict[str, Any]]] = {0: [], 1: [], 2: []}
+    consensus_rows: List[Dict[str, Any]] = []
     ignored = []
     for path in iter_result_files(root, patterns):
         try:
@@ -112,6 +142,20 @@ def scan_dataset(dataset: str, patterns: List[str], rank_metric: str, target_acc
         acc, f1 = metric_from_payload(data)
         if acc is None or f1 is None:
             ignored.append({"path": str(path), "reason": "missing_metrics"})
+            continue
+        scope = result_scope(data)
+        if scope == "cross_fold_consensus":
+            consensus_rows.append(
+                {
+                    "path": str(path),
+                    "accuracy": acc,
+                    "macro_f1": f1,
+                    "score": score_key(acc, f1, rank_metric, target_acc, target_f1),
+                }
+            )
+            continue
+        if scope != "single_fold":
+            ignored.append({"path": str(path), "reason": f"unsupported_result_scope:{scope}"})
             continue
         fold = infer_fold(path)
         if fold is None:
@@ -129,7 +173,15 @@ def scan_dataset(dataset: str, patterns: List[str], rank_metric: str, target_acc
     for fold, rows in fold_rows.items():
         rows = sorted(rows, key=lambda r: r["score"], reverse=True)
         best[fold] = rows[0] if rows else None
-    return {"dataset": dataset, "best_by_fold": best, "all_by_fold": fold_rows, "ignored": ignored}
+    consensus_rows = sorted(consensus_rows, key=lambda r: r["score"], reverse=True)
+    return {
+        "dataset": dataset,
+        "best_by_fold": best,
+        "best_consensus": consensus_rows[0] if consensus_rows else None,
+        "all_by_fold": fold_rows,
+        "consensus_rows": consensus_rows,
+        "ignored": ignored,
+    }
 
 
 def stats(values: List[float]) -> Dict[str, Optional[float]]:
@@ -214,6 +266,7 @@ def build_report(dataset: str, scan: Dict[str, Any], args: argparse.Namespace) -
             "all_folds_present": all(f["best"] is not None for f in folds),
             "all_folds_pass": all(f["status"] == "pass" for f in folds),
         },
+        "best_cross_fold_consensus": scan.get("best_consensus"),
         "ignored_count": len(scan["ignored"]),
     }
 
@@ -251,6 +304,15 @@ def write_markdown(reports: List[Dict[str, Any]], path: Path) -> None:
                 passed=s["all_folds_pass"],
             )
         )
+        consensus = report.get("best_cross_fold_consensus")
+        if consensus:
+            lines.append("")
+            lines.append(
+                "Best cross-fold consensus (ensemble, not a fold): "
+                f"accuracy={consensus['accuracy']:.4f}, "
+                f"macro-F1={consensus['macro_f1']:.4f}, "
+                f"`{consensus['path']}`"
+            )
         cmds = [fold["recommended_command"] for fold in report["folds"] if fold["recommended_command"]]
         if cmds:
             lines.append("")
@@ -308,6 +370,13 @@ def main() -> None:
                 )
             else:
                 print(f"  fold{fold['fold']} missing")
+        consensus = report.get("best_cross_fold_consensus")
+        if consensus:
+            print(
+                "  consensus ensemble: "
+                f"acc={consensus['accuracy']:.4f} f1={consensus['macro_f1']:.4f} "
+                f"{consensus['path']}"
+            )
     print(f"wrote {out_json}")
     print(f"wrote {args.output_md}")
 
