@@ -57,6 +57,13 @@ def main() -> None:
     ap.add_argument("--same_flow_positive_weight", type=float, default=1.0)
     ap.add_argument("--class_weighting", choices=["none", "inverse", "effective"], default="effective")
     ap.add_argument("--byte_max_bytes", type=int, default=64)
+    ap.add_argument(
+        "--byte_use_payload_channel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the shared current-packet payload branch in the byte expert.",
+    )
+    ap.add_argument("--byte_max_payload_bytes", type=int, default=128)
     ap.add_argument("--byte_epochs", type=int, default=12)
     ap.add_argument("--byte_batch_size", type=int, default=512)
     ap.add_argument("--byte_eval_batch_size", type=int, default=2048)
@@ -158,10 +165,9 @@ def main() -> None:
                 args.dry_run,
             )
 
-    if args.stage in {"byte", "packet_best"}:
+    if args.stage in {"byte", "packet_best", "all"}:
         byte_checkpoint = checkpoint / "byte_transformer"
-        run(
-            [
+        byte_command = [
                 sys.executable,
                 "train_packet_byte_transformer.py",
                 "--train_index", str(train_dir / "packet_index.jsonl"),
@@ -178,9 +184,12 @@ def main() -> None:
                 "--masked_ce_weight", "0",
                 "--consistency_weight", "0",
                 "--contrastive_weight", "0",
-            ],
-            args.dry_run,
-        )
+            ]
+        if args.byte_use_payload_channel:
+            byte_command.extend(
+                ["--use_payload_channel", "--max_payload_bytes", str(args.byte_max_payload_bytes)]
+            )
+        run(byte_command, args.dry_run)
         for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
             run(
                 [
@@ -196,7 +205,7 @@ def main() -> None:
                 args.dry_run,
             )
 
-    if args.stage in {"fusion", "packet_best"}:
+    if args.stage in {"fusion", "packet_best", "all"}:
         run(
             [
                 sys.executable,
@@ -207,6 +216,7 @@ def main() -> None:
                 "--test_structural", str(artifacts / "test_feature_probs.npz"),
                 "--label_map", str(label_map),
                 "--output_json", str(artifacts / "test_byte_structural_nested_one_se.json"),
+                "--output_npz", str(artifacts / "test_byte_structural_nested_one_se.npz"),
                 "--gate_out", str(checkpoint / "byte_structural_nested_one_se_gate.joblib"),
             ],
             args.dry_run,

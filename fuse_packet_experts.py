@@ -96,7 +96,7 @@ def blend(semantic: np.ndarray, structural: np.ndarray, semantic_weight: np.ndar
     return fused / fused.sum(axis=1, keepdims=True)
 
 
-def predict_fused_labels_chunked(
+def predict_fused_probabilities_chunked(
     semantic_raw: np.ndarray,
     structural_raw: np.ndarray,
     method: str,
@@ -108,7 +108,7 @@ def predict_fused_labels_chunked(
     chunk_size: int = 20_000,
 ) -> np.ndarray:
     """Apply a validation-fitted fusion rule without materializing huge gate features."""
-    predictions = np.empty(len(semantic_raw), dtype=np.int64)
+    probabilities_out = np.empty_like(semantic_raw, dtype=np.float32)
     for start in range(0, len(semantic_raw), chunk_size):
         stop = min(start + chunk_size, len(semantic_raw))
         semantic = temperature_scale(semantic_raw[start:stop], semantic_temperature)
@@ -123,8 +123,33 @@ def predict_fused_labels_chunked(
             reliability = gate_model.predict_proba(confidence_features(semantic, structural))[:, 1]
             weights = global_weight + gate_strength * (reliability - global_weight)
             probabilities = blend(semantic, structural, np.clip(weights, 0.0, 1.0))
-        predictions[start:stop] = probabilities.argmax(axis=1)
-    return predictions
+        probabilities_out[start:stop] = probabilities
+    return probabilities_out
+
+
+def predict_fused_labels_chunked(
+    semantic_raw: np.ndarray,
+    structural_raw: np.ndarray,
+    method: str,
+    semantic_temperature: float,
+    structural_temperature: float,
+    global_weight: float,
+    gate_model,
+    gate_strength: float,
+    chunk_size: int = 20_000,
+) -> np.ndarray:
+    probabilities = predict_fused_probabilities_chunked(
+        semantic_raw,
+        structural_raw,
+        method,
+        semantic_temperature,
+        structural_temperature,
+        global_weight,
+        gate_model,
+        gate_strength,
+        chunk_size,
+    )
+    return probabilities.argmax(axis=1)
 
 
 def metric_key(y_true: np.ndarray, probabilities: np.ndarray, num_classes: int, label_names: list[str]) -> tuple[float, float]:
@@ -327,6 +352,11 @@ def main() -> None:
     ap.add_argument("--test_structural", default="")
     ap.add_argument("--label_map", required=True)
     ap.add_argument("--output_json", required=True)
+    ap.add_argument(
+        "--output_npz",
+        default="",
+        help="Optional fused test probabilities for cross-fold consensus.",
+    )
     ap.add_argument("--gate_out", required=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
@@ -395,7 +425,7 @@ def main() -> None:
         raise ValueError("provide both --test_semantic and --test_structural, or neither")
     if args.test_semantic:
         y_test, semantic_test_raw, structural_test_raw = align_pair(args.test_semantic, args.test_structural)
-        test_predictions = predict_fused_labels_chunked(
+        test_probabilities = predict_fused_probabilities_chunked(
             semantic_test_raw,
             structural_test_raw,
             method,
@@ -405,9 +435,20 @@ def main() -> None:
             gate_model,
             gate_strength,
         )
+        test_predictions = test_probabilities.argmax(axis=1)
         result["test_metrics"] = packet_classification_metrics(
             y_test, test_predictions, num_classes, label_names
         )
+        if args.output_npz:
+            npz_path = Path(args.output_npz)
+            npz_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                npz_path,
+                y_true=y_test.astype(np.int64),
+                probabilities=test_probabilities.astype(np.float32),
+            )
+    elif args.output_npz:
+        raise ValueError("--output_npz requires test probability inputs")
 
     output_path = Path(args.output_json)
     gate_path = Path(args.gate_out)

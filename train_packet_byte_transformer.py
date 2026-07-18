@@ -24,6 +24,33 @@ PAD_TOKEN = 256
 MASK_TOKEN = 257
 
 
+def extract_packet_payload(raw: bytes, meta: dict) -> bytes:
+    """Return only the current packet payload without using flow context."""
+    if not raw:
+        return b""
+    version = raw[0] >> 4
+    if version == 4:
+        l4_offset = (raw[0] & 0x0F) * 4
+        protocol = raw[9] if len(raw) > 9 else int(meta.get("ip_proto", -1))
+    elif version == 6:
+        l4_offset = 40
+        protocol = raw[6] if len(raw) > 6 else int(meta.get("ip_proto", -1))
+    else:
+        return b""
+    if l4_offset >= len(raw):
+        return b""
+    if protocol == 6:
+        if len(raw) <= l4_offset + 12:
+            return b""
+        transport_header_len = (raw[l4_offset + 12] >> 4) * 4
+    elif protocol == 17:
+        transport_header_len = 8
+    else:
+        transport_header_len = 0
+    payload_offset = min(len(raw), l4_offset + transport_header_len)
+    return raw[payload_offset:]
+
+
 def mask_session_tokens(tokens: np.ndarray, length: int) -> np.ndarray:
     masked = tokens.copy()
     if length <= 0:
@@ -54,15 +81,25 @@ def mask_session_tokens(tokens: np.ndarray, length: int) -> np.ndarray:
 
 
 class PacketByteDataset(Dataset):
-    def __init__(self, index_path: str, max_bytes: int, include_augmented: bool = True) -> None:
+    def __init__(
+        self,
+        index_path: str,
+        max_bytes: int,
+        include_augmented: bool = True,
+        max_payload_bytes: int = 0,
+    ) -> None:
         self.rows: list[dict] = []
-        tokens, masked_tokens, lengths, metas, masked_metas, labels, flow_ids = [], [], [], [], [], [], []
+        tokens, masked_tokens, lengths = [], [], []
+        payload_tokens, payload_lengths = [], []
+        metas, masked_metas, labels, flow_ids = [], [], [], []
+        payload_width = max(1, int(max_payload_bytes))
         with open(index_path, "r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
                 row = json.loads(line)
-                raw = bytes.fromhex(str(row["meta"].get("l3_hex_prefix", "")).replace(" ", ""))[:max_bytes]
+                full_raw = bytes.fromhex(str(row["meta"].get("l3_hex_prefix", "")).replace(" ", ""))
+                raw = full_raw[:max_bytes]
                 item = np.full(max_bytes, PAD_TOKEN, dtype=np.int64)
                 if raw:
                     item[:len(raw)] = np.frombuffer(raw, dtype=np.uint8).astype(np.int64)
@@ -70,6 +107,12 @@ class PacketByteDataset(Dataset):
                 if include_augmented:
                     masked_tokens.append(mask_session_tokens(item, len(raw)))
                 lengths.append(len(raw))
+                payload = extract_packet_payload(full_raw, row["meta"])[:payload_width]
+                payload_item = np.full(payload_width, PAD_TOKEN, dtype=np.int64)
+                if payload:
+                    payload_item[:len(payload)] = np.frombuffer(payload, dtype=np.uint8).astype(np.int64)
+                payload_tokens.append(payload_item)
+                payload_lengths.append(len(payload))
                 metas.append(packet_features(row, 0, False, False, False))
                 if include_augmented:
                     masked_metas.append(packet_features(row, 0, False, False, True))
@@ -79,6 +122,8 @@ class PacketByteDataset(Dataset):
         self.tokens = torch.from_numpy(np.stack(tokens))
         self.masked_tokens = torch.from_numpy(np.stack(masked_tokens)) if include_augmented else self.tokens
         self.lengths = torch.tensor(lengths, dtype=torch.long)
+        self.payload_tokens = torch.from_numpy(np.stack(payload_tokens))
+        self.payload_lengths = torch.tensor(payload_lengths, dtype=torch.long)
         self.metas = torch.from_numpy(np.stack(metas)).float()
         self.masked_metas = torch.from_numpy(np.stack(masked_metas)).float() if include_augmented else self.metas
         self.labels = torch.tensor(labels, dtype=torch.long)
@@ -92,6 +137,8 @@ class PacketByteDataset(Dataset):
             "tokens": self.tokens[index],
             "masked_tokens": self.masked_tokens[index],
             "length": self.lengths[index],
+            "payload_tokens": self.payload_tokens[index],
+            "payload_length": self.payload_lengths[index],
             "meta": self.metas[index],
             "masked_meta": self.masked_metas[index],
             "label": self.labels[index],
@@ -111,7 +158,11 @@ def evaluate(model, loader, device, num_classes, label_names, return_probabiliti
     ys, preds, probs = [], [], []
     for batch in tqdm(loader, desc="eval byte transformer", leave=False):
         logits, _, _ = model(
-            batch["tokens"].to(device), batch["length"].to(device), batch["meta"].to(device)
+            batch["tokens"].to(device),
+            batch["length"].to(device),
+            batch["meta"].to(device),
+            batch["payload_tokens"].to(device) if model.use_payload_channel else None,
+            batch["payload_length"].to(device) if model.use_payload_channel else None,
         )
         probability = torch.softmax(logits.float(), dim=-1).cpu()
         ys.extend(batch["label"].tolist())
@@ -137,6 +188,8 @@ def main() -> None:
     ap.add_argument("--output_json", required=True)
     ap.add_argument("--output_npz", default="")
     ap.add_argument("--max_bytes", type=int, default=256)
+    ap.add_argument("--use_payload_channel", action="store_true")
+    ap.add_argument("--max_payload_bytes", type=int, default=128)
     ap.add_argument("--hidden_dim", type=int, default=128)
     ap.add_argument("--num_layers", type=int, default=3)
     ap.add_argument("--num_heads", type=int, default=4)
@@ -166,8 +219,19 @@ def main() -> None:
     num_classes = len(label_names)
     device = torch.device(args.device)
     needs_second_view = args.masked_ce_weight > 0 or args.consistency_weight > 0
-    train_dataset = PacketByteDataset(args.train_index, args.max_bytes, include_augmented=needs_second_view)
-    valid_dataset = PacketByteDataset(args.valid_index, args.max_bytes, include_augmented=False)
+    payload_width = args.max_payload_bytes if args.use_payload_channel else 0
+    train_dataset = PacketByteDataset(
+        args.train_index,
+        args.max_bytes,
+        include_augmented=needs_second_view,
+        max_payload_bytes=payload_width,
+    )
+    valid_dataset = PacketByteDataset(
+        args.valid_index,
+        args.max_bytes,
+        include_augmented=False,
+        max_payload_bytes=payload_width,
+    )
     sampler = FlowBalancedPacketBatchSampler(
         train_dataset.rows, args.batch_size, args.packets_per_flow, seed=args.seed
     )
@@ -192,6 +256,8 @@ def main() -> None:
         "num_layers": args.num_layers,
         "num_heads": args.num_heads,
         "dropout": args.dropout,
+        "use_payload_channel": args.use_payload_channel,
+        "max_payload_bytes": args.max_payload_bytes,
     }
     model = PacketByteTransformer(**config).to(device)
     class_weights = effective_class_weights(train_dataset.labels, num_classes, args.class_weight_beta).to(device)
@@ -220,12 +286,18 @@ def main() -> None:
                 view_meta = torch.where(use_mask[:, None], masked_meta, clean_meta)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-                clean_logits, clean_z, _ = model(clean_tokens, lengths, clean_meta)
+                payload_tokens = batch["payload_tokens"].to(device) if model.use_payload_channel else None
+                payload_lengths = batch["payload_length"].to(device) if model.use_payload_channel else None
+                clean_logits, clean_z, _ = model(
+                    clean_tokens, lengths, clean_meta, payload_tokens, payload_lengths
+                )
                 ce = F.cross_entropy(clean_logits, labels, weight=class_weights)
                 masked_ce = clean_logits.sum() * 0.0
                 consistency = clean_logits.sum() * 0.0
                 if needs_second_view:
-                    view_logits, _, _ = model(view_tokens, lengths, view_meta)
+                    view_logits, _, _ = model(
+                        view_tokens, lengths, view_meta, payload_tokens, payload_lengths
+                    )
                     masked_ce = F.cross_entropy(view_logits, labels, weight=class_weights)
                     clean_log = F.log_softmax(clean_logits.float(), dim=-1)
                     view_log = F.log_softmax(view_logits.float(), dim=-1)
@@ -269,7 +341,10 @@ def main() -> None:
     result = {
         "task": "packet-level-classification",
         "sample_unit": "one_packet",
-        "architecture": "local-byte-transformer-meta-gated",
+        "architecture": (
+            "dual-channel-byte-payload-transformer-meta-gated"
+            if args.use_payload_channel else "local-byte-transformer-meta-gated"
+        ),
         "config": vars(args),
         "model_config": config,
         "best_epoch": best_epoch,
@@ -277,7 +352,12 @@ def main() -> None:
         "history": history,
     }
     if args.test_index:
-        test_dataset = PacketByteDataset(args.test_index, args.max_bytes, include_augmented=False)
+        test_dataset = PacketByteDataset(
+            args.test_index,
+            args.max_bytes,
+            include_augmented=False,
+            max_payload_bytes=payload_width,
+        )
         test_loader = DataLoader(
             test_dataset,
             batch_size=args.eval_batch_size,

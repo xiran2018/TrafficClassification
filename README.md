@@ -80,11 +80,14 @@ dataset-level `test` directory.
 
 `run_packet_level_pipeline.py` applies the same strict-one-packet framework to
 all six SWEET packet-level datasets. Each dataset/fold is trained independently.
-The recommended `packet_best` stage combines a local Byte Transformer and a
-current-packet structural expert; a fully nested, validation-only reliability
-gate may fuse the channels or shut an unhelpful channel off. Dataset-specific
-behavior is learned from each fold rather than implemented as dataset-specific
-model branches.
+The recommended `packet_best` stage combines a dual-channel current-packet
+Transformer and a current-packet structural expert. The neural branch encodes
+the normalized L3 header/full-packet prefix and the parsed transport payload in
+independent local mixers/Transformers, then learns a content gate over both
+views and parsed metadata. A validation-only reliability gate or weighted blend
+may fuse the neural and tree experts or shut an unhelpful expert off.
+Dataset-specific behavior is learned from each fold rather than implemented as
+dataset-specific model branches.
 
 The packet branch is:
 
@@ -92,9 +95,12 @@ The packet branch is:
 class-level PCAP
 -> recover real bidirectional flow IDs for split audit/training batches only
 -> one packet per model input (no sequence/window/inter-arrival features)
--> local byte mixer + downsampled Transformer + parsed-meta gated fusion
+-> L3/full-packet byte mixer + downsampled Transformer
+-> independent current-packet payload mixer + Transformer
+-> learned header/payload/meta content gate
 -> validation-selected current-packet tree expert
 -> nested OOF temperature/reliability selection on validation only
+-> optional validation-selected label-shift calibration from unlabeled target probabilities
 -> one prediction per packet on the shared test set
 ```
 
@@ -136,6 +142,8 @@ for fold in 0 1 2; do
       --fold ${fold} \
       --stage packet_best \
       --byte_max_bytes 64 \
+      --byte_use_payload_channel \
+      --byte_max_payload_bytes 128 \
       --byte_epochs 12 \
       --byte_batch_size 512 \
       --byte_eval_batch_size 2048
@@ -160,6 +168,30 @@ and `--stage test` as a semantic ablation. It is not forced into the final
 fusion when validation evidence favors the smaller byte or structural channel.
 
 ### Current packet-level results
+
+All rows below use a **Per-flow Split** and exactly one current packet per test
+sample. The same candidate framework is available to every dataset; validation
+may assign zero weight to an unhelpful neural, structural, fusion, or calibration
+path. Results are the mean/fusion of three independently trained folds on the
+one shared test set unless the row explicitly says that every fold is exact.
+
+| Dataset | Test packets | Accuracy | Macro-F1 | Target status | Selected path |
+| --- | ---: | ---: | ---: | --- | --- |
+| VPN-app | 111,678 | 0.9066 | 0.8112 | PASS | structural cross-fold mean |
+| TLS-120 | 553,994 | 0.8744 | 0.8479 | PASS | byte + structural pooled-validation gate |
+| USTC-app | 609,477 | 0.9773 | 0.9849 | PASS | structural cross-fold mean |
+| USTC-binary | 609,332 | 1.0000 | 1.0000 | PASS | structural; each fold is exact |
+| VPN-service | 111,368 | **0.9512** | **0.9435** | PASS | dual-channel + RF + validation-weighted EM prior |
+| VPN-binary | 110,594 | 0.9999 | 0.9999 | **9 errors; exact target not met** | dual-channel cross-fold mean |
+
+The binary numbers are reported without rounding them into a false claim:
+VPN-binary is `0.9999186213/0.9999186068` with confusion matrix
+`[[56029, 8], [1, 54556]]`; USTC-binary is exactly `1.0/1.0` in all three
+independent folds. VPN-binary's remaining eight VPN errors are four two-packet
+flows containing payload-free TCP FIN/ACK packets that both independent experts
+classify as nonVPN with high confidence. Correcting them with flow-neighbor
+information would violate the strict one-packet inference protocol, so this
+result is not presented as 100%.
 
 The first protocol-correct VPN-app result uses one packet per inference sample.
 The structural expert reads only the current packet's normalized L3 byte prefix
@@ -214,6 +246,51 @@ the three aligned test probability sets. Test labels are used only for the final
 reported metrics. The strong-header-masking/SupCon byte ablation reached only
 `0.7151/0.6893` on fold2 validation; therefore these regularizers remain
 available research controls but are not enabled in the current TLS best.
+
+For VPN-service, the dual-channel L3/payload branch improves the single neural
+cross-fold result over the original header-only branch. A predefined 201-point
+pooled-validation sweep selects neural/RF weights `0.175/0.825`, giving
+`0.9480/0.9382` before calibration. EM estimates the target class prior from
+unlabeled test probabilities; candidate strength/gating is selected by
+target-prior-weighted validation accuracy (`selection_scope=valid_weighted`).
+The selected `strength=0.3`, `low_margin=0.2` candidate reaches
+`0.9512068099` accuracy and `0.9434656797` macro-F1. Test labels participate
+only in the final metric audit, not in weight, prior, strength, or gate selection.
+
+After exporting pooled validation probabilities and cross-fold test means for
+the dual and RF experts, reproduce the selected mix and packet-native prior
+calibration with:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python fuse_packet_crossfold.py \
+    --inputs \
+      reasoningDataset/packet-level/vpn-service/test_dual_crossfold_mean.npz \
+      reasoningDataset/packet-level/vpn-service/test_rf_crossfold_mean.npz \
+    --validation_inputs \
+      reasoningDataset/packet-level/vpn-service/valid_dual_pooled.npz \
+      reasoningDataset/packet-level/vpn-service/valid_rf_pooled.npz \
+    --weight_grid_size 201 \
+    --select_metric macro_f1 \
+    --label_map reasoningDataset/packet-level/vpn-service/fold0/train/label_map.json \
+    --output_json reasoningDataset/packet-level/vpn-service/test_dual_rf_selected_mix.json \
+    --output_npz reasoningDataset/packet-level/vpn-service/test_dual_rf_selected_mix.npz \
+    --output_validation_npz reasoningDataset/packet-level/vpn-service/valid_dual_rf_selected_mix.npz
+
+conda run --no-capture-output -n llm-factory \
+  python calibrate_prediction_prior.py \
+    --valid_npz reasoningDataset/packet-level/vpn-service/valid_dual_rf_selected_mix.npz \
+    --test_npz reasoningDataset/packet-level/vpn-service/test_dual_rf_selected_mix.npz \
+    --label_map reasoningDataset/packet-level/vpn-service/fold0/train/label_map.json \
+    --strengths 0,0.025,0.05,0.075,0.1,0.15,0.2,0.3 \
+    --prior_method em \
+    --selection_scope valid_weighted \
+    --select_metric accuracy \
+    --gate_modes none,low_margin \
+    --gate_thresholds 0.05,0.1,0.15,0.2 \
+    --output_json reasoningDataset/packet-level/vpn-service/test_dual_rf_prior_em.json \
+    --output_npz reasoningDataset/packet-level/vpn-service/test_dual_rf_prior_em.npz
+```
 
 After running `packet_best` for TLS folds 0/1/2, reproduce the pooled result:
 

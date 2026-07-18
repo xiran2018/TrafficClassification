@@ -32,7 +32,15 @@ def main() -> None:
     config = checkpoint["config"]
     model = PacketByteTransformer(**config).to(device)
     model.load_state_dict(checkpoint["state_dict"])
-    dataset = PacketByteDataset(args.packet_index, int(config["max_bytes"]), include_augmented=False)
+    dataset = PacketByteDataset(
+        args.packet_index,
+        int(config["max_bytes"]),
+        include_augmented=False,
+        max_payload_bytes=(
+            int(config.get("max_payload_bytes", 0))
+            if bool(config.get("use_payload_channel", False)) else 0
+        ),
+    )
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -47,7 +55,11 @@ def main() -> None:
     payload = {
         "task": "packet-level-classification",
         "sample_unit": "one_packet",
-        "architecture": "local-byte-transformer-meta-gated",
+        "architecture": (
+            "dual-channel-byte-payload-transformer-meta-gated"
+            if bool(config.get("use_payload_channel", False))
+            else "local-byte-transformer-meta-gated"
+        ),
         "checkpoint": args.checkpoint,
         "packet_index": args.packet_index,
         "metrics": metrics,

@@ -1,10 +1,14 @@
+import json
 import socket
 import struct
+import sys
 
 import numpy as np
 import pytest
 import torch
 
+from calibrate_prediction_prior import main as calibrate_prior_main
+from fuse_packet_crossfold import main as fuse_crossfold_main
 from packet_eval_utils import encode_packet_logits_with_backoff, packet_classification_metrics
 from fuse_packet_experts import (
     blend,
@@ -14,7 +18,7 @@ from fuse_packet_experts import (
     temperature_scale,
 )
 from models.packet_byte_transformer import PacketByteTransformer
-from train_packet_byte_transformer import MASK_TOKEN, mask_session_tokens
+from train_packet_byte_transformer import MASK_TOKEN, extract_packet_payload, mask_session_tokens
 from train_packet_feature_expert import packet_features
 from traffic_utils import PacketMeta, extract_packet_classification_flows, format_packet_embedding_prompt
 
@@ -254,6 +258,42 @@ def test_byte_transformer_session_mask_and_forward():
     assert torch.isfinite(logits).all()
 
 
+def test_dual_channel_byte_transformer_extracts_current_packet_payload():
+    payload = bytes.fromhex("17 03 03 00 03 01 02 03")
+    raw = bytes.fromhex(
+        "45 00 00 30 12 34 40 00 40 06 ab cd 0a 00 00 01 0a 00 00 02 "
+        "30 39 01 bb 01 02 03 04 05 06 07 08 50 18 10 00 ab cd 00 00"
+    ) + payload
+    assert extract_packet_payload(raw, {}) == payload
+
+    tokens = np.full(64, 256, dtype=np.int64)
+    tokens[: len(raw)] = np.frombuffer(raw, dtype=np.uint8)
+    payload_tokens = np.full(16, 256, dtype=np.int64)
+    payload_tokens[: len(payload)] = np.frombuffer(payload, dtype=np.uint8)
+    model = PacketByteTransformer(
+        num_classes=3,
+        max_bytes=64,
+        max_payload_bytes=16,
+        use_payload_channel=True,
+        meta_dim=28,
+        hidden_dim=32,
+        num_layers=1,
+        num_heads=4,
+        projection_dim=16,
+    )
+    logits, projected, gate = model(
+        torch.tensor(np.stack([tokens, tokens])),
+        torch.tensor([len(raw), len(raw)]),
+        torch.zeros(2, 28),
+        torch.tensor(np.stack([payload_tokens, payload_tokens])),
+        torch.tensor([len(payload), len(payload)]),
+    )
+    assert logits.shape == (2, 3)
+    assert projected.shape == (2, 16)
+    assert gate.shape == (2, 32)
+    assert torch.isfinite(logits).all()
+
+
 def test_packet_expert_gate_can_disable_either_channel():
     semantic = np.asarray([[0.8, 0.2], [0.1, 0.9]], dtype=np.float64)
     structural = np.asarray([[0.3, 0.7], [0.6, 0.4]], dtype=np.float64)
@@ -383,3 +423,154 @@ def test_packet_evaluator_recovers_from_large_batch_oom():
 
     assert logits.shape == (5, 2)
     assert torch.equal(logits[:, 0], torch.arange(5, dtype=torch.float32))
+
+
+def test_weighted_packet_probability_fusion(tmp_path, monkeypatch):
+    y_true = np.asarray([0, 1], dtype=np.int64)
+    first = np.asarray([[0.9, 0.1], [0.4, 0.6]], dtype=np.float32)
+    second = np.asarray([[0.5, 0.5], [0.1, 0.9]], dtype=np.float32)
+    first_path = tmp_path / "first.npz"
+    second_path = tmp_path / "second.npz"
+    output_json = tmp_path / "fused.json"
+    output_npz = tmp_path / "fused.npz"
+    label_map = tmp_path / "label_map.json"
+    np.savez_compressed(first_path, y_true=y_true, probabilities=first)
+    np.savez_compressed(second_path, y_true=y_true, probabilities=second)
+    label_map.write_text(json.dumps({"zero": 0, "one": 1}), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fuse_packet_crossfold.py",
+            "--inputs", str(first_path), str(second_path),
+            "--weights", "0.25,0.75",
+            "--label_map", str(label_map),
+            "--output_json", str(output_json),
+            "--output_npz", str(output_npz),
+        ],
+    )
+
+    fuse_crossfold_main()
+
+    fused = np.load(output_npz)["probabilities"]
+    np.testing.assert_allclose(fused, 0.25 * first + 0.75 * second)
+    assert json.loads(output_json.read_text(encoding="utf-8"))["weights"] == [0.25, 0.75]
+
+
+def test_packet_prior_calibration_npz_contract(tmp_path, monkeypatch):
+    y_valid = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    valid_prob = np.asarray(
+        [[0.9, 0.1], [0.8, 0.2], [0.2, 0.8], [0.1, 0.9]], dtype=np.float32
+    )
+    y_test = np.asarray([0, 1], dtype=np.int64)
+    test_prob = np.asarray([[0.7, 0.3], [0.3, 0.7]], dtype=np.float32)
+    valid_path = tmp_path / "valid.npz"
+    test_path = tmp_path / "test.npz"
+    output_json = tmp_path / "calibrated.json"
+    output_npz = tmp_path / "calibrated.npz"
+    label_map = tmp_path / "label_map.json"
+    np.savez_compressed(valid_path, y_true=y_valid, probabilities=valid_prob)
+    np.savez_compressed(test_path, y_true=y_test, probabilities=test_prob)
+    label_map.write_text(json.dumps({"zero": 0, "one": 1}), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "calibrate_prediction_prior.py",
+            "--valid_npz", str(valid_path),
+            "--test_npz", str(test_path),
+            "--label_map", str(label_map),
+            "--strengths", "0",
+            "--selection_scope", "valid_weighted",
+            "--output_json", str(output_json),
+            "--output_npz", str(output_npz),
+        ],
+    )
+
+    calibrate_prior_main()
+
+    result = json.loads(output_json.read_text(encoding="utf-8"))
+    assert result["task"] == "packet-level-classification"
+    assert result["sample_unit"] == "one_packet"
+    assert "flow_prob" not in result
+    calibrated = np.load(output_npz)
+    np.testing.assert_array_equal(calibrated["y_true"], y_test)
+    np.testing.assert_allclose(calibrated["probabilities"], test_prob)
+
+
+def test_packet_weight_selection_exports_validation_blend(tmp_path, monkeypatch):
+    y_true = np.asarray([0, 1], dtype=np.int64)
+    first = np.asarray([[0.9, 0.1], [0.1, 0.9]], dtype=np.float32)
+    second = np.asarray([[0.4, 0.6], [0.6, 0.4]], dtype=np.float32)
+    paths = {}
+    for split in ("valid", "test"):
+        for name, probabilities in (("first", first), ("second", second)):
+            path = tmp_path / f"{split}_{name}.npz"
+            np.savez_compressed(path, y_true=y_true, probabilities=probabilities)
+            paths[f"{split}_{name}"] = path
+    label_map = tmp_path / "label_map.json"
+    output_json = tmp_path / "selected.json"
+    output_npz = tmp_path / "selected_test.npz"
+    output_validation_npz = tmp_path / "selected_valid.npz"
+    label_map.write_text(json.dumps({"zero": 0, "one": 1}), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fuse_packet_crossfold.py",
+            "--inputs", str(paths["test_first"]), str(paths["test_second"]),
+            "--validation_inputs", str(paths["valid_first"]), str(paths["valid_second"]),
+            "--weight_grid_size", "5",
+            "--label_map", str(label_map),
+            "--output_json", str(output_json),
+            "--output_npz", str(output_npz),
+            "--output_validation_npz", str(output_validation_npz),
+        ],
+    )
+
+    fuse_crossfold_main()
+
+    result = json.loads(output_json.read_text(encoding="utf-8"))
+    assert result["weight_selection"]["scope"] == "validation_only"
+    assert result["weights"] == [0.25, 0.75]
+    np.testing.assert_allclose(
+        np.load(output_validation_npz)["probabilities"],
+        0.25 * first + 0.75 * second,
+    )
+
+
+def test_flow_prior_calibration_keeps_legacy_json_contract(tmp_path, monkeypatch):
+    input_json = tmp_path / "flow_input.json"
+    output_json = tmp_path / "flow_output.json"
+    input_json.write_text(
+        json.dumps(
+            {
+                "valid_prob": [[0.9, 0.1], [0.1, 0.9]],
+                "valid_y_true": [0, 1],
+                "valid_flow_ids": ["valid-0", "valid-1"],
+                "flow_prob": [[0.8, 0.2], [0.2, 0.8]],
+                "flow_y_true": [0, 1],
+                "flow_ids": ["test-0", "test-1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "calibrate_prediction_prior.py",
+            "--input_json", str(input_json),
+            "--strengths", "0",
+            "--output_json", str(output_json),
+        ],
+    )
+
+    calibrate_prior_main()
+
+    result = json.loads(output_json.read_text(encoding="utf-8"))
+    assert result["task"] == "flow-level-classification"
+    assert result["sample_unit"] == "one_flow"
+    assert result["flow_ids"] == ["test-0", "test-1"]
+    assert result["valid_flow_ids"] == ["valid-0", "valid-1"]
+    assert "flow_prob" in result and "valid_prob" in result

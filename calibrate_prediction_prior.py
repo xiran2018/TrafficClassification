@@ -122,7 +122,17 @@ def estimate_prior_em(target_prob: np.ndarray, source_prior: np.ndarray, max_ite
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input_json", required=True)
+    input_group = ap.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input_json")
+    input_group.add_argument(
+        "--valid_npz",
+        help="Packet validation probabilities with y_true and probabilities arrays.",
+    )
+    ap.add_argument(
+        "--test_npz",
+        default="",
+        help="Aligned packet test probabilities; required with --valid_npz.",
+    )
     ap.add_argument("--label_map", default="")
     ap.add_argument("--strengths", default="0,0.05,0.1,0.15,0.2,0.25,0.3,0.4,0.5")
     ap.add_argument("--ridge", type=float, default=1e-3)
@@ -140,14 +150,38 @@ def main() -> None:
     )
     ap.add_argument("--hard_prior_kl_cap", type=float, default=0.005, help="Hard-prior KL cap for --selection_scope soft_prior_under_hard_cap.")
     ap.add_argument("--output_json", default="")
+    ap.add_argument("--output_npz", default="", help="Optional calibrated packet probabilities.")
     args = ap.parse_args()
 
-    with open(args.input_json, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    valid_prob = np.asarray(data["valid_prob"], dtype=np.float64)
-    test_prob = np.asarray(data["flow_prob"], dtype=np.float64)
-    y_valid = np.asarray(data["valid_y_true"], dtype=np.int64)
-    y_test = np.asarray(data["flow_y_true"], dtype=np.int64)
+    if args.valid_npz:
+        if not args.test_npz:
+            ap.error("--test_npz is required with --valid_npz")
+        valid_data = np.load(args.valid_npz)
+        test_data = np.load(args.test_npz)
+        valid_prob = np.asarray(valid_data["probabilities"], dtype=np.float64)
+        test_prob = np.asarray(test_data["probabilities"], dtype=np.float64)
+        y_valid = np.asarray(valid_data["y_true"], dtype=np.int64)
+        y_test = np.asarray(test_data["y_true"], dtype=np.int64)
+        data = {}
+        sample_unit = "one_packet"
+        metric_scope = "packet_level"
+    else:
+        if args.test_npz:
+            ap.error("--test_npz can only be used with --valid_npz")
+        with open(args.input_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        valid_prob = np.asarray(data["valid_prob"], dtype=np.float64)
+        test_prob = np.asarray(data["flow_prob"], dtype=np.float64)
+        y_valid = np.asarray(data["valid_y_true"], dtype=np.int64)
+        y_test = np.asarray(data["flow_y_true"], dtype=np.int64)
+        sample_unit = "one_flow"
+        metric_scope = "flow_level"
+    if valid_prob.ndim != 2 or test_prob.ndim != 2:
+        raise ValueError("probabilities must be rank-2 arrays")
+    if valid_prob.shape[1] != test_prob.shape[1]:
+        raise ValueError("validation/test class-count mismatch")
+    if len(valid_prob) != len(y_valid) or len(test_prob) != len(y_test):
+        raise ValueError("probability and label lengths do not match")
     num_classes = test_prob.shape[1]
 
     pred_valid = valid_prob.argmax(axis=1)
@@ -254,7 +288,9 @@ def main() -> None:
 
     if args.output_json:
         payload = {
-            "metrics": {"flow_level": reports[best_key]},
+            "task": f"{metric_scope.replace('_', '-')}-classification",
+            "sample_unit": sample_unit,
+            "metrics": {metric_scope: reports[best_key]},
             "metrics_by_strength": reports,
             "selection_metrics_by_strength": selection_reports,
             "unsupervised_metrics_by_strength": unsupervised_reports,
@@ -272,18 +308,37 @@ def main() -> None:
             "em_estimated_target_prior": em_prior.tolist(),
             "valid_prior": valid_prior.tolist(),
             "label_map": label_map,
-            "flow_ids": data.get("flow_ids", []),
-            "flow_y_true": y_test.tolist(),
-            "flow_y_pred": best_pred.tolist(),
-            "flow_prob": best_test_prob.tolist(),
-            "valid_flow_ids": data.get("valid_flow_ids", []),
-            "valid_y_true": y_valid.tolist(),
-            "valid_y_pred": best_valid_prob.argmax(axis=1).astype(np.int64).tolist(),
-            "valid_prob": best_valid_prob.tolist(),
         }
+        if args.valid_npz:
+            payload["inputs"] = {"valid_npz": args.valid_npz, "test_npz": args.test_npz}
+            payload["output_npz"] = args.output_npz
+        else:
+            # Preserve the original flow JSON contract for downstream tools.
+            payload.update(
+                {
+                    "flow_ids": data.get("flow_ids", []),
+                    "flow_y_true": y_test.tolist(),
+                    "flow_y_pred": best_pred.tolist(),
+                    "flow_prob": best_test_prob.tolist(),
+                    "valid_flow_ids": data.get("valid_flow_ids", []),
+                    "valid_y_true": y_valid.tolist(),
+                    "valid_y_pred": best_valid_prob.argmax(axis=1).astype(np.int64).tolist(),
+                    "valid_prob": best_valid_prob.tolist(),
+                }
+            )
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+    if args.output_npz:
+        if not args.valid_npz:
+            ap.error("--output_npz is supported with packet --valid_npz input")
+        output_npz = Path(args.output_npz)
+        output_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            output_npz,
+            y_true=y_test.astype(np.int64),
+            probabilities=np.asarray(best_test_prob, dtype=np.float32),
+        )
 
 
 if __name__ == "__main__":
