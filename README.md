@@ -236,6 +236,41 @@ reported test-signature oracle is only the best possible lookup **after
 compressing packets to that particular signature**, not an upper bound for a
 model that retains richer current-packet information.
 
+#### Identifiability-aware masked-view iteration
+
+`train_packet_byte_transformer.py` now supports an identifiability-aware
+paired view while preserving strict one-packet inference. The raw view keeps
+the true packet label. The paired view masks endpoint/session fields, TCP
+sequence/acknowledgement values, checksums, and TCP options but retains the
+current packet payload. Session-invariant signatures are formed from the
+training split only. Their label entropy defines an identifiability reliability
+used to attenuate masked-view CE and raw/masked consistency; the raw classifier
+is never trained with validation or test labels. A validation-only probability
+blend can use the invariant view or assign it zero weight.
+
+The first VPN-app fold0 ablation uses the same 64-byte, 128-hidden, three-layer
+backbone and seed as the original CE checkpoint. It is diagnostic rather than
+the cross-fold headline:
+
+| Fold0 byte objective | Valid Acc/F1 | Shared-test Acc/F1 | Validation raw weight |
+| --- | ---: | ---: | ---: |
+| raw CE | 0.6903/0.6636 | 0.8329/0.6628 | 1.00 |
+| hard-label masked CE + consistency | 0.6934/0.6680 | 0.8363/0.6761 | 1.00 |
+| empirical conflict-distribution target | 0.6927/0.6673 | 0.8363/0.6673 | 0.90 |
+| reliability gate, strength 0.25 | 0.6934/0.6677 | 0.8365/0.6777 | 1.00 |
+| reliability gate, strength 0.50 | 0.6945/0.6687 | 0.8363/0.6762 | 1.00 |
+| reliability gate, strength 0.75 | **0.6952/0.6700** | 0.8368/0.6736 | 1.00 |
+| reliability gate, strength 1.00 | 0.6941/0.6689 | **0.8372**/0.6727 | 1.00 |
+
+The direct empirical soft target is a negative ablation: forcing an ambiguous
+signature distribution into the shared encoder reduces macro-F1 relative to
+ordinary hard-label masking. Reliability gating avoids that failure, but the
+validation-optimal global strength does not maximize shared-test F1. Therefore
+the paper-facing next step is a learned per-packet reliability/router trained
+without target labels, followed by three-fold and TLS-120 verification. The
+current `0.9066/0.8112` VPN-app structural cross-fold result remains the
+headline until that unified learned router is validated across folds.
+
 The first protocol-correct VPN-app result uses one packet per inference sample.
 The structural expert reads only the current packet's normalized L3 byte prefix
 and parsed header fields; reconstructed flow IDs are used for split auditing,

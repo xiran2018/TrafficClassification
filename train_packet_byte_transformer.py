@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from audit_packet_identifiability import packet_signature
 from models.packet_byte_transformer import PacketByteTransformer
 from models.qwen_packet_multitask import flow_aware_contrastive_loss
 from packet_eval_utils import packet_classification_metrics
@@ -72,6 +73,9 @@ def mask_session_tokens(tokens: np.ndarray, length: int) -> np.ndarray:
     positions.append((l4_offset, l4_offset + 4))
     if protocol == 6:
         positions.extend([(l4_offset + 4, l4_offset + 12), (l4_offset + 16, l4_offset + 18)])
+        if length > l4_offset + 12:
+            data_offset = (int(raw[l4_offset + 12]) >> 4) * 4
+            positions.append((l4_offset + 20, l4_offset + data_offset))
     elif protocol == 17:
         positions.append((l4_offset + 6, l4_offset + 8))
     for start, stop in positions:
@@ -87,11 +91,14 @@ class PacketByteDataset(Dataset):
         max_bytes: int,
         include_augmented: bool = True,
         max_payload_bytes: int = 0,
+        build_ambiguity_targets: bool = False,
+        num_classes: int | None = None,
     ) -> None:
         self.rows: list[dict] = []
         tokens, masked_tokens, lengths = [], [], []
         payload_tokens, payload_lengths = [], []
         metas, masked_metas, labels, flow_ids = [], [], [], []
+        invariant_signatures = []
         payload_width = max(1, int(max_payload_bytes))
         with open(index_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -118,6 +125,8 @@ class PacketByteDataset(Dataset):
                     masked_metas.append(packet_features(row, 0, False, False, True))
                 labels.append(int(row["label_id"]))
                 flow_ids.append(stable_flow_id(str(row.get("flow_id", len(labels) - 1))))
+                if build_ambiguity_targets:
+                    invariant_signatures.append(packet_signature(row, "session"))
                 self.rows.append({"flow_id": str(row.get("flow_id", len(labels) - 1))})
         self.tokens = torch.from_numpy(np.stack(tokens))
         self.masked_tokens = torch.from_numpy(np.stack(masked_tokens)) if include_augmented else self.tokens
@@ -128,12 +137,36 @@ class PacketByteDataset(Dataset):
         self.masked_metas = torch.from_numpy(np.stack(masked_metas)).float() if include_augmented else self.metas
         self.labels = torch.tensor(labels, dtype=torch.long)
         self.flow_ids = torch.tensor(flow_ids, dtype=torch.long)
+        self.build_ambiguity_targets = bool(build_ambiguity_targets)
+        if self.build_ambiguity_targets:
+            target_classes = int(num_classes or (max(labels, default=-1) + 1))
+            signature_counts: dict[str, np.ndarray] = {}
+            for signature, label in zip(invariant_signatures, labels):
+                counts = signature_counts.setdefault(
+                    signature, np.zeros(target_classes, dtype=np.float32)
+                )
+                counts[label] += 1.0
+            targets, reliabilities, supports = [], [], []
+            for signature in invariant_signatures:
+                counts = signature_counts[signature]
+                target = counts / counts.sum()
+                entropy = float(-(target[target > 0] * np.log(target[target > 0])).sum())
+                active_classes = int((counts > 0).sum())
+                reliability = (
+                    1.0 - entropy / np.log(active_classes) if active_classes > 1 else 1.0
+                )
+                targets.append(target)
+                reliabilities.append(reliability)
+                supports.append(int(counts.sum()))
+            self.ambiguity_targets = torch.from_numpy(np.stack(targets)).float()
+            self.invariant_reliability = torch.tensor(reliabilities, dtype=torch.float32)
+            self.signature_support = torch.tensor(supports, dtype=torch.long)
 
     def __len__(self) -> int:
         return len(self.labels)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        return {
+        item = {
             "tokens": self.tokens[index],
             "masked_tokens": self.masked_tokens[index],
             "length": self.lengths[index],
@@ -144,6 +177,13 @@ class PacketByteDataset(Dataset):
             "label": self.labels[index],
             "flow_id": self.flow_ids[index],
         }
+        if self.build_ambiguity_targets:
+            item.update(
+                ambiguity_target=self.ambiguity_targets[index],
+                invariant_reliability=self.invariant_reliability[index],
+                signature_support=self.signature_support[index],
+            )
+        return item
 
 
 def effective_class_weights(labels: torch.Tensor, num_classes: int, beta: float) -> torch.Tensor:
@@ -153,29 +193,132 @@ def effective_class_weights(labels: torch.Tensor, num_classes: int, beta: float)
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, num_classes, label_names, return_probabilities=False):
+def predict_packet_views(model, loader, device, include_masked=False):
     model.eval()
-    ys, preds, probs = [], [], []
+    ys, raw_probabilities, masked_probabilities = [], [], []
     for batch in tqdm(loader, desc="eval byte transformer", leave=False):
-        logits, _, _ = model(
+        payload_tokens = batch["payload_tokens"].to(device) if model.use_payload_channel else None
+        payload_lengths = batch["payload_length"].to(device) if model.use_payload_channel else None
+        raw_logits, _, _ = model(
             batch["tokens"].to(device),
             batch["length"].to(device),
             batch["meta"].to(device),
-            batch["payload_tokens"].to(device) if model.use_payload_channel else None,
-            batch["payload_length"].to(device) if model.use_payload_channel else None,
+            payload_tokens,
+            payload_lengths,
         )
-        probability = torch.softmax(logits.float(), dim=-1).cpu()
         ys.extend(batch["label"].tolist())
-        preds.extend(probability.argmax(dim=-1).tolist())
-        if return_probabilities:
-            probs.append(probability.numpy())
-    metrics = packet_classification_metrics(ys, preds, num_classes, label_names)
-    return metrics, np.concatenate(probs) if probs else None, np.asarray(ys, dtype=np.int64)
+        raw_probabilities.append(torch.softmax(raw_logits.float(), dim=-1).cpu().numpy())
+        if include_masked:
+            masked_logits, _, _ = model(
+                batch["masked_tokens"].to(device),
+                batch["length"].to(device),
+                batch["masked_meta"].to(device),
+                payload_tokens,
+                payload_lengths,
+            )
+            masked_probabilities.append(
+                torch.softmax(masked_logits.float(), dim=-1).cpu().numpy()
+            )
+    y_true = np.asarray(ys, dtype=np.int64)
+    raw = np.concatenate(raw_probabilities)
+    masked = np.concatenate(masked_probabilities) if masked_probabilities else None
+    return y_true, raw, masked
 
 
-def save_checkpoint(path: Path, model, config, metrics) -> None:
+def select_invariant_blend(
+    y_true: np.ndarray,
+    raw_probabilities: np.ndarray,
+    masked_probabilities: np.ndarray,
+    num_classes: int,
+    label_names: list[str],
+    metric: str = "macro_f1",
+    grid_size: int = 21,
+) -> tuple[float, dict, np.ndarray]:
+    if grid_size < 2:
+        raise ValueError("invariant blend grid size must be at least 2")
+    best = None
+    for raw_weight in np.linspace(0.0, 1.0, grid_size):
+        probabilities = (
+            raw_weight * raw_probabilities + (1.0 - raw_weight) * masked_probabilities
+        )
+        metrics = packet_classification_metrics(
+            y_true, probabilities.argmax(axis=1), num_classes, label_names
+        )
+        key = (
+            float(metrics[metric]),
+            float(metrics["macro_f1"]),
+            float(metrics["accuracy"]),
+            float(raw_weight),
+        )
+        if best is None or key > best[0]:
+            best = (key, float(raw_weight), metrics, probabilities)
+    assert best is not None
+    return best[1], best[2], best[3]
+
+
+@torch.no_grad()
+def evaluate(
+    model,
+    loader,
+    device,
+    num_classes,
+    label_names,
+    return_probabilities=False,
+    raw_weight: float = 1.0,
+):
+    use_masked = raw_weight < 1.0
+    y_true, raw, masked = predict_packet_views(
+        model, loader, device, include_masked=use_masked
+    )
+    probabilities = raw if masked is None else raw_weight * raw + (1.0 - raw_weight) * masked
+    metrics = packet_classification_metrics(
+        y_true, probabilities.argmax(axis=1), num_classes, label_names
+    )
+    return metrics, probabilities if return_probabilities else None, y_true
+
+
+def save_checkpoint(path: Path, model, config, metrics, inference_config=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "config": config, "validation_metrics": metrics}, path)
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "config": config,
+            "validation_metrics": metrics,
+            "inference_config": inference_config or {"raw_weight": 1.0},
+        },
+        path,
+    )
+
+
+def weighted_soft_cross_entropy(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    sample_weights: torch.Tensor,
+) -> torch.Tensor:
+    losses = -(targets * F.log_softmax(logits.float(), dim=-1)).sum(dim=-1)
+    return (losses * sample_weights).sum() / sample_weights.sum().clamp_min(1e-8)
+
+
+def reliability_weighted_symmetric_kl(
+    first_logits: torch.Tensor,
+    second_logits: torch.Tensor,
+    reliability: torch.Tensor,
+) -> torch.Tensor:
+    first_log = F.log_softmax(first_logits.float(), dim=-1)
+    second_log = F.log_softmax(second_logits.float(), dim=-1)
+    first_prob = first_log.exp().detach()
+    second_prob = second_log.exp().detach()
+    per_sample = 0.5 * (
+        F.kl_div(first_log, second_prob, reduction="none").sum(dim=-1)
+        + F.kl_div(second_log, first_prob, reduction="none").sum(dim=-1)
+    )
+    return (per_sample * reliability).sum() / reliability.sum().clamp_min(1e-8)
+
+
+def interpolate_identifiability_reliability(
+    reliability: torch.Tensor, strength: float
+) -> torch.Tensor:
+    return 1.0 - float(strength) + float(strength) * reliability
 
 
 def main() -> None:
@@ -204,6 +347,38 @@ def main() -> None:
     ap.add_argument("--mask_probability", type=float, default=0.5)
     ap.add_argument("--masked_ce_weight", type=float, default=0.3)
     ap.add_argument("--consistency_weight", type=float, default=0.1)
+    ap.add_argument(
+        "--ambiguity_aware_targets",
+        action="store_true",
+        help="Use session-invariant signature ambiguity when supervising the masked view.",
+    )
+    ap.add_argument("--ambiguity_min_support", type=int, default=2)
+    ap.add_argument(
+        "--ambiguity_gate_strength",
+        type=float,
+        default=1.0,
+        help="Interpolation from hard masked supervision (0) to full reliability gating (1).",
+    )
+    ap.add_argument(
+        "--ambiguity_supervision",
+        choices=["reliability_gate", "empirical_soft"],
+        default="reliability_gate",
+        help=(
+            "For ambiguous masked packets, either attenuate hard-label supervision by "
+            "identifiability reliability or use the empirical label distribution."
+        ),
+    )
+    ap.add_argument(
+        "--select_invariant_blend",
+        action="store_true",
+        help="Select raw/session-masked probability blending on validation only.",
+    )
+    ap.add_argument("--invariant_blend_grid_size", type=int, default=21)
+    ap.add_argument(
+        "--invariant_blend_metric",
+        choices=["accuracy", "macro_f1"],
+        default="macro_f1",
+    )
     ap.add_argument("--contrastive_weight", type=float, default=0.05)
     ap.add_argument("--temperature", type=float, default=0.1)
     ap.add_argument("--packets_per_flow", type=int, default=2)
@@ -211,6 +386,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
+    if not 0.0 <= args.ambiguity_gate_strength <= 1.0:
+        ap.error("--ambiguity_gate_strength must be in [0, 1]")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -218,19 +395,22 @@ def main() -> None:
     label_names = load_label_names(args.label_map)
     num_classes = len(label_names)
     device = torch.device(args.device)
-    needs_second_view = args.masked_ce_weight > 0 or args.consistency_weight > 0
+    needs_training_view = args.masked_ce_weight > 0 or args.consistency_weight > 0
     payload_width = args.max_payload_bytes if args.use_payload_channel else 0
     train_dataset = PacketByteDataset(
         args.train_index,
         args.max_bytes,
-        include_augmented=needs_second_view,
+        include_augmented=needs_training_view,
         max_payload_bytes=payload_width,
+        build_ambiguity_targets=args.ambiguity_aware_targets,
+        num_classes=num_classes,
     )
     valid_dataset = PacketByteDataset(
         args.valid_index,
         args.max_bytes,
-        include_augmented=False,
+        include_augmented=args.select_invariant_blend,
         max_payload_bytes=payload_width,
+        num_classes=num_classes,
     )
     sampler = FlowBalancedPacketBatchSampler(
         train_dataset.rows, args.batch_size, args.packets_per_flow, seed=args.seed
@@ -278,7 +458,7 @@ def main() -> None:
             clean_meta = batch["meta"].to(device)
             labels = batch["label"].to(device)
             flow_ids = batch["flow_id"].to(device)
-            if needs_second_view:
+            if needs_training_view:
                 masked_tokens = batch["masked_tokens"].to(device)
                 masked_meta = batch["masked_meta"].to(device)
                 use_mask = torch.rand(len(labels), device=device) < args.mask_probability
@@ -294,18 +474,44 @@ def main() -> None:
                 ce = F.cross_entropy(clean_logits, labels, weight=class_weights)
                 masked_ce = clean_logits.sum() * 0.0
                 consistency = clean_logits.sum() * 0.0
-                if needs_second_view:
+                if needs_training_view:
                     view_logits, _, _ = model(
                         view_tokens, lengths, view_meta, payload_tokens, payload_lengths
                     )
-                    masked_ce = F.cross_entropy(view_logits, labels, weight=class_weights)
-                    clean_log = F.log_softmax(clean_logits.float(), dim=-1)
-                    view_log = F.log_softmax(view_logits.float(), dim=-1)
-                    clean_prob = clean_log.exp().detach()
-                    view_prob = view_log.exp().detach()
-                    consistency = 0.5 * (
-                        F.kl_div(clean_log, view_prob, reduction="batchmean")
-                        + F.kl_div(view_log, clean_prob, reduction="batchmean")
+                    if args.ambiguity_aware_targets:
+                        hard_targets = F.one_hot(labels, num_classes=num_classes).float()
+                        ambiguity_targets = batch["ambiguity_target"].to(device)
+                        enough_support = (
+                            batch["signature_support"].to(device) >= args.ambiguity_min_support
+                        )
+                        invariant_reliability = batch["invariant_reliability"].to(device)
+                        reliability = torch.where(
+                            use_mask & enough_support,
+                            invariant_reliability,
+                            torch.ones_like(invariant_reliability),
+                        )
+                        if args.ambiguity_supervision == "empirical_soft":
+                            masked_targets = torch.where(
+                                (use_mask & enough_support)[:, None],
+                                ambiguity_targets,
+                                hard_targets,
+                            )
+                            supervision_reliability = torch.ones_like(reliability)
+                        else:
+                            masked_targets = hard_targets
+                            supervision_reliability = interpolate_identifiability_reliability(
+                                reliability, args.ambiguity_gate_strength
+                            )
+                        masked_ce = weighted_soft_cross_entropy(
+                            view_logits,
+                            masked_targets,
+                            class_weights[labels] * supervision_reliability,
+                        )
+                    else:
+                        masked_ce = F.cross_entropy(view_logits, labels, weight=class_weights)
+                        reliability = torch.ones_like(labels, dtype=torch.float32)
+                    consistency = reliability_weighted_symmetric_kl(
+                        clean_logits, view_logits, reliability
                     )
                 contrastive = flow_aware_contrastive_loss(
                     clean_z, labels, flow_ids, temperature=args.temperature,
@@ -320,8 +526,45 @@ def main() -> None:
             scaler.update()
             scheduler.step()
             losses.append(float(loss.detach().cpu()))
-        valid_metrics, _, _ = evaluate(model, valid_loader, device, num_classes, label_names)
-        record = {"epoch": epoch, "loss": float(np.mean(losses)), "validation_metrics": valid_metrics}
+        inference_config = {"raw_weight": 1.0, "selection_scope": "raw_only"}
+        if args.select_invariant_blend:
+            y_valid, raw_valid, masked_valid = predict_packet_views(
+                model, valid_loader, device, include_masked=True
+            )
+            assert masked_valid is not None
+            raw_weight, valid_metrics, _ = select_invariant_blend(
+                y_valid,
+                raw_valid,
+                masked_valid,
+                num_classes,
+                label_names,
+                args.invariant_blend_metric,
+                args.invariant_blend_grid_size,
+            )
+            raw_metrics = packet_classification_metrics(
+                y_valid, raw_valid.argmax(axis=1), num_classes, label_names
+            )
+            masked_metrics = packet_classification_metrics(
+                y_valid, masked_valid.argmax(axis=1), num_classes, label_names
+            )
+            inference_config = {
+                "raw_weight": raw_weight,
+                "selection_scope": "validation_only",
+                "select_metric": args.invariant_blend_metric,
+                "grid_size": args.invariant_blend_grid_size,
+                "raw_validation_metrics": raw_metrics,
+                "masked_validation_metrics": masked_metrics,
+            }
+        else:
+            valid_metrics, _, _ = evaluate(
+                model, valid_loader, device, num_classes, label_names
+            )
+        record = {
+            "epoch": epoch,
+            "loss": float(np.mean(losses)),
+            "validation_metrics": valid_metrics,
+            "inference_config": inference_config,
+        }
         history.append(record)
         key = (valid_metrics["macro_f1"], valid_metrics["accuracy"])
         print(
@@ -331,7 +574,9 @@ def main() -> None:
         if best_key is None or key > best_key:
             best_key = key
             best_epoch = epoch
-            save_checkpoint(output_dir / "best.pt", model, config, valid_metrics)
+            save_checkpoint(
+                output_dir / "best.pt", model, config, valid_metrics, inference_config
+            )
         if epoch - best_epoch >= args.patience:
             print(f"early stopping after epoch={epoch}; best_epoch={best_epoch}", flush=True)
             break
@@ -349,14 +594,17 @@ def main() -> None:
         "model_config": config,
         "best_epoch": best_epoch,
         "validation_metrics": checkpoint["validation_metrics"],
+        "inference_config": checkpoint.get("inference_config", {"raw_weight": 1.0}),
         "history": history,
     }
     if args.test_index:
+        selected_raw_weight = float(result["inference_config"].get("raw_weight", 1.0))
         test_dataset = PacketByteDataset(
             args.test_index,
             args.max_bytes,
-            include_augmented=False,
+            include_augmented=args.select_invariant_blend,
             max_payload_bytes=payload_width,
+            num_classes=num_classes,
         )
         test_loader = DataLoader(
             test_dataset,
@@ -365,10 +613,30 @@ def main() -> None:
             num_workers=args.num_workers,
             pin_memory=device.type == "cuda",
         )
-        test_metrics, probabilities, y_true = evaluate(
-            model, test_loader, device, num_classes, label_names, return_probabilities=True
+        y_true, raw_test, masked_test = predict_packet_views(
+            model,
+            test_loader,
+            device,
+            include_masked=args.select_invariant_blend,
+        )
+        probabilities = (
+            raw_test
+            if masked_test is None
+            else selected_raw_weight * raw_test + (1.0 - selected_raw_weight) * masked_test
+        )
+        test_metrics = packet_classification_metrics(
+            y_true, probabilities.argmax(axis=1), num_classes, label_names
         )
         result["test_metrics"] = test_metrics
+        result["test_view_metrics"] = {
+            "raw": packet_classification_metrics(
+                y_true, raw_test.argmax(axis=1), num_classes, label_names
+            )
+        }
+        if masked_test is not None:
+            result["test_view_metrics"]["session_invariant"] = packet_classification_metrics(
+                y_true, masked_test.argmax(axis=1), num_classes, label_names
+            )
         if args.output_npz:
             Path(args.output_npz).parent.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(args.output_npz, y_true=y_true, probabilities=probabilities)

@@ -23,7 +23,14 @@ from fuse_packet_experts import (
     temperature_scale,
 )
 from models.packet_byte_transformer import PacketByteTransformer
-from train_packet_byte_transformer import MASK_TOKEN, extract_packet_payload, mask_session_tokens
+from train_packet_byte_transformer import (
+    MASK_TOKEN,
+    PacketByteDataset,
+    extract_packet_payload,
+    interpolate_identifiability_reliability,
+    mask_session_tokens,
+    select_invariant_blend,
+)
 from train_packet_feature_expert import packet_features
 from traffic_utils import PacketMeta, extract_packet_classification_flows, format_packet_embedding_prompt
 
@@ -233,6 +240,86 @@ def test_identifiability_report_exposes_conflicts_and_error_strata():
     assert report["model_error_strata"]["tcp_control"]["errors"] == 1
     counts = report["model_error_strata"]["error_examples"][0]["train_signature_label_counts"]
     assert counts["session"] == {"0": 1, "1": 1}
+
+
+def test_packet_dataset_builds_conflict_aware_invariant_targets(tmp_path):
+    rows = []
+    for label, packet in (
+        (0, tcp_packet("10.0.0.1", "20.0.0.1", 50000, 443, seq=1, ack=2)),
+        (1, tcp_packet("10.1.1.1", "30.1.1.1", 51000, 8443, seq=99, ack=100)),
+    ):
+        rows.append(
+            {
+                "label_id": label,
+                "flow_id": f"flow-{label}",
+                "meta": {
+                    "l3_hex_prefix": packet.hex(),
+                    "l3": "IPv4",
+                    "l4": "TCP",
+                    "packet_len": 40,
+                    "ip_header_len": 20,
+                    "tcp_data_offset": 20,
+                    "payload_len": 0,
+                    "tcp_flags": "A",
+                },
+            }
+        )
+    index = tmp_path / "packet_index.jsonl"
+    index.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    dataset = PacketByteDataset(
+        str(index),
+        max_bytes=40,
+        include_augmented=True,
+        build_ambiguity_targets=True,
+        num_classes=2,
+    )
+
+    assert torch.equal(dataset.signature_support, torch.tensor([2, 2]))
+    assert torch.allclose(dataset.ambiguity_targets, torch.full((2, 2), 0.5))
+    assert torch.allclose(dataset.invariant_reliability, torch.zeros(2), atol=1e-6)
+
+
+def test_session_mask_removes_tcp_options_but_keeps_payload():
+    raw = np.asarray(
+        list(tcp_packet("10.0.0.1", "20.0.0.1", 50000, 443)) + [1, 1, 8, 10, 9, 8, 7, 6, 1, 2],
+        dtype=np.int64,
+    )
+    raw[20 + 12] = 0x70
+    masked = mask_session_tokens(raw, len(raw))
+
+    assert np.all(masked[40:48] == MASK_TOKEN)
+    assert np.array_equal(masked[48:], raw[48:])
+
+
+def test_validation_selected_invariant_blend_can_disable_raw_view():
+    y_true = np.asarray([0, 1, 0, 1], dtype=np.int64)
+    raw = np.asarray([[0.1, 0.9], [0.9, 0.1], [0.2, 0.8], [0.8, 0.2]])
+    masked = np.asarray([[0.9, 0.1], [0.1, 0.9], [0.8, 0.2], [0.2, 0.8]])
+
+    raw_weight, metrics, probabilities = select_invariant_blend(
+        y_true, raw, masked, 2, ["vpn", "nonvpn"], grid_size=11
+    )
+
+    assert raw_weight == 0.4
+    assert metrics["accuracy"] == 1.0
+    assert np.array_equal(probabilities.argmax(axis=1), y_true)
+
+
+def test_identifiability_gate_strength_interpolates_from_hard_to_reliable():
+    reliability = torch.tensor([0.0, 0.25, 1.0])
+
+    assert torch.equal(
+        interpolate_identifiability_reliability(reliability, 0.0),
+        torch.ones_like(reliability),
+    )
+    assert torch.allclose(
+        interpolate_identifiability_reliability(reliability, 0.5),
+        torch.tensor([0.5, 0.625, 1.0]),
+    )
+    assert torch.equal(
+        interpolate_identifiability_reliability(reliability, 1.0), reliability
+    )
 
 
 def test_feature_expert_can_mask_endpoint_shortcuts():

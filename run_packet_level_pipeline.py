@@ -68,6 +68,21 @@ def main() -> None:
     ap.add_argument("--byte_batch_size", type=int, default=512)
     ap.add_argument("--byte_eval_batch_size", type=int, default=2048)
     ap.add_argument(
+        "--byte_ambiguity_aware_targets",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    ap.add_argument("--byte_mask_probability", type=float, default=1.0)
+    ap.add_argument("--byte_masked_ce_weight", type=float, default=0.3)
+    ap.add_argument("--byte_consistency_weight", type=float, default=0.1)
+    ap.add_argument("--byte_ambiguity_gate_strength", type=float, default=1.0)
+    ap.add_argument(
+        "--byte_select_invariant_blend",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    ap.add_argument("--byte_invariant_blend_grid_size", type=int, default=21)
+    ap.add_argument(
         "--embedding_header_policy",
         choices=["full", "randomize_ip_port", "mask_ip_port", "mask_session_fields"],
         default="full",
@@ -180,14 +195,38 @@ def main() -> None:
                 "--batch_size", str(args.byte_batch_size),
                 "--eval_batch_size", str(args.byte_eval_batch_size),
                 "--packets_per_flow", "8",
-                "--mask_probability", "0",
-                "--masked_ce_weight", "0",
-                "--consistency_weight", "0",
+                "--mask_probability", str(args.byte_mask_probability),
+                "--masked_ce_weight", (
+                    str(args.byte_masked_ce_weight)
+                    if args.byte_ambiguity_aware_targets else "0"
+                ),
+                "--consistency_weight", (
+                    str(args.byte_consistency_weight)
+                    if args.byte_ambiguity_aware_targets else "0"
+                ),
                 "--contrastive_weight", "0",
             ]
         if args.byte_use_payload_channel:
             byte_command.extend(
                 ["--use_payload_channel", "--max_payload_bytes", str(args.byte_max_payload_bytes)]
+            )
+        if args.byte_ambiguity_aware_targets:
+            byte_command.extend(
+                [
+                    "--ambiguity_aware_targets",
+                    "--ambiguity_supervision",
+                    "reliability_gate",
+                    "--ambiguity_gate_strength",
+                    str(args.byte_ambiguity_gate_strength),
+                ]
+            )
+        if args.byte_select_invariant_blend:
+            byte_command.extend(
+                [
+                    "--select_invariant_blend",
+                    "--invariant_blend_grid_size",
+                    str(args.byte_invariant_blend_grid_size),
+                ]
             )
         run(byte_command, args.dry_run)
         for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
