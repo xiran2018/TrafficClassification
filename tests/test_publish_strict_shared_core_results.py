@@ -286,6 +286,11 @@ def test_publish_requires_audits_and_promotes_fixed_consensus(tmp_path, monkeypa
     assert canonical["publication_provenance"]["status"] == "strict_shared_core_v2"
     assert canonical["publication_provenance"]["session_novelty_sha256"]
     assert Path(canonical["publication_provenance"]["session_novelty"]).is_file()
+    method_manifest = canonical["publication_provenance"]["method_archive_manifest"]
+    assert Path(method_manifest).is_file()
+    assert canonical["publication_provenance"][
+        "method_archive_manifest_sha256"
+    ] == file_sha256(method_manifest)
     archive = report["frozen_method_evidence"]
     assert archive["status"] == "verified_and_archived"
     assert archive["schema"] == "strict_shared_core_v2_method_archive_v1"

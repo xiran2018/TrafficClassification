@@ -393,6 +393,8 @@ def publish_canonical_result(
     audit_paths: list[Path],
     candidate: str,
     session_novelty: str,
+    method_archive_manifest: str,
+    method_archive_manifest_sha256: str,
 ) -> None:
     published = dict(payload)
     published["publication_provenance"] = {
@@ -405,6 +407,8 @@ def publish_canonical_result(
         "candidate": candidate,
         "session_novelty": session_novelty,
         "session_novelty_sha256": sha256_file(session_novelty),
+        "method_archive_manifest": method_archive_manifest,
+        "method_archive_manifest_sha256": method_archive_manifest_sha256,
     }
     atomic_write_json(destination, published)
 
@@ -544,6 +548,10 @@ def main() -> None:
             audit_paths=audit_paths,
             candidate=args.packet_candidate,
             session_novelty=str(canonical_packet_novelty),
+            method_archive_manifest=frozen_method_evidence["archive_manifest"],
+            method_archive_manifest_sha256=frozen_method_evidence[
+                "archive_manifest_sha256"
+            ],
         )
         for source, destination in packet_manifest_copies:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -559,6 +567,10 @@ def main() -> None:
             audit_paths=audit_paths,
             candidate=args.flow_candidate,
             session_novelty=str(canonical_flow_novelty),
+            method_archive_manifest=frozen_method_evidence["archive_manifest"],
+            method_archive_manifest_sha256=frozen_method_evidence[
+                "archive_manifest_sha256"
+            ],
         )
         for source, destination in flow_manifest_copies:
             destination.parent.mkdir(parents=True, exist_ok=True)
