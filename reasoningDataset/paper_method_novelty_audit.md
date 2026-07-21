@@ -183,7 +183,41 @@ The current hypothesis is a unified counterfactual Packet-to-Flow representation
 6. Flow classification applies the same Packet module to every packet, then adds window/flow aggregation and a flow head.
 7. A validation-only candidate may add a bounded residual from a fresh Flow-trained packet-evidence head; it is not part of the method unless it beats a matched late-fusion control on both datasets.
 
-The potentially novel object is the complete contract and its counterfactual reliability learning, not any single encoder, loss, or pooling operation.
+The potentially novel object is the complete contract and its testable
+counterfactual-reliability hypothesis, not any single encoder, loss, or pooling
+operation. The current implementation does not by itself establish the
+stronger reliability claim defined below.
+
+### Current Reliability-Claim Limit
+
+The implemented `SharedInterventionViewFusion` observes the factual view, the
+intervened view, their signed difference, and their absolute difference. It
+starts at the symmetric mean and permits only a bounded sample-dependent
+residual. This proves that the intervention can condition the mixture and that
+neither view can be assigned an unbounded shortcut path.
+
+It does **not** yet prove that the router weight estimates view reliability.
+The router currently receives only the downstream task gradient; no loss
+directly identifies which leave-one-view prediction has lower conditional
+risk. Moreover, Tower-1 paired consistency can make the two views similar and
+therefore reduce the very disagreement used by the router. Until additional
+evidence exists, the allowed description is **bounded intervention-conditioned
+fusion**, not identifiable counterfactual reliability learning.
+
+A stronger reliability claim requires, on held-out validation and without
+changing the test decision rule:
+
+- per-view factual-only and intervened-only losses from the same checkpoint;
+- calibration between the learned gate and signed per-view excess loss;
+- non-degenerate gate variation after paired Tower-1 consistency;
+- matched fixed-mean, ordinary random-augmentation, and learned-router
+  controls on both VPN and TLS for both Packet and Flow;
+- a pre-registered training objective if explicit reliability supervision is
+  introduced later.
+
+These diagnostics may falsify the reliability interpretation. They must not be
+used to tune a test-set gate or to rename ordinary mixture-of-experts routing
+as a causal estimator.
 
 ## Required Evidence
 
