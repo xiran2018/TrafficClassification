@@ -123,6 +123,7 @@ def verify_strict_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
         "method_archive_manifest",
         "session_novelty",
         "bootstrap_evidence",
+        "packet_scope_validation_gate",
     ):
         path = Path(str(provenance.get(name) or ""))
         expected = str(provenance.get(f"{name}_sha256") or "")

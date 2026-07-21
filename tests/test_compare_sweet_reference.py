@@ -53,9 +53,11 @@ def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_p
     method = tmp_path / "method_archive.json"
     novelty = tmp_path / "session_novelty.json"
     bootstrap = tmp_path / "bootstrap.json"
+    packet_scope = tmp_path / "packet_scope.json"
     method.write_text('{"status":"verified"}', encoding="utf-8")
     novelty.write_text('{"status":"reported"}', encoding="utf-8")
     bootstrap.write_text('{"method":"flow_cluster_bootstrap"}', encoding="utf-8")
+    packet_scope.write_text('{"all_datasets_pass":true}', encoding="utf-8")
     audits = []
     for fold in range(3):
         audit = tmp_path / f"fold{fold}_audit.json"
@@ -80,6 +82,8 @@ def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_p
         "session_novelty_sha256": digest(novelty),
         "bootstrap_evidence": str(bootstrap),
         "bootstrap_evidence_sha256": digest(bootstrap),
+        "packet_scope_validation_gate": str(packet_scope),
+        "packet_scope_validation_gate_sha256": digest(packet_scope),
     }
     assert verify_strict_provenance(provenance)["status"] == "pass"
 
@@ -103,7 +107,7 @@ def test_status_string_alone_is_not_strict_provenance():
 
 def test_strict_provenance_accepts_explicit_shared_method_fingerprint(tmp_path):
     artifacts = []
-    for index in range(6):
+    for index in range(7):
         path = tmp_path / f"artifact_{index}.json"
         path.write_text("{}", encoding="utf-8")
         artifacts.append(path)
@@ -126,6 +130,8 @@ def test_strict_provenance_accepts_explicit_shared_method_fingerprint(tmp_path):
         "session_novelty_sha256": digest(artifacts[4]),
         "bootstrap_evidence": str(artifacts[5]),
         "bootstrap_evidence_sha256": digest(artifacts[5]),
+        "packet_scope_validation_gate": str(artifacts[6]),
+        "packet_scope_validation_gate_sha256": digest(artifacts[6]),
     }
 
     result = verify_strict_provenance(provenance)

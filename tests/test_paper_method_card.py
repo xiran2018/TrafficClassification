@@ -14,6 +14,8 @@ def _strict_result(path, fingerprint):
     method_archive.write_text('{"status":"verified_and_archived"}', encoding="utf-8")
     bootstrap = path.parent / f"{path.stem}_bootstrap.json"
     bootstrap.write_text('{"method":"flow_cluster_bootstrap"}', encoding="utf-8")
+    packet_scope = path.parent / f"{path.stem}_packet_scope.json"
+    packet_scope.write_text('{"all_datasets_pass":true}', encoding="utf-8")
     audits = []
     for fold in range(3):
         audit = path.parent / f"{path.stem}_fold{fold}_audit.json"
@@ -24,6 +26,7 @@ def _strict_result(path, fingerprint):
     novelty_sha = hashlib.sha256(novelty.read_bytes()).hexdigest()
     method_archive_sha = hashlib.sha256(method_archive.read_bytes()).hexdigest()
     bootstrap_sha = hashlib.sha256(bootstrap.read_bytes()).hexdigest()
+    packet_scope_sha = hashlib.sha256(packet_scope.read_bytes()).hexdigest()
     path.write_text(
         json.dumps(
             {
@@ -47,6 +50,8 @@ def _strict_result(path, fingerprint):
                     "method_archive_manifest_sha256": method_archive_sha,
                     "bootstrap_evidence": str(bootstrap),
                     "bootstrap_evidence_sha256": bootstrap_sha,
+                    "packet_scope_validation_gate": str(packet_scope),
+                    "packet_scope_validation_gate_sha256": packet_scope_sha,
                 }
             }
         ),
