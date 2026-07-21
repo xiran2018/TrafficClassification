@@ -77,6 +77,45 @@
       "launch_gate_unchanged": true
     }
   },
+  "bounded_risk_geometry_amendment": {
+    "created_at": "2026-07-22T06:10:11+08:00",
+    "status": "preregistered_before_complete_validation_histories",
+    "hypothesis": "A single train-derived cap on the maximum-to-minimum effective class-risk ratio avoids dataset-specific hierarchy grids while preserving minority-flow correction.",
+    "shared_algorithm": "largest_flow_risk_power_subject_to_max_min_ratio",
+    "formula": "eta=min(1, log(R)/log(max(w_flow)/min(w_flow)))",
+    "fixed_max_weight_ratio": 4.0,
+    "effective_number_beta": 0.9999,
+    "numeric_derivation": {
+      "path": "/tmp/two_tower_runs/bounded_hierarchy_risk_protocol_train_only.json",
+      "sha256": "4169d55e6b36b40a2f08c7eb6f0f1bbcfc7f8f06e1e8e8642d8c483eb4289101",
+      "vpn-app_eta": 0.49966298917529745,
+      "tls-120_eta": 0.3941907911844552
+    },
+    "evidence_scope": "training_inputs_only",
+    "test_labels_used": false,
+    "validation_protocol": {
+      "required_datasets": ["vpn-app", "tls-120"],
+      "required_validation_points_per_arm": 8,
+      "required_packet_batch_scheduler": "epoch_resampled_dataloader_v1",
+      "required_trainer_source": "identical_to_the_three_arm_factorial",
+      "reference": "validation_selected_eta_from_the_original_preregistered_hierarchy_protocol",
+      "selection_metric": "accuracy_and_macro_f1_noninferiority",
+      "maximum_accuracy_drop": 0.003,
+      "maximum_macro_f1_drop": 0.003,
+      "promotion_scope": "same_bounded_risk_algorithm_must_pass_every_dataset",
+      "tie_break": "prefer_the_train_derived_bounded_rule_only_after_cross_dataset_noninferiority",
+      "test_labels_used": false
+    },
+    "state_at_amendment": {
+      "vpn_packet_full_validation_points": 8,
+      "vpn_flow_sqrt_validation_points": 8,
+      "vpn_flow_full_validation_points": 5,
+      "tls_packet_full_validation_points": 3,
+      "tls_flow_sqrt_validation_points": 4,
+      "tls_flow_full_validation_points": 0,
+      "all_original_required_histories_complete": false
+    }
+  },
   "state_at_preregistration": {
     "vpn_flow_sqrt_validation_points": 6,
     "vpn_flow_full_validation_points": 3,
