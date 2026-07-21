@@ -43,6 +43,35 @@ def flow_balanced_objective_exposure(
     }
 
 
+def same_flow_identity_collision_exposure(
+    flow_packet_counts: Dict[str, int], packets_per_flow: int
+) -> dict:
+    """Expected duplicate-identity share among directed same-flow pairs."""
+    if packets_per_flow <= 1 or not flow_packet_counts:
+        return {
+            "same_flow_positive_pairs_per_epoch": 0,
+            "expected_duplicate_identity_positive_pairs_per_epoch": 0.0,
+            "expected_distinct_identity_positive_pairs_per_epoch": 0.0,
+            "expected_same_flow_positive_identity_collision_rate": 0.0,
+        }
+
+    directed_pairs_per_flow = packets_per_flow * (packets_per_flow - 1)
+    total_pairs = len(flow_packet_counts) * directed_pairs_per_flow
+    # Short flows are sampled independently with replacement. For any ordered
+    # pair of draws from a flow containing n packets, P[same identity] = 1 / n.
+    duplicate_pairs = directed_pairs_per_flow * sum(
+        1.0 / count
+        for count in flow_packet_counts.values()
+        if count < packets_per_flow
+    )
+    return {
+        "same_flow_positive_pairs_per_epoch": total_pairs,
+        "expected_duplicate_identity_positive_pairs_per_epoch": duplicate_pairs,
+        "expected_distinct_identity_positive_pairs_per_epoch": total_pairs - duplicate_pairs,
+        "expected_same_flow_positive_identity_collision_rate": duplicate_pairs / total_pairs,
+    }
+
+
 def audit(
     path: Path,
     method: str,
@@ -77,6 +106,9 @@ def audit(
     sampled_slots = len(flow_packet_counts) * packets_per_flow
     class_short_counts = Counter(flow_labels[flow_id] for flow_id in short_flows)
     length_histogram = Counter(min(count, 10) for count in flow_packet_counts.values())
+    identity_collision = same_flow_identity_collision_exposure(
+        flow_packet_counts, packets_per_flow
+    )
     flow_count_weights = {
         str(strength): normalized_class_weights(flow_counts, method, beta, strength)
         for strength in strengths
@@ -103,9 +135,11 @@ def audit(
             "replacement_slot_rate": replacement_slots / max(sampled_slots, 1),
             "class_flows_requiring_replacement": dict(sorted(class_short_counts.items())),
             "length_histogram_capped_at_10": dict(sorted(length_histogram.items())),
+            **identity_collision,
             "supcon_interpretation": (
-                "replacement rows preserve flow-balanced CE exposure but create "
-                "duplicate-packet same-flow pairs unless packet identity is masked"
+                "replacement rows preserve flow-balanced CE exposure; the reported "
+                "collision rate is the expected share of directed same-flow pairs "
+                "whose two rows are copies of one packet identity"
             ),
         },
         "packet_imbalance_ratio": max(packet_counts.values()) / max(min(packet_counts.values()), 1),
@@ -170,6 +204,13 @@ def main() -> None:
             f"({flow_audit['flow_replacement_rate']:.2%}), "
             f"slots={flow_audit['replacement_slots_per_epoch']} "
             f"({flow_audit['replacement_slot_rate']:.2%})"
+        )
+        print(
+            "  same-flow SupCon identity collision: "
+            f"expected_pairs="
+            f"{flow_audit['expected_duplicate_identity_positive_pairs_per_epoch']:.2f}/"
+            f"{flow_audit['same_flow_positive_pairs_per_epoch']} "
+            f"({flow_audit['expected_same_flow_positive_identity_collision_rate']:.2%})"
         )
         for strength, weights in report["flow_count_weights"].items():
             exposure = report["flow_balanced_objective_exposure"][strength]

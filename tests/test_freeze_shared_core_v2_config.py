@@ -1,12 +1,22 @@
 import hashlib
 import json
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from freeze_shared_core_v2_config import canonical_sha256, freeze_config
 
 
-def report(tmp_path, prefix, selected="baseline", datasets=("vpn-app", "tls-120")):
+def report(
+    tmp_path,
+    prefix,
+    selected="baseline",
+    datasets=("vpn-app", "tls-120"),
+    *,
+    screen="balance",
+    paired_basis="packet",
+):
     promoted = selected == "candidate"
     payload = {
         "selection_scope": "heldout_validation_only",
@@ -37,7 +47,43 @@ def report(tmp_path, prefix, selected="baseline", datasets=("vpn-app", "tls-120"
             artifacts = {}
             for kind in ("metric", "final_checkpoint", "validation_history", "provenance"):
                 path = tmp_path / f"{prefix}_{role}_{name}_{kind}"
-                path.write_text(f"{prefix}:{role}:{name}:{kind}", encoding="utf-8")
+                if kind == "provenance":
+                    if screen == "balance":
+                        basis = "flow" if role == "candidate" else "packet"
+                        strength = 0.5 if role == "candidate" else 1.0
+                        paired_enabled = False
+                    else:
+                        basis = paired_basis
+                        strength = 0.5 if basis == "flow" else 1.0
+                        paired_enabled = role == "candidate"
+                    config = {
+                        "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
+                        "class_weighting": "effective",
+                        "class_weight_basis": basis,
+                        "class_weight_strength": strength,
+                        "disable_packet_information_weights": True,
+                        "flow_balanced_packet_batches": True,
+                        "packets_per_flow": 2,
+                        "no_sft": True,
+                        "paired_packet_aux_jsonl": (
+                            f"{name}_paired.jsonl" if paired_enabled else ""
+                        ),
+                        "paired_consistency_weight": 0.05 if paired_enabled else 0.0,
+                        "paired_cls_weight": 0.2 if paired_enabled else 0.0,
+                        "paired_logit_kl_weight": 0.5,
+                        "paired_raw_consistency_weight": 1.0,
+                    }
+                    path.write_text(
+                        json.dumps(
+                            {
+                                "schema": "tower1_training_contract_v1",
+                                "training_config": config,
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    path.write_text(f"{prefix}:{role}:{name}:{kind}", encoding="utf-8")
                 artifacts[kind] = path
             rows[name] = {
                 "validation_points": 8,
@@ -76,6 +122,14 @@ def report(tmp_path, prefix, selected="baseline", datasets=("vpn-app", "tls-120"
     return payload
 
 
+def bind_paired_baseline(paired, balance):
+    selected = balance["selected"]
+    paired["training_completion_evidence"]["baseline"] = deepcopy(
+        balance["training_completion_evidence"][selected]
+    )
+    return paired
+
+
 def write_report(path, payload):
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -83,7 +137,16 @@ def write_report(path, payload):
 
 def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
     balance = report(tmp_path, "balance", "candidate")
-    paired = report(tmp_path, "paired", "baseline")
+    paired = bind_paired_baseline(
+        report(
+            tmp_path,
+            "paired",
+            "baseline",
+            screen="paired",
+            paired_basis="flow",
+        ),
+        balance,
+    )
     balance_path = write_report(tmp_path / "balance.json", balance)
     paired_path = write_report(tmp_path / "paired.json", paired)
 
@@ -127,7 +190,16 @@ def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
 
 def test_freeze_promotes_paired_invariance_only_when_both_datasets_pass(tmp_path):
     balance = report(tmp_path, "balance", "baseline")
-    paired = report(tmp_path, "paired", "candidate")
+    paired = bind_paired_baseline(
+        report(
+            tmp_path,
+            "paired",
+            "candidate",
+            screen="paired",
+            paired_basis="packet",
+        ),
+        balance,
+    )
     frozen = freeze_config(
         balance,
         paired,
@@ -232,4 +304,53 @@ def test_freeze_recomputes_dual_metric_selection(tmp_path):
             valid,
             balance_path=write_report(tmp_path / "invalid_gate.json", invalid),
             paired_path=write_report(tmp_path / "valid_gate.json", valid),
+        )
+
+
+def test_freeze_rejects_unbound_paired_baseline(tmp_path):
+    balance = report(tmp_path, "balance", "candidate")
+    paired = report(
+        tmp_path,
+        "paired",
+        "baseline",
+        screen="paired",
+        paired_basis="flow",
+    )
+
+    with pytest.raises(ValueError, match="artifact-identical"):
+        freeze_config(
+            balance,
+            paired,
+            balance_path=write_report(tmp_path / "balance.json", balance),
+            paired_path=write_report(tmp_path / "unbound_paired.json", paired),
+        )
+
+
+def test_freeze_rejects_wrong_paired_candidate_config(tmp_path):
+    balance = report(tmp_path, "balance", "candidate")
+    paired = bind_paired_baseline(
+        report(
+            tmp_path,
+            "paired",
+            "candidate",
+            screen="paired",
+            paired_basis="flow",
+        ),
+        balance,
+    )
+    row = paired["training_completion_evidence"]["candidate"]["datasets"][
+        "vpn-app"
+    ]
+    contract_path = Path(row["provenance_path"])
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["training_config"]["paired_cls_weight"] = 0.0
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+    row["provenance_sha256"] = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="paired_cls_weight"):
+        freeze_config(
+            balance,
+            paired,
+            balance_path=write_report(tmp_path / "balance_valid.json", balance),
+            paired_path=write_report(tmp_path / "paired_wrong_config.json", paired),
         )

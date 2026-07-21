@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -169,6 +170,113 @@ def validate_selection(report: dict[str, Any], name: str) -> None:
         )
 
 
+def training_config(row: dict[str, Any], context: str) -> dict[str, Any]:
+    path = Path(str(row.get("provenance_path") or ""))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        config = payload["training_config"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{context} has no readable Tower1 training config") from exc
+    if payload.get("schema") != "tower1_training_contract_v1":
+        raise ValueError(f"{context} is not a Tower1 training contract")
+    return config
+
+
+def require_config(
+    config: dict[str, Any], expected: dict[str, Any], context: str
+) -> None:
+    for key, wanted in expected.items():
+        observed = config.get(key)
+        if isinstance(wanted, float):
+            matches = isinstance(observed, (int, float)) and math.isclose(
+                float(observed), wanted, rel_tol=0.0, abs_tol=1e-12
+            )
+        else:
+            matches = observed == wanted
+        if not matches:
+            raise ValueError(
+                f"{context} training config mismatch for {key}: "
+                f"observed={observed!r}, expected={wanted!r}"
+            )
+
+
+def validate_experiment_chain(
+    balance_report: dict[str, Any], paired_report: dict[str, Any]
+) -> None:
+    common = {
+        "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
+        "class_weighting": "effective",
+        "disable_packet_information_weights": True,
+        "flow_balanced_packet_batches": True,
+        "packets_per_flow": 2,
+        "no_sft": True,
+    }
+    balance_completion = balance_report["training_completion_evidence"]
+    expected_balance = {
+        "baseline": {
+            **common,
+            "class_weight_basis": "packet",
+            "class_weight_strength": 1.0,
+            "paired_consistency_weight": 0.0,
+            "paired_cls_weight": 0.0,
+        },
+        "candidate": {
+            **common,
+            "class_weight_basis": "flow",
+            "class_weight_strength": 0.5,
+            "paired_consistency_weight": 0.0,
+            "paired_cls_weight": 0.0,
+        },
+    }
+    for role, expected in expected_balance.items():
+        for dataset, row in balance_completion[role]["datasets"].items():
+            require_config(
+                training_config(row, f"balance {role} {dataset}"),
+                expected,
+                f"balance {role} {dataset}",
+            )
+
+    selected_role = balance_report["selected"]
+    selected_rows = balance_completion[selected_role]["datasets"]
+    paired_completion = paired_report["training_completion_evidence"]
+    paired_baseline_rows = paired_completion["baseline"]["datasets"]
+    identity_fields = (
+        "metric_sha256",
+        "final_checkpoint_sha256",
+        "validation_history_sha256",
+        "provenance_sha256",
+    )
+    for dataset in sorted(REQUIRED_DATASETS):
+        if any(
+            paired_baseline_rows[dataset].get(field)
+            != selected_rows[dataset].get(field)
+            for field in identity_fields
+        ):
+            raise ValueError(
+                "paired selection baseline is not the artifact-identical "
+                f"balance-selected run for {dataset}"
+            )
+
+    selected_basis = "flow" if selected_role == "candidate" else "packet"
+    selected_strength = 0.5 if selected_role == "candidate" else 1.0
+    paired_expected = {
+        **common,
+        "class_weight_basis": selected_basis,
+        "class_weight_strength": selected_strength,
+        "paired_consistency_weight": 0.05,
+        "paired_cls_weight": 0.2,
+        "paired_logit_kl_weight": 0.5,
+        "paired_raw_consistency_weight": 1.0,
+    }
+    for dataset, row in paired_completion["candidate"]["datasets"].items():
+        config = training_config(row, f"paired candidate {dataset}")
+        require_config(config, paired_expected, f"paired candidate {dataset}")
+        if not config.get("paired_packet_aux_jsonl"):
+            raise ValueError(
+                f"paired candidate {dataset} has no paired intervention input"
+            )
+
+
 def freeze_config(
     balance_report: dict[str, Any],
     paired_report: dict[str, Any],
@@ -178,6 +286,7 @@ def freeze_config(
 ) -> dict[str, Any]:
     validate_selection(balance_report, "balance selection")
     validate_selection(paired_report, "paired selection")
+    validate_experiment_chain(balance_report, paired_report)
 
     use_flow_weights = balance_report["selected"] == "candidate"
     use_paired_invariance = paired_report["selected"] == "candidate"

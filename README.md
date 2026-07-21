@@ -5062,6 +5062,27 @@ positive. This is a training-data diagnostic, not evidence for changing the
 method: a duplicate-identity contrastive mask requires a matched VPN/TLS
 validation ablation before it may enter the shared core.
 
+The slot rate understates the contrastive risk. SupCon forms directed pairs,
+and the two sampled positions of every singleton flow are the same packet. The
+audit therefore also reports the expected duplicate-identity share among all
+directed same-flow pairs. For fold 0 this is `57.14%` on VPN and `28.85%` on
+TLS-120, exactly the singleton-flow rate when `packets_per_flow=2`. More
+generally, a short flow with `n < k` packets sampled `k` times with replacement
+contributes an expected identity-collision probability of `1/n` per ordered
+pair; flows with at least `k` packets are sampled without replacement and
+contribute zero. This quantity concerns only same-flow positive construction,
+not CE exposure or test performance.
+
+An **identity-safe flow-aware SupCon** candidate is pre-registered after the
+current sampler-aware class-balance and paired-view screens. It will carry a
+stable packet identity into the loss and exclude alias copies from both the
+positive mask and contrastive denominator while retaining the same
+flow-balanced batches. It is not part of the running strict-v2 method and will
+not be promoted from this audit alone. Promotion requires matched from-scratch
+VPN/TLS held-out histories under one unchanged implementation, best macro-F1
+gain of at least `0.005` on both datasets, and no held-out accuracy drop larger
+than `0.005`; test labels remain unavailable to the decision.
+
 `train_tower1_multitask.py` now supports `--class_weight_basis {packet,flow}` and `--class_weight_strength ALPHA`. For normalized class-balanced weight `w_c`, the applied weight is proportional to `w_c ** ALPHA` and is renormalized to mean one. `ALPHA=0` disables class reweighting and `ALPHA=1` applies full correction. Both the packet-level and flow-level runners expose the same mechanism, so this is a shared Tower-1 objective rather than a dataset-specific classifier trick.
 
 The running `paper_unified` baselines retain the historical `packet` basis and are not changed retroactively. The pre-registered next comparison is:
@@ -5397,10 +5418,26 @@ conda run -n llm-factory python freeze_shared_core_v2_config.py \
   --output_json /tmp/two_tower_runs/shared_core_v2/frozen_config.json
 ```
 
-The freezer accepts exactly the VPN and TLS-120 reports, requires the same candidate to pass both datasets under held-out validation macro-F1, and records SHA-256 hashes of both reports plus a canonical config fingerprint. Each selection report must prove that baseline and candidate training both produced a final Tower1 checkpoint and exactly eight validation-history entries for each dataset; an intermediate `best_packet_validation_metrics.json` is rejected even if its score is high, while an appended history from a reused output directory is rejected as contaminated. It fixes one packet-core architecture, native pretraining protocol, content-group risk, and Tower1 weighting/invariance choice for both tasks. Dataset-specific manual switches and test-label selection are explicitly prohibited in the frozen contract.
+The freezer accepts exactly the VPN and TLS-120 reports, requires the same
+candidate to pass both datasets under the fixed Macro-F1/Accuracy dual gate,
+and records SHA-256 hashes of both reports plus a canonical config fingerprint.
+It re-hashes every metric, final checkpoint, validation history, and training
+contract. The paired screen baseline must be artifact-identical to the arm
+selected by the balance screen, and the contracts must prove the pre-registered
+`packet,1.0 -> flow,0.5 -> paired-invariance` A/B/C configuration rather than
+merely carrying those names in an output path. Each selection report must prove
+that baseline and candidate training both produced a final Tower1 checkpoint
+and exactly eight validation-history entries for each dataset; an intermediate
+`best_packet_validation_metrics.json` is rejected even if its score is high,
+while an appended history from a reused output directory is rejected as
+contaminated. It fixes one packet-core architecture, native pretraining
+protocol, content-group risk, and Tower1 weighting/invariance choice for both
+tasks. Dataset-specific manual switches and test-label selection are explicitly
+prohibited in the frozen contract.
 
 The selector also parses every history row and requires the recorded best step
-and Macro-F1 to equal the maximum in `packet_validation_history.jsonl`. A stale
+to reproduce Tower1's `(select metric, Macro-F1, Accuracy)` checkpoint ordering
+in `packet_validation_history.jsonl`. A stale
 or hand-copied best-metrics file therefore cannot pass merely because the final
 checkpoint and an eight-line history happen to coexist in the same directory.
 The selection JSON additionally retains best-to-final regression, matched-step

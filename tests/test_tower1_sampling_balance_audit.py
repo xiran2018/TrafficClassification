@@ -6,6 +6,7 @@ from analyze_tower1_sampling_balance import (
     audit,
     flow_balanced_objective_exposure,
     normalized_class_weights,
+    same_flow_identity_collision_exposure,
 )
 
 
@@ -34,6 +35,10 @@ def test_sampling_audit_reports_packet_and_flow_imbalance(tmp_path):
     assert flow_audit["sampled_slots_per_epoch"] == 6
     assert flow_audit["replacement_slot_rate"] == pytest.approx(1 / 6)
     assert flow_audit["class_flows_requiring_replacement"] == {0: 1}
+    assert flow_audit["same_flow_positive_pairs_per_epoch"] == 6
+    assert flow_audit["expected_duplicate_identity_positive_pairs_per_epoch"] == 2
+    assert flow_audit["expected_distinct_identity_positive_pairs_per_epoch"] == 4
+    assert flow_audit["expected_same_flow_positive_identity_collision_rate"] == pytest.approx(1 / 3)
 
 
 def test_weight_strength_interpolates_without_changing_mean():
@@ -61,3 +66,23 @@ def test_sampling_audit_rejects_nonpositive_packets_per_flow(tmp_path):
     path.write_text("", encoding="utf-8")
     with pytest.raises(ValueError, match="must be positive"):
         audit(path, method="effective", beta=0.9999, strengths=[1.0], packets_per_flow=0)
+
+
+def test_identity_collision_expectation_handles_general_short_flows():
+    exposure = same_flow_identity_collision_exposure(
+        {"singleton": 1, "two_packets": 2, "long": 4},
+        packets_per_flow=3,
+    )
+
+    assert exposure["same_flow_positive_pairs_per_epoch"] == 18
+    assert exposure["expected_duplicate_identity_positive_pairs_per_epoch"] == 9
+    assert exposure["expected_distinct_identity_positive_pairs_per_epoch"] == 9
+    assert exposure["expected_same_flow_positive_identity_collision_rate"] == 0.5
+
+
+def test_identity_collision_is_zero_without_positive_pairs():
+    exposure = same_flow_identity_collision_exposure(
+        {"singleton": 1, "long": 4}, packets_per_flow=1
+    )
+    assert exposure["same_flow_positive_pairs_per_epoch"] == 0
+    assert exposure["expected_same_flow_positive_identity_collision_rate"] == 0.0
