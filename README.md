@@ -5133,6 +5133,20 @@ valid positives. A memory bank or another expert is not introduced unless
 both bounded candidates fail and a new validation-only hypothesis is
 pre-registered.
 
+The same SHA-bound audit was repeated on all three ready-made training folds,
+not selected from fold 0. Every random/paired replay produced exactly
+`epochs * ceil(num_flows / flows_per_batch)` batches. Cross-fold ranges are:
+
+| Dataset | random alias positive mass | random identity-safe positive coverage | paired alias positive mass | paired identity-safe positive coverage |
+| --- | ---: | ---: | ---: | ---: |
+| VPN-app | 33.34-35.32% | 80.31-82.44% | 21.70-22.81% | 99.92-99.96% |
+| TLS-120 | 16.94-31.04% | 81.46-90.74% | 8.80-16.11% | 99.95-99.98% |
+
+The ranges are descriptive training-input evidence. They establish that the
+alias mechanism and the coverage repair recur across splits, but they do not
+establish representation quality or justify promotion without the matched
+held-out experiments below.
+
 This mechanism must not be described as the first field augmentation or the
 first flow contrastive objective. TrafficFormer already randomizes selected
 header fields, MIETT already pulls packets from one flow together, and SWEET
