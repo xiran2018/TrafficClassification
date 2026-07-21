@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from freeze_identity_cross_scale_config import freeze_method_config
+from freeze_identity_cross_scale_config import (
+    D1_FACTORIAL_FIELDS,
+    D2_INCREMENTAL_FACTORIAL_FIELDS,
+    D2_OVERALL_FACTORIAL_FIELDS,
+    freeze_method_config,
+)
 from freeze_shared_core_v2_config import canonical_sha256
 
 
@@ -26,6 +31,15 @@ def selection(selected: str, min_delta: float):
             "candidate": {"status": "pass"},
         },
         "training_implementation_consistency": {"status": "pass"},
+        "factorial_config_integrity": {
+            "required": True,
+            "status": "pass",
+            "declared_factorial_fields": sorted(D1_FACTORIAL_FIELDS),
+            "datasets": {
+                name: {"status": "pass"}
+                for name in ("vpn-app", "tls-120")
+            },
+        },
     }
 
 
@@ -69,6 +83,14 @@ def cross_scale_exposure(tmp_path, active_rate=0.6):
 
 
 def finalize(tmp_path, d1, incremental=None, overall=None, exposure=None):
+    if incremental is not None:
+        incremental["factorial_config_integrity"][
+            "declared_factorial_fields"
+        ] = sorted(D2_INCREMENTAL_FACTORIAL_FIELDS)
+    if overall is not None:
+        overall["factorial_config_integrity"][
+            "declared_factorial_fields"
+        ] = sorted(D2_OVERALL_FACTORIAL_FIELDS)
     base = {
         "schema": "exact_shared_packet_core_v2",
         "status": "frozen_from_cross_dataset_validation",
@@ -137,6 +159,13 @@ def test_d1_failure_freezes_control_and_forbids_d2(tmp_path):
             selection("candidate", 0.002),
             selection("candidate", 0.005),
         )
+
+
+def test_d1_rejects_missing_factorial_integrity(tmp_path):
+    d1 = selection("baseline", 0.005)
+    d1.pop("factorial_config_integrity")
+    with pytest.raises(ValueError, match="factorial-integrity"):
+        finalize(tmp_path, d1)
 
 
 def test_d1_success_d2_failure_freezes_identity_safe_only(tmp_path):

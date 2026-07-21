@@ -4,7 +4,7 @@ import json
 import math
 import statistics
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 
 def file_sha256(path: Path) -> str:
@@ -241,6 +241,56 @@ def training_implementation_consistency_evidence(completion: dict) -> dict:
     }
 
 
+def training_factorial_integrity_evidence(
+    completion: dict,
+    allowed_difference_fields: set[str],
+) -> dict[str, Any]:
+    """Require every A/B pair to differ only in preregistered config fields."""
+    if not allowed_difference_fields:
+        raise ValueError("factorial integrity requires declared difference fields")
+    datasets = sorted(completion["baseline"]["datasets"])
+    evidence: dict[str, Any] = {}
+    passed = True
+    missing = object()
+    for dataset in datasets:
+        configs = {}
+        for arm in ("baseline", "candidate"):
+            row = completion[arm]["datasets"][dataset]
+            path = Path(str(row.get("provenance_path") or ""))
+            try:
+                contract = json.loads(path.read_text(encoding="utf-8"))
+                if contract.get("schema") != "tower1_training_contract_v1":
+                    raise ValueError("not a Tower1 training contract")
+                configs[arm] = contract["training_config"]
+            except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"factorial integrity requires readable training config for "
+                    f"{arm} {dataset}"
+                ) from exc
+        keys = sorted(
+            (set(configs["baseline"]) | set(configs["candidate"]))
+            - allowed_difference_fields
+        )
+        mismatched = [
+            key
+            for key in keys
+            if configs["baseline"].get(key, missing)
+            != configs["candidate"].get(key, missing)
+        ]
+        dataset_passed = not mismatched
+        passed = passed and dataset_passed
+        evidence[dataset] = {
+            "status": "pass" if dataset_passed else "fail",
+            "mismatched_fields": mismatched,
+        }
+    return {
+        "required": True,
+        "status": "pass" if passed else "fail",
+        "declared_factorial_fields": sorted(allowed_difference_fields),
+        "datasets": evidence,
+    }
+
+
 def select_candidate(
     baseline_paths: Dict[str, Path],
     candidate_paths: Dict[str, Path],
@@ -379,6 +429,15 @@ def main() -> None:
         default="",
         help="Require a completed Tower1 contract with this batch scheduler.",
     )
+    ap.add_argument(
+        "--factorial_field",
+        action="append",
+        default=[],
+        help=(
+            "Training-config field allowed to differ between A/B arms. Supplying "
+            "one or more fields enables strict factorial-integrity validation."
+        ),
+    )
     ap.add_argument("--output_json", required=True)
     args = ap.parse_args()
     baseline_paths = parse_named_paths(args.baseline)
@@ -406,6 +465,18 @@ def main() -> None:
             "Unified Tower1 selection requires one trainer source SHA across "
             "every completed baseline/candidate run"
         )
+    factorial_integrity = None
+    if args.factorial_field:
+        declared_fields = set(args.factorial_field)
+        if len(declared_fields) != len(args.factorial_field):
+            raise ValueError("duplicate --factorial_field declaration")
+        factorial_integrity = training_factorial_integrity_evidence(
+            completion, declared_fields
+        )
+        if factorial_integrity["status"] != "pass":
+            raise ValueError(
+                "baseline/candidate differ outside declared factorial fields"
+            )
     payload = select_candidate(
         baseline_paths,
         candidate_paths,
@@ -414,6 +485,8 @@ def main() -> None:
     )
     payload["training_completion_evidence"] = completion
     payload["training_implementation_consistency"] = implementation
+    if factorial_integrity is not None:
+        payload["factorial_config_integrity"] = factorial_integrity
     payload["training_dynamics_evidence"] = training_dynamics_evidence(
         baseline_paths, candidate_paths
     )

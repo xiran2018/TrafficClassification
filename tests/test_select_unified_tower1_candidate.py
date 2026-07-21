@@ -11,6 +11,7 @@ from select_unified_tower1_candidate import (
     select_candidate,
     training_completion_evidence,
     training_dynamics_evidence,
+    training_factorial_integrity_evidence,
     training_implementation_consistency_evidence,
 )
 
@@ -292,6 +293,38 @@ def test_unified_selection_requires_one_trainer_source_across_all_runs():
     assert rejected["trainer_source_sha256"] is None
 
 
+def test_factorial_integrity_rejects_undeclared_config_difference(tmp_path):
+    completion = {"baseline": {"datasets": {}}, "candidate": {"datasets": {}}}
+    for dataset in ("vpn-app", "tls-120"):
+        for arm, identity_safe, learning_rate in (
+            ("baseline", False, 1e-5),
+            ("candidate", True, 2e-5 if dataset == "tls-120" else 1e-5),
+        ):
+            path = tmp_path / f"{dataset}_{arm}_contract.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema": "tower1_training_contract_v1",
+                        "training_config": {
+                            "identity_safe_contrastive": identity_safe,
+                            "lr": learning_rate,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completion[arm]["datasets"][dataset] = {
+                "provenance_path": str(path)
+            }
+
+    result = training_factorial_integrity_evidence(
+        completion, {"identity_safe_contrastive"}
+    )
+    assert result["status"] == "fail"
+    assert result["datasets"]["vpn-app"]["status"] == "pass"
+    assert result["datasets"]["tls-120"]["mismatched_fields"] == ["lr"]
+
+
 def test_cli_emits_dual_metric_and_trainer_consistency_evidence(tmp_path):
     baseline = {
         dataset: write_completion_artifacts(
@@ -323,6 +356,8 @@ def test_cli_emits_dual_metric_and_trainer_consistency_evidence(tmp_path):
             "0.005",
             "--max_accuracy_drop",
             "0.005",
+            "--factorial_field",
+            "identity_safe_contrastive",
             "--output_json",
             str(output),
         ]
@@ -345,6 +380,10 @@ def test_cli_emits_dual_metric_and_trainer_consistency_evidence(tmp_path):
     assert report["training_implementation_consistency"][
         "trainer_source_sha256"
     ] == "a" * 64
+    assert report["factorial_config_integrity"]["status"] == "pass"
+    assert report["factorial_config_integrity"][
+        "declared_factorial_fields"
+    ] == ["identity_safe_contrastive"]
     assert all(
         row["accuracy_guard_passes"] is True
         for row in report["datasets"].values()

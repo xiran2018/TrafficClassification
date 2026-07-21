@@ -15,6 +15,13 @@ from shared_core_v2 import load_frozen_shared_core
 
 REQUIRED_DATASETS = {"vpn-app", "tls-120"}
 MIN_CROSS_SCALE_ACTIVE_ANCHOR_RATE = 0.5
+D1_FACTORIAL_FIELDS = {"identity_safe_contrastive"}
+D2_INCREMENTAL_FACTORIAL_FIELDS = {
+    "cross_scale_weight",
+    "cross_scale_temperature",
+    "paired_packet_aux_jsonl",
+}
+D2_OVERALL_FACTORIAL_FIELDS = D1_FACTORIAL_FIELDS | D2_INCREMENTAL_FACTORIAL_FIELDS
 
 
 def validate_selection(
@@ -22,6 +29,7 @@ def validate_selection(
     *,
     name: str,
     min_delta: float,
+    factorial_fields: set[str],
 ) -> None:
     if report.get("selection_scope") != "heldout_validation_only":
         raise ValueError(f"{name} must use heldout validation only")
@@ -51,15 +59,33 @@ def validate_selection(
     implementation = report.get("training_implementation_consistency") or {}
     if implementation.get("status") != "pass":
         raise ValueError(f"{name} does not prove one trainer source across arms")
+    factorial = report.get("factorial_config_integrity") or {}
+    if not (
+        factorial.get("required") is True
+        and factorial.get("status") == "pass"
+        and set(factorial.get("declared_factorial_fields") or [])
+        == factorial_fields
+        and set((factorial.get("datasets") or {}).keys()) == REQUIRED_DATASETS
+        and all(
+            row.get("status") == "pass"
+            for row in factorial["datasets"].values()
+        )
+    ):
+        raise ValueError(f"{name} lacks matching factorial-integrity evidence")
 
 
 def evidence(path: Path, report: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "path": str(path.resolve()),
         "sha256": file_sha256(path),
         "selected": report["selected"],
         "datasets": report["datasets"],
     }
+    if "factorial_config_integrity" in report:
+        result["factorial_config_integrity"] = report[
+            "factorial_config_integrity"
+        ]
+    return result
 
 
 def validate_flow_noninferiority(report: dict[str, Any]) -> None:
@@ -153,7 +179,12 @@ def freeze_method_config(
     flow_noninferiority: dict[str, Any] | None = None,
     flow_noninferiority_path: Path | None = None,
 ) -> dict[str, Any]:
-    validate_selection(d1, name="D1 identity-safe", min_delta=0.005)
+    validate_selection(
+        d1,
+        name="D1 identity-safe",
+        min_delta=0.005,
+        factorial_fields=D1_FACTORIAL_FIELDS,
+    )
     identity_safe = d1["selected"] == "candidate"
     cross_scale = False
 
@@ -171,9 +202,17 @@ def freeze_method_config(
         assert d2_incremental is not None and d2_incremental_path is not None
         assert d2_overall is not None and d2_overall_path is not None
         validate_selection(
-            d2_incremental, name="D2 incremental", min_delta=0.002
+            d2_incremental,
+            name="D2 incremental",
+            min_delta=0.002,
+            factorial_fields=D2_INCREMENTAL_FACTORIAL_FIELDS,
         )
-        validate_selection(d2_overall, name="D2 overall", min_delta=0.005)
+        validate_selection(
+            d2_overall,
+            name="D2 overall",
+            min_delta=0.005,
+            factorial_fields=D2_OVERALL_FACTORIAL_FIELDS,
+        )
         if cross_scale_exposure is None or cross_scale_exposure_path is None:
             raise ValueError("D2 requires the exact-sampler exposure audit")
         validate_cross_scale_exposure(cross_scale_exposure)
