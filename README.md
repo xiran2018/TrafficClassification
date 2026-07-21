@@ -5172,8 +5172,11 @@ after the running A/B/C screens freeze their winner and are evaluated
 sequentially, so alias removal and relation pairing remain separately
 attributable. Each promotion first requires the same VPN/TLS Packet held-out
 dual gate above, followed by matched Flow held-out non-inferiority under the
-identical implementation and step budget. No test prediction may select either
-stage.
+identical implementation and step budget. Flow non-inferiority is fixed as no
+Macro-F1 drop greater than `0.005` and no Accuracy drop greater than `0.005`
+on either VPN or TLS-120 held-out validation. D2 is compared against the
+promoted D1 arm, not against whichever earlier arm makes its delta look best.
+No test prediction may select either stage.
 
 `train_tower1_multitask.py` now supports `--class_weight_basis {packet,flow}` and `--class_weight_strength ALPHA`. For normalized class-balanced weight `w_c`, the applied weight is proportional to `w_c ** ALPHA` and is renormalized to mean one. `ALPHA=0` disables class reweighting and `ALPHA=1` applies full correction. Both the packet-level and flow-level runners expose the same mechanism, so this is a shared Tower-1 objective rather than a dataset-specific classifier trick.
 

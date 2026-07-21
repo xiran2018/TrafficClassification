@@ -212,7 +212,10 @@ TLS. The ordered validation screen is:
 2. only if identity masking passes, random pairing versus identity-safe
    same-class flow pairing;
 3. promotion only for a validation gain on both VPN and TLS Packet, followed by
-   Flow non-inferiority under the same relation rule.
+   Flow non-inferiority under the same relation rule. Packet promotion requires
+   at least `+0.005` Macro-F1 on each dataset with no Accuracy drop over
+   `0.005`; Flow non-inferiority permits at most `0.005` loss in either metric
+   on either dataset. D2 is compared only with promoted D1.
 
 The audit-only same-class pairing replay raises identity-safe positive coverage
 to 99.95% on VPN and 99.96% on TLS while reducing alias-positive mass to 21.77%
