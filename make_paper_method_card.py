@@ -211,7 +211,10 @@ def strict_shared_core_publication_status() -> Dict[str, Any]:
                     provenance = load_json(str(path)).get("publication_provenance") or {}
                 except Exception as exc:
                     error = str(exc)
-            fingerprint = provenance.get("shared_core_config_sha256")
+            fingerprint = (
+                provenance.get("shared_core_method_sha256")
+                or provenance.get("shared_core_config_sha256")
+            )
             provenance_verification = verify_strict_provenance(provenance)
             novelty_verified = not any(
                 reason.startswith("missing_session_novelty")
@@ -233,6 +236,7 @@ def strict_shared_core_publication_status() -> Dict[str, Any]:
                     "path": str(path),
                     "exists": path.is_file(),
                     "status": provenance.get("status"),
+                    "shared_core_method_sha256": fingerprint,
                     "shared_core_config_sha256": fingerprint,
                     "session_novelty": provenance.get("session_novelty"),
                     "session_novelty_sha256": provenance.get(
@@ -257,6 +261,7 @@ def strict_shared_core_publication_status() -> Dict[str, Any]:
         "all_results_have_strict_provenance": all_pass,
         "all_session_novelty_evidence_verified": session_novelty_ready,
         "single_shared_core_config": same_fingerprint,
+        "shared_core_method_sha256": next(iter(fingerprints)) if same_fingerprint else None,
         "shared_core_config_sha256": next(iter(fingerprints)) if same_fingerprint else None,
         "ready": bool(all_pass and same_fingerprint),
     }

@@ -99,3 +99,36 @@ def test_status_string_alone_is_not_strict_provenance():
     result = verify_strict_provenance({"status": "strict_shared_core_v2"})
     assert result["status"] == "fail"
     assert "missing_shared_core_fingerprint" in result["reasons"]
+
+
+def test_strict_provenance_accepts_explicit_shared_method_fingerprint(tmp_path):
+    artifacts = []
+    for index in range(6):
+        path = tmp_path / f"artifact_{index}.json"
+        path.write_text("{}", encoding="utf-8")
+        artifacts.append(path)
+
+    import hashlib
+
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    provenance = {
+        "status": "strict_shared_core_v2",
+        "shared_core_method_sha256": "b" * 64,
+        "fixed_consensus": "equal_log_mean_three_folds",
+        "audit_evidence": [
+            {"path": str(path), "sha256": digest(path)} for path in artifacts[:3]
+        ],
+        "method_archive_manifest": str(artifacts[3]),
+        "method_archive_manifest_sha256": digest(artifacts[3]),
+        "session_novelty": str(artifacts[4]),
+        "session_novelty_sha256": digest(artifacts[4]),
+        "bootstrap_evidence": str(artifacts[5]),
+        "bootstrap_evidence_sha256": digest(artifacts[5]),
+    }
+
+    result = verify_strict_provenance(provenance)
+
+    assert result["status"] == "pass"
+    assert result["shared_core_method_sha256"] == "b" * 64

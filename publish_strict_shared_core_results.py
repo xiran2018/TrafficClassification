@@ -309,7 +309,11 @@ def validated_audits(dataset: str, audit_root: Path) -> tuple[list[Path], str]:
             raise ValueError(
                 f"strict checkpoint audit has no passing runtime mechanism evidence: {path}"
             )
-        fingerprint = str(payload.get("shared_core_config_sha256") or "")
+        fingerprint = str(
+            payload.get("shared_core_method_sha256")
+            or payload.get("shared_core_config_sha256")
+            or ""
+        )
         if not fingerprint:
             raise ValueError(f"strict checkpoint audit has no frozen fingerprint: {path}")
         fingerprints.add(fingerprint)
@@ -400,6 +404,7 @@ def publish_canonical_result(
     published = dict(payload)
     published["publication_provenance"] = {
         "status": "strict_shared_core_v2",
+        "shared_core_method_sha256": fingerprint,
         "shared_core_config_sha256": fingerprint,
         "audit_paths": [str(path) for path in audit_paths],
         "audit_evidence": [
@@ -517,7 +522,11 @@ def main() -> None:
         notes = ((manifest.get("framework") or {}).get("notes") or {})
         if (
             not notes.get("completed")
-            or notes.get("shared_core_config_sha256") != fingerprint
+            or (
+                notes.get("shared_core_method_sha256")
+                or notes.get("shared_core_config_sha256")
+            )
+            != fingerprint
         ):
             raise ValueError(f"packet manifest is incomplete or has wrong fingerprint: {source}")
         destination = (
@@ -533,7 +542,11 @@ def main() -> None:
         flow_notes = ((flow_manifest.get("framework") or {}).get("notes") or {})
         if (
             not flow_notes.get("completed")
-            or flow_notes.get("shared_core_config_sha256") != fingerprint
+            or (
+                flow_notes.get("shared_core_method_sha256")
+                or flow_notes.get("shared_core_config_sha256")
+            )
+            != fingerprint
         ):
             raise ValueError(
                 f"flow manifest is incomplete or has wrong fingerprint: {flow_source}"
@@ -607,6 +620,7 @@ def main() -> None:
     report = {
         "status": status,
         "dataset": args.dataset,
+        "shared_core_method_sha256": fingerprint,
         "shared_core_config_sha256": fingerprint,
         "audit_paths": [str(path) for path in audit_paths],
         "audit_evidence": [

@@ -92,7 +92,11 @@ def verify_strict_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
     reasons = []
     if provenance.get("status") != "strict_shared_core_v2":
         reasons.append("wrong_status")
-    fingerprint = str(provenance.get("shared_core_config_sha256") or "")
+    fingerprint = str(
+        provenance.get("shared_core_method_sha256")
+        or provenance.get("shared_core_config_sha256")
+        or ""
+    )
     if len(fingerprint) != 64:
         reasons.append("missing_shared_core_fingerprint")
     if provenance.get("fixed_consensus") != "equal_log_mean_three_folds":
@@ -129,6 +133,7 @@ def verify_strict_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": "pass" if not reasons else "fail",
         "reasons": reasons,
+        "shared_core_method_sha256": fingerprint or None,
         "shared_core_config_sha256": fingerprint or None,
     }
 

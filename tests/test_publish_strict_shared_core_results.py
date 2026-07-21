@@ -6,6 +6,7 @@ from pathlib import Path
 from publish_strict_shared_core_results import (
     archive_frozen_method_evidence,
     canonical_sha256,
+    validated_audits,
 )
 
 
@@ -16,6 +17,36 @@ def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
+
+
+def test_audits_share_method_identity_despite_distinct_effective_configs(tmp_path):
+    root = tmp_path / "audits"
+    method = "a" * 64
+    for fold in range(3):
+        write_json(
+            root / "vpn-app" / f"fold{fold}" / "audit.json",
+            {
+                "status": "pass",
+                "dataset": "vpn-app",
+                "fold": fold,
+                "shared_core_method_sha256": method,
+                "shared_core_config_sha256": None,
+                "packet_effective_shared_core_config_sha256": f"packet-{fold}",
+                "flow_effective_shared_core_config_sha256": f"flow-{fold}",
+                "runtime_mechanism_evidence_required": True,
+                "flow_native_extraction_evidence_required": True,
+                "algorithm_source_evidence_required": True,
+                "algorithm_source_evidence_verified": True,
+                "algorithm_source_fingerprint": "f" * 64,
+                "runtime_mechanism_evidence": {"status": "pass"},
+                "flow_native_extraction_evidence": {"status": "pass"},
+            },
+        )
+
+    paths, fingerprint = validated_audits("vpn-app", root)
+
+    assert len(paths) == 3
+    assert fingerprint == method
 
 
 def prepare_inputs(
