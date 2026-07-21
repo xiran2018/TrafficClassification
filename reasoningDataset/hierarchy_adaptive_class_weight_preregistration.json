@@ -1,0 +1,49 @@
+{
+  "schema": "hierarchy_adaptive_class_weight_preregistration_v1",
+  "created_at": "2026-07-22T04:58:00+08:00",
+  "status": "preregistered_before_complete_validation_histories",
+  "research_role": "conditional_followup_not_current_shared_numeric_reference",
+  "motivation": "Use one class-risk algorithm while permitting independently selected numeric magnitudes across datasets and tasks.",
+  "method": {
+    "name": "continuous_packet_flow_hierarchy_weighting",
+    "formula": "w_c = normalize(exp(gamma * ((1-alpha) * log(normalize(w_packet,c)) + alpha * log(normalize(w_flow,c)))))",
+    "numeric_parameters": {
+      "alpha": "packet-to-flow count interpolation in [0,1]",
+      "gamma": "class-weight strength in [0,1]"
+    },
+    "existing_factorial_corners": {
+      "packet_full": {"alpha": 0.0, "gamma": 1.0},
+      "flow_sqrt": {"alpha": 1.0, "gamma": 0.5},
+      "flow_full": {"alpha": 1.0, "gamma": 1.0}
+    },
+    "shared_algorithm_requirement": "VPN and TLS use the same formula, loss topology, optimizer protocol, and candidate grid; only validation-selected alpha/gamma may differ.",
+    "test_labels_used": false
+  },
+  "launch_gate": {
+    "required_validation_points_per_arm": 8,
+    "required_datasets": ["vpn-app", "tls-120"],
+    "required_arms": ["packet_full", "flow_sqrt", "flow_full"],
+    "condition": "The validation-best eligible arm differs between VPN and TLS.",
+    "eligibility": {
+      "minimum_macro_f1_gain_over_packet_full": 0.005,
+      "maximum_accuracy_drop_from_packet_full": 0.005
+    },
+    "if_condition_false": "Retain the validation-frozen common numeric reference and do not launch this followup.",
+    "if_condition_true": "Implement the continuous formula, verify corner equivalence, and screen a fixed alpha/gamma grid on held-out validation only."
+  },
+  "fixed_followup_grid": {
+    "alpha": [0.0, 0.5, 1.0],
+    "gamma": [0.5, 1.0],
+    "selection_metric": "macro_f1_with_accuracy_guard",
+    "tie_break": "smaller alpha then smaller gamma",
+    "test_labels_used": false
+  },
+  "state_at_preregistration": {
+    "vpn_flow_sqrt_validation_points": 6,
+    "vpn_flow_full_validation_points": 3,
+    "tls_packet_full_validation_points": 2,
+    "tls_flow_sqrt_validation_points": 3,
+    "tls_flow_full_validation_points": 0,
+    "all_required_histories_complete": false
+  }
+}
