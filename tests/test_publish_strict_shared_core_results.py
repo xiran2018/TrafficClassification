@@ -710,6 +710,38 @@ def test_archive_includes_bounded_hierarchy_upstream_evidence(tmp_path):
         "path": str(hierarchy_path),
         "sha256": file_sha256(hierarchy_path),
     }
+    flow_datasets = {}
+    for dataset in ("vpn-app", "tls-120"):
+        source_path = write_json(
+            tmp_path / f"flow_hierarchy_source_{dataset}.json",
+            {
+                "schema": "class_sampling_hierarchy_analysis_v1",
+                "selection_role": "train_only_reporting_not_model_selection",
+                "test_labels_used": False,
+            },
+        )
+        flow_datasets[dataset] = {
+            "input": {
+                "path": str(source_path),
+                "sha256": file_sha256(source_path),
+            }
+        }
+    flow_derivation_path = write_json(
+        tmp_path / "flow_task_hierarchy_derivation.json",
+        {
+            "schema": "bounded_hierarchy_risk_protocol_v1",
+            "status": "derived_from_training_counts_only",
+            "test_labels_used": False,
+            "shared_algorithm": (
+                "largest_flow_risk_power_subject_to_max_min_ratio"
+            ),
+            "datasets": flow_datasets,
+        },
+    )
+    config["selection_evidence"]["flow_task_hierarchy_derivation"] = {
+        "path": str(flow_derivation_path),
+        "sha256": file_sha256(flow_derivation_path),
+    }
     config.pop("config_sha256")
     config["config_sha256"] = canonical_sha256(config)
     write_json(config_path, config)
@@ -724,6 +756,9 @@ def test_archive_includes_bounded_hierarchy_upstream_evidence(tmp_path):
     expected = {
         "hierarchy_reference_hierarchy_selection",
         "hierarchy_bounded_risk_derivation",
+        "flow_task_hierarchy_derivation",
+        "flow_task_hierarchy_source_vpn-app",
+        "flow_task_hierarchy_source_tls-120",
     }
     assert expected <= set(evidence)
     assert all(Path(evidence[name]["archived_path"]).is_file() for name in expected)

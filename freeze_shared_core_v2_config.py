@@ -443,6 +443,68 @@ def validate_hierarchy_selection(
     return output
 
 
+def validate_flow_hierarchy_derivation(
+    derivation: dict[str, Any],
+    *,
+    derivation_path: Path,
+) -> dict[str, dict[str, Any]]:
+    """Validate task-specific numeric values derived only from Flow train counts."""
+    if not (
+        derivation.get("schema") == "bounded_hierarchy_risk_protocol_v1"
+        and derivation.get("status") == "derived_from_training_counts_only"
+        and derivation.get("selection_role")
+        == "candidate_numeric_derivation_not_model_selection"
+        and derivation.get("test_labels_used") is False
+        and derivation.get("shared_algorithm")
+        == "largest_flow_risk_power_subject_to_max_min_ratio"
+        and math.isclose(
+            float(derivation.get("max_weight_ratio", -1.0)),
+            4.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            float(derivation.get("effective_number_beta", -1.0)),
+            0.9999,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError("invalid Flow-task bounded hierarchy derivation")
+    datasets = derivation.get("datasets") or {}
+    if set(datasets) != REQUIRED_DATASETS:
+        raise ValueError("Flow hierarchy derivation must cover exactly VPN and TLS-120")
+    output: dict[str, dict[str, Any]] = {}
+    for dataset, row in datasets.items():
+        strength = float(row.get("class_weight_strength", -1.0))
+        realized_ratio = float(row.get("bounded_effective_weight_ratio", -1.0))
+        source = row.get("input") or {}
+        source_path = Path(str(source.get("path") or ""))
+        if not (
+            row.get("class_weight_basis") == "flow"
+            and 0.0 <= strength <= 1.0
+            and 0.0 < realized_ratio <= 4.0 + 1e-9
+            and source_path.is_file()
+            and file_sha256(source_path) == source.get("sha256")
+        ):
+            raise ValueError(f"invalid Flow hierarchy derivation for {dataset}")
+        source_payload = json.loads(source_path.read_text(encoding="utf-8"))
+        if not (
+            source_payload.get("schema") == "class_sampling_hierarchy_analysis_v1"
+            and source_payload.get("selection_role")
+            == "train_only_reporting_not_model_selection"
+            and source_payload.get("test_labels_used") is False
+        ):
+            raise ValueError(f"Flow hierarchy source is not train-only for {dataset}")
+        output[dataset] = {
+            "class_weight_basis": "flow",
+            "class_weight_strength": strength,
+        }
+    if not derivation_path.is_file():
+        raise ValueError("Flow hierarchy derivation evidence is missing")
+    return output
+
+
 def validate_experiment_chain(
     balance_report: dict[str, Any],
     paired_report: dict[str, Any],
@@ -567,6 +629,8 @@ def freeze_config(
     paired_path: Path,
     hierarchy_report: dict[str, Any] | None = None,
     hierarchy_path: Path | None = None,
+    flow_hierarchy_derivation: dict[str, Any] | None = None,
+    flow_hierarchy_derivation_path: Path | None = None,
 ) -> dict[str, Any]:
     validate_selection(balance_report, "balance selection")
     validate_selection(paired_report, "paired selection")
@@ -579,6 +643,20 @@ def freeze_config(
             balance_report,
             hierarchy_path=hierarchy_path,
             balance_path=balance_path,
+        )
+    flow_hierarchy_weights = hierarchy_weights
+    if flow_hierarchy_derivation is not None:
+        if hierarchy_report is None or hierarchy_report.get("shared_algorithm") != (
+            "bounded_effective_flow_class_risk_power_eta"
+        ):
+            raise ValueError(
+                "Flow-task bounded derivation requires the promoted bounded hierarchy rule"
+            )
+        if flow_hierarchy_derivation_path is None:
+            raise ValueError("flow_hierarchy_derivation_path is required")
+        flow_hierarchy_weights = validate_flow_hierarchy_derivation(
+            flow_hierarchy_derivation,
+            derivation_path=flow_hierarchy_derivation_path,
         )
     paired_factorial = validate_experiment_chain(
         balance_report, paired_report, hierarchy_weights
@@ -699,16 +777,18 @@ def freeze_config(
         "tower1": tower1,
         "dataset_numeric_hyperparameter_overrides": (
             {
-                task: {
+                "packet-level-classification": {
                     dataset: {
                         "class_weight_strength": row["class_weight_strength"]
                     }
                     for dataset, row in sorted(hierarchy_weights.items())
-                }
-                for task in (
-                    "packet-level-classification",
-                    "flow-level-classification",
-                )
+                },
+                "flow-level-classification": {
+                    dataset: {
+                        "class_weight_strength": row["class_weight_strength"]
+                    }
+                    for dataset, row in sorted(flow_hierarchy_weights.items())
+                },
             }
             if hierarchy_weights is not None
             else {}
@@ -755,6 +835,17 @@ def freeze_config(
             "shared_algorithm": hierarchy_report["shared_algorithm"],
             "datasets": hierarchy_report["datasets"],
         }
+    if (
+        flow_hierarchy_derivation is not None
+        and flow_hierarchy_derivation_path is not None
+    ):
+        payload["selection_evidence"]["flow_task_hierarchy_derivation"] = {
+            "path": str(flow_hierarchy_derivation_path),
+            "sha256": file_sha256(flow_hierarchy_derivation_path),
+            "shared_algorithm": flow_hierarchy_derivation["shared_algorithm"],
+            "datasets": flow_hierarchy_derivation["datasets"],
+            "test_labels_used": False,
+        }
     payload["config_sha256"] = canonical_sha256(payload)
     return payload
 
@@ -764,6 +855,7 @@ def main() -> None:
     parser.add_argument("--balance_selection", required=True)
     parser.add_argument("--paired_selection", required=True)
     parser.add_argument("--hierarchy_selection", default="")
+    parser.add_argument("--flow_hierarchy_derivation", default="")
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
@@ -777,6 +869,16 @@ def main() -> None:
         if hierarchy_path is not None
         else None
     )
+    flow_derivation_path = (
+        Path(args.flow_hierarchy_derivation)
+        if args.flow_hierarchy_derivation
+        else None
+    )
+    flow_derivation = (
+        json.loads(flow_derivation_path.read_text(encoding="utf-8"))
+        if flow_derivation_path is not None
+        else None
+    )
     payload = freeze_config(
         balance,
         paired,
@@ -784,6 +886,8 @@ def main() -> None:
         paired_path=paired_path,
         hierarchy_report=hierarchy,
         hierarchy_path=hierarchy_path,
+        flow_hierarchy_derivation=flow_derivation,
+        flow_hierarchy_derivation_path=flow_derivation_path,
     )
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)

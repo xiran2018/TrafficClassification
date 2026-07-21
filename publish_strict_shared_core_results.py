@@ -214,6 +214,40 @@ def archive_frozen_method_evidence(
                     "bounded hierarchy derivation is not bound to preregistration"
                 )
 
+    flow_derivation_evidence = selection.get("flow_task_hierarchy_derivation")
+    if flow_derivation_evidence is not None:
+        if hierarchy_evidence is None:
+            raise ValueError("Flow hierarchy derivation has no hierarchy selection")
+        hierarchy_payload = load_json(hierarchy_evidence["path"])
+        if hierarchy_payload.get("shared_algorithm") != (
+            "bounded_effective_flow_class_risk_power_eta"
+        ):
+            raise ValueError("Flow hierarchy derivation requires bounded hierarchy")
+        archived["flow_task_hierarchy_derivation"] = archive_hashed_evidence(
+            flow_derivation_evidence,
+            label="Flow-task train-only hierarchy derivation",
+            destination=archive_root / "flow_task_hierarchy_derivation.json",
+        )
+        flow_derivation = load_json(flow_derivation_evidence["path"])
+        if not (
+            flow_derivation.get("schema") == "bounded_hierarchy_risk_protocol_v1"
+            and flow_derivation.get("status") == "derived_from_training_counts_only"
+            and flow_derivation.get("test_labels_used") is False
+            and flow_derivation.get("shared_algorithm")
+            == "largest_flow_risk_power_subject_to_max_min_ratio"
+            and set(flow_derivation.get("datasets") or {}) == {"vpn-app", "tls-120"}
+        ):
+            raise ValueError("Flow hierarchy derivation is not a train-only protocol")
+        for dataset, row in sorted(flow_derivation["datasets"].items()):
+            archived[f"flow_task_hierarchy_source_{dataset}"] = (
+                archive_hashed_evidence(
+                    row.get("input") or {},
+                    label=f"Flow-task hierarchy source {dataset}",
+                    destination=archive_root
+                    / f"flow_task_hierarchy_source_{dataset}.json",
+                )
+            )
+
     archived_method_selection = {}
     method_selection = config.get("method_selection")
     if method_selection is not None:
