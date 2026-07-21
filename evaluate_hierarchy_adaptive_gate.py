@@ -16,6 +16,86 @@ ARM_PARAMETERS = {
 }
 
 
+def followup_search_space(prereg: dict[str, Any]) -> dict[str, Any] | None:
+    amendment = prereg.get("train_only_identifiability_amendment")
+    if amendment is None:
+        return None
+    if amendment.get("status") != "preregistered_before_complete_validation_histories":
+        raise ValueError("identifiability amendment was not preregistered in time")
+    if amendment.get("test_labels_used") is not False:
+        raise ValueError("identifiability amendment does not forbid test labels")
+    rule = amendment.get("execution_rule") or {}
+    eta_grid = [float(value) for value in rule.get("unique_effective_eta_grid") or []]
+    if eta_grid != sorted(set(eta_grid)) or not eta_grid:
+        raise ValueError("effective eta grid must be sorted and unique")
+    canonical = rule.get("canonical_parameterization") or {}
+    if len(canonical) != len(eta_grid):
+        raise ValueError("canonical eta parameterizations are incomplete")
+    for eta in eta_grid:
+        parameters = canonical.get(str(eta))
+        if parameters is None:
+            raise ValueError(f"missing canonical parameterization for eta={eta}")
+        product = float(parameters["alpha"]) * float(parameters["gamma"])
+        if abs(product - eta) > 1e-12:
+            raise ValueError(f"canonical parameterization disagrees for eta={eta}")
+    duplicate = rule.get("duplicate_grid_point") or {}
+    duplicate_of = rule.get("duplicate_of") or {}
+    duplicate_eta = float(duplicate["alpha"]) * float(duplicate["gamma"])
+    canonical_eta = float(duplicate_of["alpha"]) * float(duplicate_of["gamma"])
+    if abs(duplicate_eta - canonical_eta) > 1e-12:
+        raise ValueError("declared duplicate parameterizations are not equivalent")
+    if duplicate_eta not in eta_grid:
+        raise ValueError("duplicate parameterization is outside the eta grid")
+    return {
+        "identifiable_parameter": "eta=alpha*gamma",
+        "unique_effective_eta_grid": eta_grid,
+        "canonical_parameterization": canonical,
+        "omitted_redundant_parameterization": duplicate,
+        "equivalent_to": duplicate_of,
+    }
+
+
+def verify_train_only_amendment_evidence(prereg: dict[str, Any]) -> dict[str, Any] | None:
+    amendment = prereg.get("train_only_identifiability_amendment")
+    if amendment is None:
+        return None
+    search_space = followup_search_space(prereg)
+    verified: dict[str, Any] = {}
+    for dataset, expected in sorted((amendment.get("evidence") or {}).items()):
+        path = Path(str(expected.get("path") or ""))
+        expected_hash = str(expected.get("sha256") or "")
+        if not path.is_file() or file_sha256(path) != expected_hash:
+            raise ValueError(f"{dataset} identifiability evidence hash mismatch")
+        report = load_json(path)
+        if report.get("test_labels_used") is not False:
+            raise ValueError(f"{dataset} identifiability evidence used test labels")
+        summary = report.get("summary") or {}
+        minimum = int(summary["minimum_packet_class_count"])
+        maximum = int(summary["maximum_packet_class_count"])
+        if minimum != maximum:
+            raise ValueError(f"{dataset} packet class counts are not constant")
+        for field in (
+            "minimum_packet_class_count",
+            "maximum_packet_class_count",
+            "minimum_flow_class_count",
+            "maximum_flow_class_count",
+        ):
+            if int(summary[field]) != int(expected[field]):
+                raise ValueError(f"{dataset} evidence summary mismatch for {field}")
+        verified[dataset] = {
+            "path": str(path.resolve()),
+            "sha256": expected_hash,
+            "packet_class_count": minimum,
+            "flow_class_count_range": [
+                int(summary["minimum_flow_class_count"]),
+                int(summary["maximum_flow_class_count"]),
+            ],
+        }
+    if not verified:
+        raise ValueError("identifiability amendment has no evidence")
+    return {"search_space": search_space, "verified_train_only_evidence": verified}
+
+
 def file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -132,7 +212,7 @@ def evaluate(report: dict[str, Any], prereg: dict[str, Any]) -> dict[str, Any]:
     }
     selected_arms = {row["selected"] for row in selections.values()}
     launch = len(selected_arms) > 1
-    return {
+    payload = {
         "schema": "hierarchy_adaptive_class_weight_gate_v1",
         "status": "launch" if launch else "do_not_launch",
         "launch": launch,
@@ -153,6 +233,10 @@ def evaluate(report: dict[str, Any], prereg: dict[str, Any]) -> dict[str, Any]:
             for dataset, row in selections.items()
         },
     }
+    search_space = followup_search_space(prereg)
+    if search_space is not None:
+        payload["conditional_followup_search_space"] = search_space
+    return payload
 
 
 def matched_trajectory_diagnostics(
@@ -278,7 +362,10 @@ def main() -> None:
     prereg_path = Path(args.preregistration)
     report = load_json(report_path)
     prereg = load_json(prereg_path)
+    amendment_evidence = verify_train_only_amendment_evidence(prereg)
     payload = evaluate(report, prereg)
+    if amendment_evidence is not None:
+        payload["identifiability_amendment_evidence"] = amendment_evidence
     payload["matched_trajectory_diagnostics"] = matched_trajectory_diagnostics(
         report, prereg
     )

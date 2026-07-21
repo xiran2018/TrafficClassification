@@ -3,7 +3,12 @@ import json
 
 import pytest
 
-from evaluate_hierarchy_adaptive_gate import evaluate, matched_trajectory_diagnostics
+from evaluate_hierarchy_adaptive_gate import (
+    evaluate,
+    followup_search_space,
+    matched_trajectory_diagnostics,
+    verify_train_only_amendment_evidence,
+)
 
 
 def preregistration():
@@ -105,6 +110,72 @@ def test_rejects_incomplete_validation_history():
     ]["datasets"]["tls-120"]["validation_points"] = 7
     with pytest.raises(ValueError, match="complete validation evidence"):
         evaluate(incomplete, preregistration())
+
+
+def amendment_preregistration(tmp_path):
+    evidence_path = tmp_path / "hierarchy.json"
+    evidence = {
+        "test_labels_used": False,
+        "summary": {
+            "minimum_packet_class_count": 3,
+            "maximum_packet_class_count": 3,
+            "minimum_flow_class_count": 1,
+            "maximum_flow_class_count": 2,
+        },
+    }
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    payload = preregistration()
+    payload["train_only_identifiability_amendment"] = {
+        "status": "preregistered_before_complete_validation_histories",
+        "test_labels_used": False,
+        "evidence": {
+            "vpn-app": {
+                "path": str(evidence_path),
+                "sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+                **evidence["summary"],
+            }
+        },
+        "execution_rule": {
+            "unique_effective_eta_grid": [0.0, 0.25, 0.5, 1.0],
+            "canonical_parameterization": {
+                "0.0": {"alpha": 0.0, "gamma": 1.0},
+                "0.25": {"alpha": 0.5, "gamma": 0.5},
+                "0.5": {"alpha": 1.0, "gamma": 0.5},
+                "1.0": {"alpha": 1.0, "gamma": 1.0},
+            },
+            "duplicate_grid_point": {"alpha": 0.5, "gamma": 1.0},
+            "duplicate_of": {"alpha": 1.0, "gamma": 0.5},
+        },
+    }
+    return payload, evidence_path
+
+
+def test_deduplicates_unidentifiable_alpha_gamma_grid(tmp_path):
+    prereg, _ = amendment_preregistration(tmp_path)
+
+    search = followup_search_space(prereg)
+
+    assert search["identifiable_parameter"] == "eta=alpha*gamma"
+    assert search["unique_effective_eta_grid"] == [0.0, 0.25, 0.5, 1.0]
+    assert search["omitted_redundant_parameterization"] == {
+        "alpha": 0.5,
+        "gamma": 1.0,
+    }
+    evaluated = evaluate(report(divergent=True), prereg)
+    assert evaluated["conditional_followup_search_space"] == search
+
+
+def test_identifiability_evidence_is_train_only_and_hash_bound(tmp_path):
+    prereg, evidence_path = amendment_preregistration(tmp_path)
+
+    verified = verify_train_only_amendment_evidence(prereg)
+
+    assert verified["verified_train_only_evidence"]["vpn-app"][
+        "packet_class_count"
+    ] == 3
+    evidence_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="evidence hash mismatch"):
+        verify_train_only_amendment_evidence(prereg)
 
 
 def test_matched_trajectory_is_hash_bound_and_reporting_only(tmp_path):
