@@ -323,6 +323,9 @@ def test_factorial_integrity_rejects_undeclared_config_difference(tmp_path):
     assert result["status"] == "fail"
     assert result["datasets"]["vpn-app"]["status"] == "pass"
     assert result["datasets"]["tls-120"]["mismatched_fields"] == ["lr"]
+    assert result["datasets"]["vpn-app"]["declared_values"] == {
+        "identity_safe_contrastive": {"baseline": False, "candidate": True}
+    }
 
 
 def test_cli_emits_dual_metric_and_trainer_consistency_evidence(tmp_path):

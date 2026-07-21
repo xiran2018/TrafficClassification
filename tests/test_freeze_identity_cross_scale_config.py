@@ -36,7 +36,15 @@ def selection(selected: str, min_delta: float):
             "status": "pass",
             "declared_factorial_fields": sorted(D1_FACTORIAL_FIELDS),
             "datasets": {
-                name: {"status": "pass"}
+                name: {
+                    "status": "pass",
+                    "declared_values": {
+                        "identity_safe_contrastive": {
+                            "baseline": False,
+                            "candidate": True,
+                        }
+                    },
+                }
                 for name in ("vpn-app", "tls-120")
             },
         },
@@ -87,10 +95,38 @@ def finalize(tmp_path, d1, incremental=None, overall=None, exposure=None):
         incremental["factorial_config_integrity"][
             "declared_factorial_fields"
         ] = sorted(D2_INCREMENTAL_FACTORIAL_FIELDS)
+        for row in incremental["factorial_config_integrity"]["datasets"].values():
+            row["declared_values"] = {
+                "cross_scale_weight": {"baseline": 0.0, "candidate": 0.05},
+                "cross_scale_temperature": {
+                    "baseline": 0.07,
+                    "candidate": 0.07,
+                },
+                "paired_packet_aux_jsonl": {
+                    "baseline": "",
+                    "candidate": "paired.jsonl",
+                },
+            }
     if overall is not None:
         overall["factorial_config_integrity"][
             "declared_factorial_fields"
         ] = sorted(D2_OVERALL_FACTORIAL_FIELDS)
+        for row in overall["factorial_config_integrity"]["datasets"].values():
+            row["declared_values"] = {
+                "identity_safe_contrastive": {
+                    "baseline": False,
+                    "candidate": True,
+                },
+                "cross_scale_weight": {"baseline": 0.0, "candidate": 0.05},
+                "cross_scale_temperature": {
+                    "baseline": 0.07,
+                    "candidate": 0.07,
+                },
+                "paired_packet_aux_jsonl": {
+                    "baseline": "",
+                    "candidate": "paired.jsonl",
+                },
+            }
     base = {
         "schema": "exact_shared_packet_core_v2",
         "status": "frozen_from_cross_dataset_validation",
@@ -165,6 +201,14 @@ def test_d1_rejects_missing_factorial_integrity(tmp_path):
     d1 = selection("baseline", 0.005)
     d1.pop("factorial_config_integrity")
     with pytest.raises(ValueError, match="factorial-integrity"):
+        finalize(tmp_path, d1)
+
+
+def test_d1_rejects_wrong_objective_transition(tmp_path):
+    d1 = selection("baseline", 0.005)
+    for row in d1["factorial_config_integrity"]["datasets"].values():
+        row["declared_values"]["identity_safe_contrastive"]["candidate"] = False
+    with pytest.raises(ValueError, match="wrong identity_safe_contrastive transition"):
         finalize(tmp_path, d1)
 
 

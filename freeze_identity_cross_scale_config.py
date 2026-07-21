@@ -30,6 +30,8 @@ def validate_selection(
     name: str,
     min_delta: float,
     factorial_fields: set[str],
+    expected_transitions: dict[str, tuple[Any, Any]],
+    candidate_nonempty_fields: set[str] | None = None,
 ) -> None:
     if report.get("selection_scope") != "heldout_validation_only":
         raise ValueError(f"{name} must use heldout validation only")
@@ -72,6 +74,35 @@ def validate_selection(
         )
     ):
         raise ValueError(f"{name} lacks matching factorial-integrity evidence")
+    candidate_nonempty_fields = candidate_nonempty_fields or set()
+    for dataset, row in factorial["datasets"].items():
+        declared_values = row.get("declared_values") or {}
+        for field, (expected_baseline, expected_candidate) in expected_transitions.items():
+            values = declared_values.get(field) or {}
+            observed_baseline = values.get("baseline")
+            observed_candidate = values.get("candidate")
+            if isinstance(expected_baseline, float):
+                baseline_matches = isinstance(observed_baseline, (int, float)) and math.isclose(
+                    float(observed_baseline), expected_baseline, abs_tol=1e-12
+                )
+            else:
+                baseline_matches = observed_baseline == expected_baseline
+            if isinstance(expected_candidate, float):
+                candidate_matches = isinstance(observed_candidate, (int, float)) and math.isclose(
+                    float(observed_candidate), expected_candidate, abs_tol=1e-12
+                )
+            else:
+                candidate_matches = observed_candidate == expected_candidate
+            if not (baseline_matches and candidate_matches):
+                raise ValueError(
+                    f"{name} has wrong {field} transition for {dataset}"
+                )
+        for field in candidate_nonempty_fields:
+            values = declared_values.get(field) or {}
+            if not values.get("candidate"):
+                raise ValueError(
+                    f"{name} candidate lacks required {field} for {dataset}"
+                )
 
 
 def evidence(path: Path, report: dict[str, Any]) -> dict[str, Any]:
@@ -184,6 +215,7 @@ def freeze_method_config(
         name="D1 identity-safe",
         min_delta=0.005,
         factorial_fields=D1_FACTORIAL_FIELDS,
+        expected_transitions={"identity_safe_contrastive": (False, True)},
     )
     identity_safe = d1["selected"] == "candidate"
     cross_scale = False
@@ -206,12 +238,23 @@ def freeze_method_config(
             name="D2 incremental",
             min_delta=0.002,
             factorial_fields=D2_INCREMENTAL_FACTORIAL_FIELDS,
+            expected_transitions={
+                "cross_scale_weight": (0.0, 0.05),
+                "cross_scale_temperature": (0.07, 0.07),
+            },
+            candidate_nonempty_fields={"paired_packet_aux_jsonl"},
         )
         validate_selection(
             d2_overall,
             name="D2 overall",
             min_delta=0.005,
             factorial_fields=D2_OVERALL_FACTORIAL_FIELDS,
+            expected_transitions={
+                "identity_safe_contrastive": (False, True),
+                "cross_scale_weight": (0.0, 0.05),
+                "cross_scale_temperature": (0.07, 0.07),
+            },
+            candidate_nonempty_fields={"paired_packet_aux_jsonl"},
         )
         if cross_scale_exposure is None or cross_scale_exposure_path is None:
             raise ValueError("D2 requires the exact-sampler exposure audit")

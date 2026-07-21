@@ -282,6 +282,13 @@ def training_factorial_integrity_evidence(
         evidence[dataset] = {
             "status": "pass" if dataset_passed else "fail",
             "mismatched_fields": mismatched,
+            "declared_values": {
+                field: {
+                    "baseline": configs["baseline"].get(field),
+                    "candidate": configs["candidate"].get(field),
+                }
+                for field in sorted(allowed_difference_fields)
+            },
         }
     return {
         "required": True,
