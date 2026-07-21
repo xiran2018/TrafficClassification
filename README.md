@@ -5573,6 +5573,48 @@ objective topology, and fixed `log_mean` consensus are identical. Only that
 matched result may attribute complementarity to training split/seed
 instability or justify promoting a stability objective into the unified method.
 
+The equivalent Packet diagnostic requires stronger row-order evidence because
+the historical NPZ files do not contain packet IDs. It accepts one explicitly
+shared `packet_index.jsonl`, verifies its labels against every NPZ row, requires
+each fold's source JSON to bind that exact index path, and records SHA-256 for
+the index, label map, predictions, and source records:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python analyze_packet_crossfold_disagreement.py \
+    --input fold0=/tmp/two_tower_runs/packet_level/vpn_app/fold0/packet_feature_test_probs_ipv46.npz \
+    --input fold1=/tmp/two_tower_runs/packet_level/vpn_app/fold1/packet_feature_test_probs_ipv46.npz \
+    --input fold2=/tmp/two_tower_runs/packet_level/vpn_app/fold2/packet_feature_test_probs_ipv46.npz \
+    --source fold0=reasoningDataset/packet-level/vpn-app/fold0_feature_expert.json \
+    --source fold1=reasoningDataset/packet-level/vpn-app/fold1_feature_expert.json \
+    --source fold2=reasoningDataset/packet-level/vpn-app/fold2_feature_expert.json \
+    --sample_index /tmp/two_tower_runs/packet_level/vpn_app/fold0/test/packet_index.jsonl \
+    --label_map /tmp/two_tower_runs/packet_level/vpn_app/fold0/train/label_map.json \
+    --consensus equal_mean=/tmp/two_tower_runs/vpn_packet_historical_equal_mean_for_diagnostic.npz \
+    --output_json /tmp/two_tower_runs/vpn_packet_historical_crossfold_disagreement.json
+```
+
+The old current-packet structural experts show complementary errors:
+
+```text
+| Dataset | Mean fold Acc/F1 | Best fold Acc/F1 | Equal-mean Acc/F1 | Any-fold oracle Acc | Oracle headroom | Disagreement |
+|---|---:|---:|---:|---:|---:|---:|
+| vpn-app | 0.8945/0.7813 | 0.8981/0.7926 | 0.9066/0.8112 | 0.9423 | +0.0442 | 0.1229 |
+| tls-120 | 0.7736/0.7312 | 0.7874/0.7450 | 0.7998/0.7656 | 0.8617 | +0.0743 | 0.2635 |
+```
+
+VPN's equal mean captures `96.20%` of packets for which at least one fold is
+correct; TLS-120 captures `92.74%`. The largest class-level oracle headroom is
+concentrated in known ambiguous classes (`facebook` and `hangout` on VPN;
+`huanqiu`, `toutiao`, `smzdm`, `media`, and `zhihu` on TLS-120). This is useful
+mechanism evidence that training-fold instability affects both Packet and Flow,
+but it is not yet evidence for adding distillation. In particular, these are
+historical tree-based structural experts, TLS-120's paper-default score also
+uses a separately validation-gated neural/structural fusion, and neither is the
+strict-v2 shared neural core. Promotion still requires the same-method
+strict-v2 three-fold diagnostic on both tasks and both datasets, followed by an
+OOF-only matched training ablation.
+
 Paper-safe distillation must use only task-local training data and OOF teacher
 predictions. Concatenating disjoint validation folds with
 `build_consensus_distill_targets.py --align union` improves coverage, but each
