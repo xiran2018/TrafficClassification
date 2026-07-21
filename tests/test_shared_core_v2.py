@@ -196,6 +196,9 @@ def frozen_payload():
             "paired_cls_weight": 0.2,
             "paired_logit_kl_weight": 0.5,
             "paired_raw_consistency_weight": 1.0,
+            "identity_safe_contrastive": True,
+            "cross_scale_weight": 0.05,
+            "cross_scale_temperature": 0.07,
             "early_stop_patience": 0,
             "init_checkpoint_dir": "",
             "init_adapter_only": False,
@@ -279,6 +282,9 @@ def packet_args():
         "tower1_paired_cls_weight": 0.0,
         "tower1_paired_logit_kl_weight": 0.0,
         "tower1_paired_raw_consistency_weight": 0.0,
+        "identity_safe_contrastive": False,
+        "tower1_cross_scale_weight": 0.0,
+        "tower1_cross_scale_temperature": 1.0,
         "base_model": "other",
         "epochs": 1,
         "packet_batch_size": 1,
@@ -342,6 +348,9 @@ def test_packet_runtime_receives_the_entire_frozen_shared_core(tmp_path):
     assert args.byte_content_group_loss_reduction == "group_mean"
     assert args.class_weight_basis == "flow"
     assert args.tower1_paired_consistency_weight == 0.05
+    assert args.identity_safe_contrastive is True
+    assert args.tower1_cross_scale_weight == 0.05
+    assert args.tower1_cross_scale_temperature == 0.07
     assert args.semantic_embedding_mode == "concat"
     assert args.semantic_embedding_batch_size == 8
     assert args.semantic_embedding_flow_batch_packets == 128
@@ -478,6 +487,9 @@ def test_flow_runtime_uses_the_same_core_values():
         tower1_paired_cls_weight=0.0,
         tower1_paired_logit_kl_weight=0.0,
         tower1_paired_raw_consistency_weight=0.0,
+        identity_safe_contrastive=False,
+        tower1_cross_scale_weight=0.0,
+        tower1_cross_scale_temperature=1.0,
     )
     apply_frozen_shared_core(flow, "flow-level", payload)
     assert flow.model_types == "seq"
@@ -503,6 +515,9 @@ def test_flow_runtime_uses_the_same_core_values():
     assert flow.lora_r == packet.lora_r
     assert flow.tower1_use_sft is False
     assert flow.flow_balanced_packet_batches is True
+    assert flow.identity_safe_contrastive is packet.identity_safe_contrastive is True
+    assert flow.tower1_cross_scale_weight == packet.tower1_cross_scale_weight == 0.05
+    assert flow.tower1_cross_scale_temperature == 0.07
     assert flow.embedding_mode == packet.semantic_embedding_mode == "concat"
     assert flow.embedding_batch_size == packet.semantic_embedding_batch_size == 8
     assert flow.embedding_flow_batch_packets == 128

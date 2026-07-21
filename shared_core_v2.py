@@ -42,6 +42,8 @@ INDEPENDENT_TRAINING_HYPERPARAMETERS = {
             "tower1_paired_cls_weight",
             "tower1_paired_logit_kl_weight",
             "tower1_paired_raw_consistency_weight",
+            "tower1_cross_scale_weight",
+            "tower1_cross_scale_temperature",
             "protocol_pretrain_max_packets",
             "protocol_pretrain_epochs",
             "protocol_pretrain_batch_size",
@@ -92,6 +94,8 @@ INDEPENDENT_TRAINING_HYPERPARAMETERS = {
             "tower1_paired_cls_weight",
             "tower1_paired_logit_kl_weight",
             "tower1_paired_raw_consistency_weight",
+            "tower1_cross_scale_weight",
+            "tower1_cross_scale_temperature",
             "native_max_packets",
             "native_epochs",
             "native_batch_size",
@@ -128,6 +132,7 @@ _ACTIVATION_GUARDED_FIELDS = {
         "tower1_paired_cls_weight": ("tower1", "paired_cls_weight"),
         "tower1_paired_logit_kl_weight": ("tower1", "paired_logit_kl_weight"),
         "tower1_paired_raw_consistency_weight": ("tower1", "paired_raw_consistency_weight"),
+        "tower1_cross_scale_weight": ("tower1", "cross_scale_weight"),
         "class_weight_strength": ("tower1", "class_weight_strength"),
         "protocol_pretrain_field_mask_probability": ("native_pretraining", "field_mask_probability"),
         "protocol_pretrain_payload_dropout_probability": ("native_pretraining", "payload_dropout_probability"),
@@ -151,6 +156,7 @@ _ACTIVATION_GUARDED_FIELDS = {
         "tower1_paired_cls_weight": ("tower1", "paired_cls_weight"),
         "tower1_paired_logit_kl_weight": ("tower1", "paired_logit_kl_weight"),
         "tower1_paired_raw_consistency_weight": ("tower1", "paired_raw_consistency_weight"),
+        "tower1_cross_scale_weight": ("tower1", "cross_scale_weight"),
         "tower1_class_weight_strength": ("tower1", "class_weight_strength"),
         "native_field_mask_probability": ("native_pretraining", "field_mask_probability"),
         "native_payload_dropout_probability": ("native_pretraining", "payload_dropout_probability"),
@@ -360,6 +366,11 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
     if risk.get("content_group_loss_reduction") != "group_mean":
         raise ValueError("shared-core v2 requires content-group group_mean risk")
     tower1 = payload.get("tower1") or {}
+    # Older A/B/C frozen configs predate the preregistered D1/D2 screen. Treat
+    # their absent fields as the explicitly disabled control topology.
+    tower1.setdefault("identity_safe_contrastive", False)
+    tower1.setdefault("cross_scale_weight", 0.0)
+    tower1.setdefault("cross_scale_temperature", 0.07)
     required_tower1 = {
         "base_model",
         "epochs",
@@ -398,6 +409,9 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         "paired_cls_weight",
         "paired_logit_kl_weight",
         "paired_raw_consistency_weight",
+        "identity_safe_contrastive",
+        "cross_scale_weight",
+        "cross_scale_temperature",
         "early_stop_patience",
         "init_checkpoint_dir",
         "init_adapter_only",
@@ -551,6 +565,11 @@ def apply_frozen_shared_core(
             "tower1_paired_raw_consistency_weight": tower1[
                 "paired_raw_consistency_weight"
             ],
+            "identity_safe_contrastive": tower1["identity_safe_contrastive"],
+            "tower1_cross_scale_weight": tower1["cross_scale_weight"],
+            "tower1_cross_scale_temperature": tower1[
+                "cross_scale_temperature"
+            ],
         }
     else:
         mappings = {
@@ -641,6 +660,11 @@ def apply_frozen_shared_core(
             "tower1_paired_logit_kl_weight": tower1["paired_logit_kl_weight"],
             "tower1_paired_raw_consistency_weight": tower1[
                 "paired_raw_consistency_weight"
+            ],
+            "identity_safe_contrastive": tower1["identity_safe_contrastive"],
+            "tower1_cross_scale_weight": tower1["cross_scale_weight"],
+            "tower1_cross_scale_temperature": tower1[
+                "cross_scale_temperature"
             ],
         }
     for name, value in mappings.items():
