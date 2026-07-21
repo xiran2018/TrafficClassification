@@ -161,7 +161,7 @@ def freeze_method_config(
         "decision_status": (
             "packet_selected_pending_flow_noninferiority"
             if provisional
-            else "final_after_packet_and_flow_validation"
+            else "final_after_preregistered_validation"
         ),
         "selected_method": (
             "availability_aware_cross_scale"
