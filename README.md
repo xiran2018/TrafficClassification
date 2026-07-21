@@ -4962,7 +4962,11 @@ Do not interpret the project promotion targets as "beats every SWEET model".
 Tables 3, 4, and 9 and reports two distinct comparisons. Pcap-Encoder with a
 frozen encoder is a representation-quality reference; because the current
 method uses downstream-supervised LoRA adaptation, the primary comparison is
-the SWEET unfrozen/end-to-end column.
+the SWEET unfrozen/end-to-end column. These constants were checked directly
+against the local SIGCOMM 2025 PDF on 2026-07-22 and are covered by a regression
+test. For each task, the primary comparator is the reported unfrozen model with
+the best paired accuracy and macro-F1, not whichever SWEET row is easiest to
+exceed.
 
 ```bash
 conda run --no-capture-output -n llm-factory \

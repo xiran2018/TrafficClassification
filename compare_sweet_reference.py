@@ -12,6 +12,24 @@ from unified_framework_spec import FLOW_LEVEL_RESULTS, PACKET_LEVEL_RESULTS
 
 
 SWEET_PAPER = "The Sweet Danger of Sugar-- Debunking Representation Learning"
+SWEET_SOURCE_AUDIT = {
+    "paper": SWEET_PAPER,
+    "venue": "ACM SIGCOMM 2025",
+    "source_document": "The Sweet Danger of Sugar-- Debunking Representation Learning8.pdf",
+    "verified_from_local_pdf_on": "2026-07-22",
+    "split": "per-flow",
+    "metrics": ["accuracy", "macro_f1"],
+    "tables": {
+        "3": "packet classification with frozen encoders",
+        "4": "packet classification with frozen and unfrozen encoders",
+        "9": "flow classification with frozen and unfrozen encoders",
+    },
+    "selection_policy": (
+        "report Pcap-Encoder frozen as representation context; use the best "
+        "paired accuracy/macro-F1 row among unfrozen models as the primary "
+        "end-to-end comparator"
+    ),
+}
 SWEET_REFERENCES = {
     "packet-level": {
         "vpn-app": {
@@ -271,12 +289,7 @@ def main() -> None:
     args = parser.parse_args()
     inputs = [tuple(row) for row in args.result] or default_results()
     report = {
-        "source": {
-            "paper": SWEET_PAPER,
-            "split": "per-flow",
-            "metrics": ["accuracy", "macro_f1"],
-            "tables": [3, 4, 9],
-        },
+        "source": SWEET_SOURCE_AUDIT,
         "comparison_policy": {
             "current_method_protocol": "downstream_adapted_lora",
             "primary_comparator": "end_to_end",

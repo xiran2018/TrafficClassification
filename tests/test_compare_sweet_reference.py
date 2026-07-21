@@ -1,6 +1,8 @@
 import json
 
 from compare_sweet_reference import (
+    SWEET_REFERENCES,
+    SWEET_SOURCE_AUDIT,
     compare_result,
     extract_metrics,
     verify_strict_provenance,
@@ -16,6 +18,34 @@ def test_extract_metrics_supports_packet_and_flow_shapes():
         {"metrics": {"flow_level": {"accuracy": 0.85, "macro_f1": 0.82}}},
         "flow-level",
     ) == (0.85, 0.82)
+
+
+def test_sweet_references_match_sigcomm_tables_3_4_and_9():
+    assert SWEET_SOURCE_AUDIT["venue"] == "ACM SIGCOMM 2025"
+    assert SWEET_SOURCE_AUDIT["split"] == "per-flow"
+    assert SWEET_SOURCE_AUDIT["metrics"] == ["accuracy", "macro_f1"]
+    assert set(SWEET_SOURCE_AUDIT["tables"]) == {"3", "4", "9"}
+
+    observed = {
+        (task, dataset, tier): (
+            row["table"],
+            row["accuracy"],
+            row["macro_f1"],
+        )
+        for task, datasets in SWEET_REFERENCES.items()
+        for dataset, tiers in datasets.items()
+        for tier, row in tiers.items()
+    }
+    assert observed == {
+        ("packet-level", "vpn-app", "frozen_representation"): (3, 0.835, 0.710),
+        ("packet-level", "vpn-app", "end_to_end"): (4, 0.856, 0.748),
+        ("packet-level", "tls-120", "frozen_representation"): (3, 0.710, 0.637),
+        ("packet-level", "tls-120", "end_to_end"): (4, 0.773, 0.692),
+        ("flow-level", "vpn-app", "frozen_representation"): (9, 0.692, 0.622),
+        ("flow-level", "vpn-app", "end_to_end"): (9, 0.600, 0.548),
+        ("flow-level", "tls-120", "frozen_representation"): (9, 0.713, 0.681),
+        ("flow-level", "tls-120", "end_to_end"): (9, 0.908, 0.897),
+    }
 
 
 def test_tls_flow_does_not_claim_to_beat_sweet_end_to_end_at_85_percent(tmp_path):
