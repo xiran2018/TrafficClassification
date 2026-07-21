@@ -97,6 +97,24 @@ def verify_strict_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
         reasons.append("missing_shared_core_fingerprint")
     if provenance.get("fixed_consensus") != "equal_log_mean_three_folds":
         reasons.append("wrong_fixed_consensus")
+    audits = provenance.get("audit_evidence")
+    if not isinstance(audits, list) or len(audits) != 3:
+        reasons.append("missing_three_fold_audit_evidence")
+    else:
+        observed_paths = set()
+        for row in audits:
+            if not isinstance(row, dict):
+                reasons.append("invalid_audit_evidence")
+                continue
+            path = Path(str(row.get("path") or ""))
+            expected = str(row.get("sha256") or "")
+            observed_paths.add(str(path))
+            if not path.is_file():
+                reasons.append("missing_audit_evidence")
+            elif len(expected) != 64 or sha256_file(path) != expected:
+                reasons.append("audit_evidence_hash_mismatch")
+        if len(observed_paths) != 3:
+            reasons.append("audit_evidence_paths_not_distinct")
     for name in ("method_archive_manifest", "session_novelty"):
         path = Path(str(provenance.get(name) or ""))
         expected = str(provenance.get(f"{name}_sha256") or "")
@@ -152,6 +170,7 @@ def compare_result(task: str, dataset: str, path: str) -> dict[str, Any]:
         "task": task,
         "dataset": dataset,
         "path": path,
+        "path_sha256": sha256_file(path),
         "our_protocol": "downstream_adapted_lora",
         "publication_provenance": provenance,
         "publication_provenance_verification": provenance_verification,

@@ -401,6 +401,10 @@ def publish_canonical_result(
         "status": "strict_shared_core_v2",
         "shared_core_config_sha256": fingerprint,
         "audit_paths": [str(path) for path in audit_paths],
+        "audit_evidence": [
+            {"path": str(path), "sha256": sha256_file(path)}
+            for path in audit_paths
+        ],
         "runtime_mechanism_evidence_required": True,
         "flow_native_extraction_evidence_required": True,
         "fixed_consensus": "equal_log_mean_three_folds",

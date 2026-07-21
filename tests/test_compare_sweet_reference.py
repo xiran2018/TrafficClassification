@@ -54,6 +54,11 @@ def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_p
     novelty = tmp_path / "session_novelty.json"
     method.write_text('{"status":"verified"}', encoding="utf-8")
     novelty.write_text('{"status":"reported"}', encoding="utf-8")
+    audits = []
+    for fold in range(3):
+        audit = tmp_path / f"fold{fold}_audit.json"
+        audit.write_text(json.dumps({"fold": fold, "status": "pass"}), encoding="utf-8")
+        audits.append(audit)
 
     import hashlib
 
@@ -64,12 +69,21 @@ def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_p
         "status": "strict_shared_core_v2",
         "shared_core_config_sha256": "a" * 64,
         "fixed_consensus": "equal_log_mean_three_folds",
+        "audit_evidence": [
+            {"path": str(path), "sha256": digest(path)} for path in audits
+        ],
         "method_archive_manifest": str(method),
         "method_archive_manifest_sha256": digest(method),
         "session_novelty": str(novelty),
         "session_novelty_sha256": digest(novelty),
     }
     assert verify_strict_provenance(provenance)["status"] == "pass"
+
+    audits[0].write_text('{"status":"mutated"}', encoding="utf-8")
+    rejected_audit = verify_strict_provenance(provenance)
+    assert rejected_audit["status"] == "fail"
+    assert "audit_evidence_hash_mismatch" in rejected_audit["reasons"]
+    audits[0].write_text(json.dumps({"fold": 0, "status": "pass"}), encoding="utf-8")
 
     method.write_text('{"status":"mutated"}', encoding="utf-8")
     rejected = verify_strict_provenance(provenance)
