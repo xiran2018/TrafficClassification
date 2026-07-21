@@ -237,7 +237,11 @@ def archive_frozen_method_evidence(
         "config_sha256": recorded_fingerprint,
     }
     archive = {
-        "schema": "strict_shared_core_v2_method_archive_v2",
+        "schema": (
+            "strict_shared_core_v2_method_archive_v2"
+            if method_selection is not None
+            else "strict_shared_core_v2_method_archive_v1"
+        ),
         "status": "verified_and_archived",
         "shared_core_config": archived_config,
         "selection_evidence": archived,
