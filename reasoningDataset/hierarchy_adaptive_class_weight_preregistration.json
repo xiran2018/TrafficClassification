@@ -39,7 +39,7 @@
     "test_labels_used": false
   },
   "train_only_identifiability_amendment": {
-    "created_at": "2026-07-22T05:45:00+08:00",
+    "created_at": "2026-07-22T05:30:00+08:00",
     "status": "preregistered_before_complete_validation_histories",
     "reason": "Both fold-0 Packet training sets have exactly equal packet counts for every class, so normalized packet-basis effective weights are identically one. Under this observed design, alpha and gamma are not separately identifiable: the registered formula reduces exactly to normalize(w_flow,c ** eta), where eta=alpha*gamma.",
     "evidence_scope": "training_inputs_only",
