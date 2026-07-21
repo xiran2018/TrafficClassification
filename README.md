@@ -143,13 +143,24 @@ When `test_evaluation_allowed=false`, the runner accepts only a command whose
 `--splits` excludes `test`; requesting Test fails before preprocessing. The
 split audit, factual/intervened semantic caches, evaluators, and framework
 manifest then cover exactly `train,valid`, and the manifest records
-`test_labels_used=false`. The default remains `train,valid,test` for a final
-unlocked run. Test is triggered by a **method milestone**, not elapsed wall
-time: hierarchy, invariance objectives, method topology, and Flow
-noninferiority are selected on held-out validation first; the immutable final
-config then sets `test_evaluation_allowed=true` and permits one complete
-three-fold benchmark evaluation. Repeated Test inspection must not be used as
-a model-selection signal.
+`test_labels_used=false`. The default remains `train,valid,test` for an
+unlocked benchmark run. Test is triggered by a **method milestone**, not a
+small hyperparameter change or elapsed wall time: hierarchy, invariance
+objectives, method topology, and Flow noninferiority are selected on held-out
+validation first; the immutable milestone config then sets
+`test_evaluation_allowed=true` and permits one complete three-fold benchmark
+evaluation across the declared tasks.
+
+A milestone Test may be used to detect a wrong research direction, but its
+statistical role must then be recorded honestly. Once its Accuracy, Macro-F1,
+confusions, or per-class results influence a later architecture, objective, or
+hyperparameter decision, that shared Test partition becomes a **development
+benchmark**, not an unbiased final evaluation. A paper claim produced after
+such feedback must use a newly reserved outer holdout, nested cross-validation,
+or another preregistered evaluation partition that is not inspected again
+during development. This policy avoids spending days on a validation-only
+direction that fails under distribution shift without silently tuning the
+reported final Test.
 
 Before that final Test is released, the four Packet application datasets that
 do not participate in VPN/TLS method selection run one locked-Test fold-0
