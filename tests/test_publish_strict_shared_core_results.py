@@ -532,6 +532,7 @@ def test_archive_includes_hierarchy_selection_gate_and_preregistration(tmp_path)
             "schema": "hierarchy_adaptive_class_weight_selection_v1",
             "selection_scope": "heldout_validation_only",
             "test_labels_used": False,
+            "shared_algorithm": "normalized_effective_flow_class_risk_power_eta",
             "inputs": {
                 "class_weight_selection": balance,
                 "gate": {
@@ -597,6 +598,7 @@ def test_archive_rejects_mutated_hierarchy_gate(tmp_path):
             "schema": "hierarchy_adaptive_class_weight_selection_v1",
             "selection_scope": "heldout_validation_only",
             "test_labels_used": False,
+            "shared_algorithm": "normalized_effective_flow_class_risk_power_eta",
             "inputs": {
                 "class_weight_selection": balance,
                 "gate": {"path": str(gate_path), "sha256": file_sha256(gate_path)},
@@ -624,6 +626,107 @@ def test_archive_rejects_mutated_hierarchy_gate(tmp_path):
             expected_fingerprint=config["config_sha256"],
             archive_root=tmp_path / "method_archive",
         )
+
+
+def test_archive_includes_bounded_hierarchy_upstream_evidence(tmp_path):
+    inputs = prepare_inputs(tmp_path)
+    config_path = inputs[8]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    balance = config["selection_evidence"]["balance"]
+    gate_path = write_json(
+        tmp_path / "bounded_gate.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_gate_v1",
+            "selection_scope": "heldout_validation_only",
+            "test_labels_used": False,
+        },
+    )
+    derivation_path = write_json(
+        tmp_path / "bounded_derivation.json",
+        {
+            "schema": "bounded_hierarchy_risk_protocol_v1",
+            "status": "derived_from_training_counts_only",
+            "test_labels_used": False,
+        },
+    )
+    preregistration_path = write_json(
+        tmp_path / "bounded_preregistration.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_preregistration_v1",
+            "test_labels_used": False,
+            "bounded_risk_geometry_amendment": {
+                "numeric_derivation": {
+                    "path": str(derivation_path),
+                    "sha256": file_sha256(derivation_path),
+                }
+            },
+        },
+    )
+    shared_inputs = {
+        "class_weight_selection": balance,
+        "gate": {"path": str(gate_path), "sha256": file_sha256(gate_path)},
+        "preregistration": {
+            "path": str(preregistration_path),
+            "sha256": file_sha256(preregistration_path),
+        },
+    }
+    reference_path = write_json(
+        tmp_path / "hierarchy_grid_reference.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_selection_v1",
+            "selection_scope": "heldout_validation_only",
+            "test_labels_used": False,
+            "shared_algorithm": "normalized_effective_flow_class_risk_power_eta",
+            "inputs": shared_inputs,
+        },
+    )
+    hierarchy_inputs = {
+        **shared_inputs,
+        "reference_hierarchy_selection": {
+            "path": str(reference_path),
+            "sha256": file_sha256(reference_path),
+        },
+        "bounded_risk_derivation": {
+            "path": str(derivation_path),
+            "sha256": file_sha256(derivation_path),
+        },
+    }
+    hierarchy_path = write_json(
+        tmp_path / "bounded_hierarchy_selection.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_selection_v1",
+            "selection_scope": "heldout_validation_only",
+            "test_labels_used": False,
+            "shared_algorithm": "bounded_effective_flow_class_risk_power_eta",
+            "numeric_protocol_selection": {
+                "schema": "bounded_hierarchy_risk_selection_v1",
+                "selected": "candidate",
+                "candidate_promoted_for_all_datasets": True,
+            },
+            "inputs": hierarchy_inputs,
+        },
+    )
+    config["selection_evidence"]["hierarchy_class_weight"] = {
+        "path": str(hierarchy_path),
+        "sha256": file_sha256(hierarchy_path),
+    }
+    config.pop("config_sha256")
+    config["config_sha256"] = canonical_sha256(config)
+    write_json(config_path, config)
+
+    archive = archive_frozen_method_evidence(
+        config_path,
+        expected_fingerprint=config["config_sha256"],
+        archive_root=tmp_path / "method_archive",
+    )
+
+    evidence = archive["selection_evidence"]
+    expected = {
+        "hierarchy_reference_hierarchy_selection",
+        "hierarchy_bounded_risk_derivation",
+    }
+    assert expected <= set(evidence)
+    assert all(Path(evidence[name]["archived_path"]).is_file() for name in expected)
 
 
 def test_archive_rejects_mutated_final_d1_evidence(tmp_path):
