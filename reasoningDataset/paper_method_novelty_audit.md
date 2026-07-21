@@ -171,6 +171,66 @@ Primary references for this boundary:
 - Ren et al., "Learning to Reweight Examples for Robust Deep Learning", ICML
   2018: https://proceedings.mlr.press/v80/ren18a.html
 
+### Identity Aliases In Flow-Aware Contrastive Sampling
+
+The current Packet-task sampler visits flows uniformly and requests two packet
+rows per selected flow. A flow containing only one packet must therefore copy
+that row when replacement is enabled. Standard supervised contrastive loss
+excludes the anchor only by batch index and treats every remaining same-label
+index as a positive. It does not know that two distinct indices may denote the
+same original packet. The copied row can consequently become both a trivial
+same-flow positive and a denominator entry. This is an **objective-level
+identity alias** induced by the interaction of fixed-cardinality flow sampling
+and the contrastive relation definition; it is not evidence that SupCon itself
+was implemented incorrectly.
+
+The exact eight-epoch replay audit quantifies why this matters before any model
+change is attempted:
+
+| Dataset | Singleton flows | Copied batch rows | Positive mass removed by identity deduplication | Identity-safe anchor positive coverage |
+| --- | ---: | ---: | ---: | ---: |
+| VPN Packet fold 0 | 57.14% | 28.57% | 56.45% | 82.44% |
+| TLS-120 Packet fold 0 | 28.85% | 14.42% | 28.72% | 84.19% |
+
+This observation has a strict prior-work boundary. Khosla et al. define
+multi-positive SupCon over all same-label batch indices and show that easy
+positives contribute smaller gradients. Robinson et al. establish more broadly
+that pair construction and instance-discrimination difficulty can create
+contrastive shortcuts and feature suppression. MIETT already defines packets
+from one flow as positives and packets from different flows as negatives.
+Therefore identity deduplication, harder positive mining, same-class pairing,
+or flow-aware contrastive learning is not a standalone novelty claim.
+
+The only admissible follow-up is a pre-registered **relation-complete
+identity-safe flow sampler**: it must prevent one physical packet from
+occupying multiple semantic roles, preserve useful same-flow or same-class
+positive coverage without replacement aliases, and use one rule on VPN and
+TLS. The ordered validation screen is:
+
+1. random flow pairing with the existing loss versus the same batches with
+   physical-packet identity masking;
+2. only if identity masking passes, random pairing versus identity-safe
+   same-class flow pairing;
+3. promotion only for a validation gain on both VPN and TLS Packet, followed by
+   Flow non-inferiority under the same relation rule.
+
+The audit-only same-class pairing replay raises identity-safe positive coverage
+to 99.95% on VPN and 99.96% on TLS while reducing alias-positive mass to 21.77%
+and 14.06%, respectively. These are sampling diagnostics, not accuracy results,
+and do not authorize promotion before the currently frozen balance/paired-view
+screen finishes. If the matched model experiment fails, the mechanism remains
+a documented negative result rather than part of the unified method.
+
+Primary references for this boundary:
+
+- Khosla et al., "Supervised Contrastive Learning", NeurIPS 2020:
+  https://proceedings.neurips.cc/paper/2020/hash/d89a66c7c80a29b1bdbab0f2a1a94af8-Abstract.html
+- Robinson et al., "Can Contrastive Learning Avoid Shortcut Solutions?",
+  NeurIPS 2021:
+  https://proceedings.neurips.cc/paper/2021/hash/27934a1f19d678a1377c257b9a780e80-Abstract.html
+- Wang et al., "MIETT: Multi-Instance Encrypted Traffic Transformer", AAAI
+  2025: the uploaded paper, Section 3.3 Flow Contrastive Learning.
+
 ## Defensible Method Hypothesis
 
 The current hypothesis is a unified counterfactual Packet-to-Flow representation contract:
