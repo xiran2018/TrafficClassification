@@ -583,7 +583,7 @@ def tower1_shared_protocol_signature(contract: Dict[str, Any]) -> Dict[str, Any]
         > 0.0,
         "class_balancing": (
             str(contract.get("class_weighting", "none")) != "none"
-            and float(contract.get("class_weight_strength", 0.0)) > 0.0
+            and str(contract.get("class_weight_basis", "")) == "flow"
         ),
     }
     signature["flow_prototype_mode"] = (
