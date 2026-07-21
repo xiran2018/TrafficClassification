@@ -151,6 +151,44 @@ config then sets `test_evaluation_allowed=true` and permits one complete
 three-fold benchmark evaluation. Repeated Test inspection must not be used as
 a model-selection signal.
 
+Before that final Test is released, the four Packet application datasets that
+do not participate in VPN/TLS method selection run one locked-Test fold-0
+applicability screen with the already frozen method:
+
+```text
+vpn-binary, vpn-service, ustc-app, ustc-binary
+```
+
+Every screen executes exactly `--splits train,valid`; it cannot choose a module,
+loss, hierarchy rule, or threshold. `evaluate_packet_scope_validation.py`
+requires all four completed manifests to bind the same final method SHA-256,
+requires strict `sample_unit=one_packet`, re-hashes the result provenance, and
+rejects evidence if `test_labels_used` is not false or a Test prediction file
+already exists. To make the check comparable across binary and multiclass
+datasets, metric `m` is normalized above chance as
+`(m - 1/C) / (1 - 1/C)`. The predeclared release thresholds are normalized
+Accuracy `>=0.70` and normalized Macro-F1 `>=0.65` on every dataset. These are
+a catastrophic-transfer safety gate for the common architecture, not another
+model-selection score. Failure returns the method to Train/Valid development;
+the threshold must not be relaxed after observing the results.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python evaluate_packet_scope_validation.py \
+    --config /tmp/two_tower_runs/shared_core_v2/final_method_config.json \
+    --run vpn-binary=/tmp/two_tower_runs/packet_scope_valid/artifacts/vpn-binary/fold0/packet_framework_manifest.json,/tmp/two_tower_runs/packet_scope_valid/artifacts/vpn-binary/fold0/valid_unified_packet_single_head.json \
+    --run vpn-service=/tmp/two_tower_runs/packet_scope_valid/artifacts/vpn-service/fold0/packet_framework_manifest.json,/tmp/two_tower_runs/packet_scope_valid/artifacts/vpn-service/fold0/valid_unified_packet_single_head.json \
+    --run ustc-app=/tmp/two_tower_runs/packet_scope_valid/artifacts/ustc-app/fold0/packet_framework_manifest.json,/tmp/two_tower_runs/packet_scope_valid/artifacts/ustc-app/fold0/valid_unified_packet_single_head.json \
+    --run ustc-binary=/tmp/two_tower_runs/packet_scope_valid/artifacts/ustc-binary/fold0/packet_framework_manifest.json,/tmp/two_tower_runs/packet_scope_valid/artifacts/ustc-binary/fold0/valid_unified_packet_single_head.json \
+    --output_json /tmp/two_tower_runs/shared_core_v2/packet_scope_validation_gate.json
+```
+
+The final six-dataset Packet and VPN/TLS Flow Test launchers require that gate
+to report both `all_datasets_pass=true` and
+`test_evaluation_released=true`, with a method fingerprint identical to the
+final config. Thus generating the final config alone is insufficient to read
+the shared Test partitions.
+
 The active strict-v2 unattended launchers under `/tmp/two_tower_runs` do not
 assume that GPU7 remains free. They scan `STRICT_GPU_CANDIDATES` (default
 `7 5 3 2 1 0 6 4`), require at least `60000` MiB free, acquire the existing
