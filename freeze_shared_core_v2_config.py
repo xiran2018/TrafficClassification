@@ -11,6 +11,9 @@ from typing import Any
 
 REQUIRED_DATASETS = {"vpn-app", "tls-120"}
 SELECTION_SCOPE = "heldout_validation_only"
+SELECTION_METRIC = "macro_f1_with_accuracy_guard"
+MIN_MACRO_F1_DELTA = 0.005
+MAX_ACCURACY_DROP = 0.005
 
 
 def valid_sha256(value: Any) -> bool:
@@ -49,6 +52,34 @@ def validate_selection(report: dict[str, Any], name: str) -> None:
         raise ValueError(f"{name} has no valid selected configuration")
     if report.get("promotion_scope") != "same_candidate_must_pass_every_dataset":
         raise ValueError(f"{name} does not enforce cross-dataset promotion")
+    if report.get("metric") != SELECTION_METRIC:
+        raise ValueError(f"{name} must use {SELECTION_METRIC}")
+    if float(report.get("min_delta", -1.0)) != MIN_MACRO_F1_DELTA:
+        raise ValueError(
+            f"{name} must require macro-F1 delta {MIN_MACRO_F1_DELTA}"
+        )
+    if float(report.get("max_accuracy_drop", -1.0)) != MAX_ACCURACY_DROP:
+        raise ValueError(
+            f"{name} must cap accuracy drop at {MAX_ACCURACY_DROP}"
+        )
+    recomputed_passes = {}
+    for dataset, row in (report.get("datasets") or {}).items():
+        macro_passes = float(row["delta_macro_f1"]) >= MIN_MACRO_F1_DELTA
+        accuracy_passes = float(row["delta_accuracy"]) >= -MAX_ACCURACY_DROP
+        recomputed = macro_passes and accuracy_passes
+        if not (
+            row.get("macro_f1_passes") is macro_passes
+            and row.get("accuracy_guard_passes") is accuracy_passes
+            and row.get("passes") is recomputed
+        ):
+            raise ValueError(f"{name} {dataset} has inconsistent promotion flags")
+        recomputed_passes[dataset] = recomputed
+    promoted = bool(recomputed_passes) and all(recomputed_passes.values())
+    if not (
+        report.get("candidate_promoted_for_all_datasets") is promoted
+        and report.get("selected") == ("candidate" if promoted else "baseline")
+    ):
+        raise ValueError(f"{name} selected field disagrees with its dual-metric gate")
     completion = report.get("training_completion_evidence") or {}
     if set(completion) != {"baseline", "candidate"}:
         raise ValueError(f"{name} is missing baseline/candidate training completion evidence")
@@ -89,6 +120,53 @@ def validate_selection(report: dict[str, Any], name: str) -> None:
             for row in rows.values()
         ):
             raise ValueError(f"{name} {role} completion evidence is missing SHA-256 hashes")
+        artifact_bindings = (
+            ("metric_path", "metric_sha256"),
+            ("final_checkpoint_path", "final_checkpoint_sha256"),
+            ("validation_history_path", "validation_history_sha256"),
+            ("provenance_path", "provenance_sha256"),
+        )
+        for dataset, row in rows.items():
+            for path_field, hash_field in artifact_bindings:
+                raw_path = row.get(path_field)
+                if not isinstance(raw_path, str) or not raw_path:
+                    raise ValueError(
+                        f"{name} {role} {dataset} is missing {path_field}"
+                    )
+                path = Path(raw_path)
+                if not path.is_file() or file_sha256(path) != row[hash_field]:
+                    raise ValueError(
+                        f"{name} {role} {dataset} {path_field} no longer "
+                        "matches its recorded SHA-256"
+                    )
+
+    implementation = report.get("training_implementation_consistency") or {}
+    expected_runs = len(REQUIRED_DATASETS) * 2
+    trainer_sha256 = implementation.get("trainer_source_sha256")
+    if not (
+        implementation.get("required") is True
+        and implementation.get("status") == "pass"
+        and int(implementation.get("num_runs", 0)) == expected_runs
+        and implementation.get("all_runs_stable_through_completion") is True
+        and valid_sha256(trainer_sha256)
+    ):
+        raise ValueError(
+            f"{name} does not prove one stable trainer source across all runs"
+        )
+    completion_rows = [
+        row
+        for evidence in completion.values()
+        for row in (evidence.get("datasets") or {}).values()
+    ]
+    if not all(
+        row.get("trainer_source_stable_through_completion") is True
+        and row.get("trainer_source_sha256") == trainer_sha256
+        and row.get("completion_trainer_source_sha256") == trainer_sha256
+        for row in completion_rows
+    ):
+        raise ValueError(
+            f"{name} completion rows disagree with the stable trainer source"
+        )
 
 
 def freeze_config(
@@ -152,7 +230,9 @@ def freeze_config(
         "tasks": ["packet-level-classification", "flow-level-classification"],
         "selection_protocol": {
             "scope": SELECTION_SCOPE,
-            "metric": "macro_f1",
+            "metric": SELECTION_METRIC,
+            "min_macro_f1_delta": MIN_MACRO_F1_DELTA,
+            "max_accuracy_drop": MAX_ACCURACY_DROP,
             "same_candidate_required_on_every_dataset": True,
             "test_labels_used": False,
         },
