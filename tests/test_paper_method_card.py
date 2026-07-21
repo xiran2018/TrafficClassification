@@ -12,6 +12,8 @@ def _strict_result(path, fingerprint):
     novelty.write_text('{"schema":"session_novelty_evaluation_v1"}', encoding="utf-8")
     method_archive = path.parent / f"{path.stem}_method_archive.json"
     method_archive.write_text('{"status":"verified_and_archived"}', encoding="utf-8")
+    bootstrap = path.parent / f"{path.stem}_bootstrap.json"
+    bootstrap.write_text('{"method":"flow_cluster_bootstrap"}', encoding="utf-8")
     audits = []
     for fold in range(3):
         audit = path.parent / f"{path.stem}_fold{fold}_audit.json"
@@ -21,6 +23,7 @@ def _strict_result(path, fingerprint):
 
     novelty_sha = hashlib.sha256(novelty.read_bytes()).hexdigest()
     method_archive_sha = hashlib.sha256(method_archive.read_bytes()).hexdigest()
+    bootstrap_sha = hashlib.sha256(bootstrap.read_bytes()).hexdigest()
     path.write_text(
         json.dumps(
             {
@@ -42,6 +45,8 @@ def _strict_result(path, fingerprint):
                     "session_novelty_sha256": novelty_sha,
                     "method_archive_manifest": str(method_archive),
                     "method_archive_manifest_sha256": method_archive_sha,
+                    "bootstrap_evidence": str(bootstrap),
+                    "bootstrap_evidence_sha256": bootstrap_sha,
                 }
             }
         ),

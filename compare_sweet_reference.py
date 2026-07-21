@@ -115,7 +115,11 @@ def verify_strict_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
                 reasons.append("audit_evidence_hash_mismatch")
         if len(observed_paths) != 3:
             reasons.append("audit_evidence_paths_not_distinct")
-    for name in ("method_archive_manifest", "session_novelty"):
+    for name in (
+        "method_archive_manifest",
+        "session_novelty",
+        "bootstrap_evidence",
+    ):
         path = Path(str(provenance.get(name) or ""))
         expected = str(provenance.get(f"{name}_sha256") or "")
         if not path.is_file():

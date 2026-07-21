@@ -52,8 +52,10 @@ def test_vpn_packet_can_exceed_both_sweet_reference_tiers(tmp_path):
 def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_path):
     method = tmp_path / "method_archive.json"
     novelty = tmp_path / "session_novelty.json"
+    bootstrap = tmp_path / "bootstrap.json"
     method.write_text('{"status":"verified"}', encoding="utf-8")
     novelty.write_text('{"status":"reported"}', encoding="utf-8")
+    bootstrap.write_text('{"method":"flow_cluster_bootstrap"}', encoding="utf-8")
     audits = []
     for fold in range(3):
         audit = tmp_path / f"fold{fold}_audit.json"
@@ -76,6 +78,8 @@ def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_p
         "method_archive_manifest_sha256": digest(method),
         "session_novelty": str(novelty),
         "session_novelty_sha256": digest(novelty),
+        "bootstrap_evidence": str(bootstrap),
+        "bootstrap_evidence_sha256": digest(bootstrap),
     }
     assert verify_strict_provenance(provenance)["status"] == "pass"
 

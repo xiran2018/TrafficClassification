@@ -393,6 +393,7 @@ def publish_canonical_result(
     audit_paths: list[Path],
     candidate: str,
     session_novelty: str,
+    bootstrap_evidence: str,
     method_archive_manifest: str,
     method_archive_manifest_sha256: str,
 ) -> None:
@@ -409,8 +410,11 @@ def publish_canonical_result(
         "flow_native_extraction_evidence_required": True,
         "fixed_consensus": "equal_log_mean_three_folds",
         "candidate": candidate,
+        "candidate_sha256": sha256_file(candidate),
         "session_novelty": session_novelty,
         "session_novelty_sha256": sha256_file(session_novelty),
+        "bootstrap_evidence": bootstrap_evidence,
+        "bootstrap_evidence_sha256": sha256_file(bootstrap_evidence),
         "method_archive_manifest": method_archive_manifest,
         "method_archive_manifest_sha256": method_archive_manifest_sha256,
     }
@@ -495,6 +499,9 @@ def main() -> None:
     canonical_packet_novelty = (
         canonical_packet.parent / "session_novelty_strict_shared_core_v2.json"
     )
+    canonical_packet_bootstrap = (
+        canonical_packet.parent / "bootstrap_strict_shared_core_v2.json"
+    )
     copied_manifests = []
     copied_flow_manifests = []
     packet_manifest_copies = []
@@ -542,9 +549,13 @@ def main() -> None:
     canonical_flow_novelty = (
         canonical_flow.parent / "session_novelty_strict_shared_core_v2.json"
     )
+    canonical_flow_bootstrap = (
+        canonical_flow.parent / "bootstrap_strict_shared_core_v2.json"
+    )
     if packet_target_pass:
         canonical_packet_novelty.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(args.packet_session_novelty, canonical_packet_novelty)
+        atomic_copy(args.packet_session_novelty, canonical_packet_novelty)
+        atomic_copy(args.packet_bootstrap, canonical_packet_bootstrap)
         publish_canonical_result(
             packet_payload,
             canonical_packet,
@@ -552,6 +563,7 @@ def main() -> None:
             audit_paths=audit_paths,
             candidate=args.packet_candidate,
             session_novelty=str(canonical_packet_novelty),
+            bootstrap_evidence=str(canonical_packet_bootstrap),
             method_archive_manifest=frozen_method_evidence["archive_manifest"],
             method_archive_manifest_sha256=frozen_method_evidence[
                 "archive_manifest_sha256"
@@ -563,7 +575,8 @@ def main() -> None:
             copied_manifests.append(str(destination))
     if flow_target_pass:
         canonical_flow_novelty.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(args.flow_session_novelty, canonical_flow_novelty)
+        atomic_copy(args.flow_session_novelty, canonical_flow_novelty)
+        atomic_copy(args.flow_bootstrap, canonical_flow_bootstrap)
         publish_canonical_result(
             flow_payload,
             canonical_flow,
@@ -571,6 +584,7 @@ def main() -> None:
             audit_paths=audit_paths,
             candidate=args.flow_candidate,
             session_novelty=str(canonical_flow_novelty),
+            bootstrap_evidence=str(canonical_flow_bootstrap),
             method_archive_manifest=frozen_method_evidence["archive_manifest"],
             method_archive_manifest_sha256=frozen_method_evidence[
                 "archive_manifest_sha256"
@@ -595,15 +609,21 @@ def main() -> None:
         "dataset": args.dataset,
         "shared_core_config_sha256": fingerprint,
         "audit_paths": [str(path) for path in audit_paths],
+        "audit_evidence": [
+            {"path": str(path), "sha256": sha256_file(path)}
+            for path in audit_paths
+        ],
         "frozen_method_evidence": frozen_method_evidence,
         "uncertainty_evidence": {
             "packet": {
                 "path": args.packet_bootstrap,
+                "sha256": sha256_file(args.packet_bootstrap),
                 "method": packet_bootstrap["method"],
                 "metrics": packet_bootstrap["metrics"],
             },
             "flow": {
                 "path": args.flow_bootstrap,
+                "sha256": sha256_file(args.flow_bootstrap),
                 "method": flow_bootstrap["method"],
                 "metrics": flow_bootstrap["metrics"],
             },
@@ -631,7 +651,11 @@ def main() -> None:
             "target_accuracy": packet_spec.target_accuracy,
             "target_macro_f1": packet_spec.target_macro_f1,
             "candidate": args.packet_candidate,
+            "candidate_sha256": sha256_file(args.packet_candidate),
             "canonical": str(canonical_packet) if packet_target_pass else "",
+            "canonical_sha256": (
+                sha256_file(canonical_packet) if packet_target_pass else None
+            ),
         },
         "flow": {
             "published": flow_target_pass,
@@ -640,7 +664,11 @@ def main() -> None:
             "target_accuracy": flow_spec.target_accuracy,
             "target_macro_f1": flow_spec.target_macro_f1,
             "candidate": args.flow_candidate,
+            "candidate_sha256": sha256_file(args.flow_candidate),
             "canonical": str(canonical_flow) if flow_target_pass else "",
+            "canonical_sha256": (
+                sha256_file(canonical_flow) if flow_target_pass else None
+            ),
         },
         "canonical_packet_manifests": copied_manifests,
         "canonical_flow_manifests": copied_flow_manifests,

@@ -279,6 +279,9 @@ def test_publish_requires_audits_and_promotes_fixed_consensus(tmp_path, monkeypa
     assert report["uncertainty_evidence"]["packet"]["method"] == (
         "class_stratified_flow_cluster_bootstrap"
     )
+    assert report["uncertainty_evidence"]["packet"]["sha256"] == file_sha256(
+        report["uncertainty_evidence"]["packet"]["path"]
+    )
     assert report["session_novelty_evidence"]["packet"]["path"].endswith(
         "packet_novelty.json"
     )
@@ -286,6 +289,11 @@ def test_publish_requires_audits_and_promotes_fixed_consensus(tmp_path, monkeypa
     assert canonical["publication_provenance"]["status"] == "strict_shared_core_v2"
     assert canonical["publication_provenance"]["session_novelty_sha256"]
     assert Path(canonical["publication_provenance"]["session_novelty"]).is_file()
+    bootstrap_path = canonical["publication_provenance"]["bootstrap_evidence"]
+    assert Path(bootstrap_path).is_file()
+    assert canonical["publication_provenance"][
+        "bootstrap_evidence_sha256"
+    ] == file_sha256(bootstrap_path)
     method_manifest = canonical["publication_provenance"]["method_archive_manifest"]
     assert Path(method_manifest).is_file()
     assert canonical["publication_provenance"][
@@ -295,6 +303,17 @@ def test_publish_requires_audits_and_promotes_fixed_consensus(tmp_path, monkeypa
     assert len(audit_evidence) == 3
     assert len({row["path"] for row in audit_evidence}) == 3
     assert all(file_sha256(row["path"]) == row["sha256"] for row in audit_evidence)
+    assert report["packet"]["candidate_sha256"] == file_sha256(
+        report["packet"]["candidate"]
+    )
+    assert report["packet"]["canonical_sha256"] == file_sha256(
+        report["packet"]["canonical"]
+    )
+    assert len(report["audit_evidence"]) == 3
+    assert all(
+        file_sha256(row["path"]) == row["sha256"]
+        for row in report["audit_evidence"]
+    )
     archive = report["frozen_method_evidence"]
     assert archive["status"] == "verified_and_archived"
     assert archive["schema"] == "strict_shared_core_v2_method_archive_v1"
