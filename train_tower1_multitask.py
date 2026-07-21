@@ -150,6 +150,7 @@ def tower1_training_config(args) -> dict:
         "temperature",
         "same_flow_positive_weight",
         "same_label_positive_weight",
+        "identity_safe_contrastive",
         "flow_proto_weight",
         "flow_proto_positive",
         "flow_proto_context",
@@ -174,7 +175,14 @@ def tower1_training_config(args) -> dict:
         "no_sft",
         "seed",
     )
-    config = {key: getattr(args, key) for key in keys}
+    config = {
+        key: (
+            getattr(args, key, False)
+            if key == "identity_safe_contrastive"
+            else getattr(args, key)
+        )
+        for key in keys
+    }
     config["packet_batch_scheduler"] = "epoch_resampled_dataloader_v1"
     return config
 
@@ -358,9 +366,10 @@ class SFTCollator:
 
 
 class PacketAuxCollator:
-    def __init__(self, tokenizer, max_length: int):
+    def __init__(self, tokenizer, max_length: int, require_packet_identity: bool = False):
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.require_packet_identity = bool(require_packet_identity)
 
     def __call__(self, rows: List[dict]) -> Dict[str, torch.Tensor]:
         texts = [r["prompt"] for r in rows]
@@ -368,12 +377,24 @@ class PacketAuxCollator:
         labels = torch.tensor([int(r["label_id"]) for r in rows], dtype=torch.long)
         weights = torch.tensor([float(r.get("packet_weight", 1.0)) for r in rows], dtype=torch.float32)
         flow_ids = torch.tensor([stable_flow_id(str(r.get("flow_id", ""))) for r in rows], dtype=torch.long)
+        packet_identity_values = [str(r.get("packet_uid", "")) for r in rows]
+        if self.require_packet_identity and any(not value for value in packet_identity_values):
+            raise ValueError(
+                "--identity_safe_contrastive requires packet_uid on every auxiliary row"
+            )
+        identity_index = {
+            value: index for index, value in enumerate(sorted(set(packet_identity_values)))
+        }
+        packet_ids = torch.tensor(
+            [identity_index[value] for value in packet_identity_values], dtype=torch.long
+        )
         batch = {
             "input_ids": toks["input_ids"],
             "attention_mask": toks["attention_mask"],
             "labels": labels,
             "weights": weights,
             "flow_ids": flow_ids,
+            "packet_ids": packet_ids,
         }
         if any(r.get("paired_prompt") for r in rows):
             paired_texts = [r.get("paired_prompt") or r["prompt"] for r in rows]
@@ -605,6 +626,14 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--same_flow_positive_weight", type=float, default=0.0, help="Extra positive weight for packets from the same flow in Tower-1 SupCon. 0 keeps label-only SupCon.")
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0, help="Positive weight for same-label packets in flow-aware SupCon.")
+    ap.add_argument(
+        "--identity_safe_contrastive",
+        action="store_true",
+        help=(
+            "Exclude repeated packet_uid aliases from every contrastive role while "
+            "retaining all sampled rows in packet classification CE."
+        ),
+    )
     ap.add_argument("--flow_proto_weight", type=float, default=0.0, help="Weight for packet-to-flow prototype contrastive loss in Tower-1.")
     ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class", help="Positive flow prototypes for --flow_proto_weight.")
     ap.add_argument(
@@ -747,7 +776,11 @@ def main() -> None:
         packet_loader = DataLoader(
             packet_ds,
             batch_sampler=packet_sampler,
-            collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+            collate_fn=PacketAuxCollator(
+                tokenizer,
+                args.max_packet_length,
+                require_packet_identity=args.identity_safe_contrastive,
+            ),
         )
         print(
             f"flow-balanced packet sampler: flows={len(packet_sampler.flows)}, "
@@ -762,7 +795,11 @@ def main() -> None:
             batch_size=args.packet_batch_size,
             shuffle=True,
             drop_last=True,
-            collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+            collate_fn=PacketAuxCollator(
+                tokenizer,
+                args.max_packet_length,
+                require_packet_identity=args.identity_safe_contrastive,
+            ),
         )
     print(f"packet samples={len(packet_ds)}, packet batches/epoch={len(packet_loader)}", flush=True)
     packet_iter = RestartableDataIterator(packet_loader)
@@ -781,7 +818,11 @@ def main() -> None:
             batch_size=args.valid_batch_size or args.packet_batch_size,
             shuffle=False,
             drop_last=False,
-            collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+            collate_fn=PacketAuxCollator(
+                tokenizer,
+                args.max_packet_length,
+                require_packet_identity=args.identity_safe_contrastive,
+            ),
         )
         print(
             f"validation packet samples={len(valid_ds)}/{full_valid_count}, "
@@ -856,6 +897,7 @@ def main() -> None:
             temperature=args.temperature,
             same_flow_positive_weight=args.same_flow_positive_weight,
             same_label_positive_weight=args.same_label_positive_weight,
+            identity_safe_contrastive=args.identity_safe_contrastive,
             flow_proto_weight=args.flow_proto_weight,
             flow_proto_positive=args.flow_proto_positive,
             flow_proto_context=args.flow_proto_context,

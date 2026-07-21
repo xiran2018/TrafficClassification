@@ -377,6 +377,7 @@ def test_cross_task_fold_uses_method_identity_not_effective_numeric_fingerprint(
 def test_cross_task_fold_rejects_tower1_objective_or_architecture_drift():
     for overrides in (
         {"contrastive_weight": 0.0},
+        {"identity_safe_contrastive": True},
         {"lora_r": 8},
         {"projection_dim": 128},
         {"class_weight_basis": "packet"},

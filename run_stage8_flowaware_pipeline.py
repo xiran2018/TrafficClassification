@@ -255,6 +255,8 @@ def tower1_train_cmd(args) -> List[str]:
         "--seed",
         str(args.seed),
     ]
+    if args.identity_safe_contrastive:
+        cmd.append("--identity_safe_contrastive")
     if getattr(args, "train_fixed_channel_fusion", False):
         cmd.append("--train_fixed_channel_fusion")
     if args.tower1_use_sft:
@@ -1692,6 +1694,11 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--same_flow_positive_weight", type=float, default=2.0)
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0)
+    ap.add_argument(
+        "--identity_safe_contrastive",
+        action="store_true",
+        help="Use packet-identity-safe Tower-1 contrastive normalization.",
+    )
     ap.add_argument("--flow_proto_weight", type=float, default=0.0)
     ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class")
     ap.add_argument(

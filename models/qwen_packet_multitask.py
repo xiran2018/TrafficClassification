@@ -8,6 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from models.identity_safe_contrastive import (
+    identity_safe_flow_aware_contrastive_loss,
+)
+
 try:
     from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 except Exception:  # pragma: no cover - optional import at runtime
@@ -157,6 +161,7 @@ class QwenPacketMultiTaskModel(nn.Module):
         temperature: float = 0.07,
         same_flow_positive_weight: float = 0.0,
         same_label_positive_weight: float = 1.0,
+        identity_safe_contrastive: bool = False,
         flow_proto_weight: float = 0.0,
         flow_proto_positive: str = "same_class",
         flow_proto_context: str = "inclusive",
@@ -199,7 +204,22 @@ class QwenPacketMultiTaskModel(nn.Module):
             else:
                 pkt_cls_loss = ce_each.mean()
             flow_ids = packet_batch.get("flow_ids")
-            if flow_ids is not None and same_flow_positive_weight > 0:
+            if identity_safe_contrastive:
+                packet_ids = packet_batch.get("packet_ids")
+                if flow_ids is None or packet_ids is None:
+                    raise ValueError(
+                        "identity-safe contrastive learning requires flow_ids and packet_ids"
+                    )
+                supcon_loss = identity_safe_flow_aware_contrastive_loss(
+                    projected_embeddings,
+                    labels,
+                    flow_ids.long(),
+                    packet_ids.long(),
+                    temperature=temperature,
+                    same_flow_weight=same_flow_positive_weight,
+                    same_label_weight=same_label_positive_weight,
+                )
+            elif flow_ids is not None and same_flow_positive_weight > 0:
                 supcon_loss = flow_aware_contrastive_loss(
                     projected_embeddings,
                     labels,

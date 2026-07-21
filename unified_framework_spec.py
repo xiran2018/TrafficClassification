@@ -460,6 +460,9 @@ def tower1_training_contract(args: Any, task: str) -> Dict[str, Any]:
         "contrastive_weight": float(value("contrastive_weight")),
         "same_flow_positive_weight": float(value("same_flow_positive_weight")),
         "same_label_positive_weight": float(value("same_label_positive_weight")),
+        "identity_safe_contrastive": bool(
+            getattr(args, "identity_safe_contrastive", False)
+        ),
         "flow_proto_weight": float(value("flow_proto_weight")),
         "flow_proto_positive": str(value("flow_proto_positive")),
         "flow_proto_context": str(value("flow_proto_context")),
@@ -542,6 +545,9 @@ def tower1_shared_protocol_signature(contract: Dict[str, Any]) -> Dict[str, Any]
     signature = {
         field: contract[field] for field in TOWER1_SHARED_PROTOCOL_FIELDS
     }
+    signature["identity_safe_contrastive"] = bool(
+        contract.get("identity_safe_contrastive", False)
+    )
     paired_enabled = float(contract.get("paired_consistency_weight", 0.0)) > 0.0
     signature["objectives"] = {
         "packet_classification": float(contract.get("cls_weight", 0.0)) > 0.0,
@@ -588,7 +594,9 @@ def tower1_shared_protocol_signature(contract: Dict[str, Any]) -> Dict[str, Any]
 def tower1_hyperparameter_differences(
     packet_contract: Dict[str, Any], flow_contract: Dict[str, Any]
 ) -> Dict[str, Dict[str, Any]]:
-    shared_fields = set(TOWER1_SHARED_PROTOCOL_FIELDS)
+    shared_fields = set(TOWER1_SHARED_PROTOCOL_FIELDS) | {
+        "identity_safe_contrastive"
+    }
     keys = sorted((set(packet_contract) | set(flow_contract)) - shared_fields)
     return {
         key: {"packet": packet_contract.get(key), "flow": flow_contract.get(key)}
@@ -657,6 +665,9 @@ def tower1_execution_evidence(
             "same_label_positive_weight": float(
                 config.get("same_label_positive_weight", float("nan"))
             ),
+            "identity_safe_contrastive": bool(
+                config.get("identity_safe_contrastive", False)
+            ),
             "flow_proto_weight": float(
                 config.get("flow_proto_weight", float("nan"))
             ),
@@ -710,6 +721,7 @@ def tower1_execution_evidence(
             for key, value in declared_contract.items()
             if key != "packet_context_policy"
         }
+        comparable_declaration.setdefault("identity_safe_contrastive", False)
         declaration_match = method_config == comparable_declaration
         executed_contract = {
             "packet_context_policy": declared_contract.get(

@@ -30,6 +30,7 @@ def test_training_config_records_sampler_and_paired_objective():
         "temperature": 0.07,
         "same_flow_positive_weight": 1.0,
         "same_label_positive_weight": 1.0,
+        "identity_safe_contrastive": True,
         "flow_proto_weight": 0.0,
         "flow_proto_positive": "same_class",
         "flow_proto_context": "inclusive",
@@ -62,3 +63,4 @@ def test_training_config_records_sampler_and_paired_objective():
     assert config["class_weight_basis"] == "flow"
     assert config["paired_consistency_weight"] == 0.05
     assert config["paired_raw_consistency_weight"] == 1.0
+    assert config["identity_safe_contrastive"] is True

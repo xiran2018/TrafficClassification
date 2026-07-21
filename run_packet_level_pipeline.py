@@ -678,6 +678,11 @@ def main() -> None:
     ap.add_argument("--contrastive_weight", type=float, default=0.1)
     ap.add_argument("--same_flow_positive_weight", type=float, default=1.0)
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0)
+    ap.add_argument(
+        "--identity_safe_contrastive",
+        action="store_true",
+        help="Use packet-identity-safe Tower-1 contrastive normalization.",
+    )
     ap.add_argument("--temperature", type=float, default=0.07)
     ap.add_argument("--flow_proto_weight", type=float, default=0.0)
     ap.add_argument(
@@ -1060,6 +1065,8 @@ def main() -> None:
             "--packets_per_flow", "2",
             "--no_sft",
         ]
+        if args.identity_safe_contrastive:
+            command.append("--identity_safe_contrastive")
         if args.init_checkpoint_dir:
             command.extend(["--init_checkpoint_dir", args.init_checkpoint_dir])
             if args.init_adapter_only:

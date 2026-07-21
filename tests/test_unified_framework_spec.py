@@ -502,11 +502,15 @@ def test_tower1_method_signature_rejects_disabled_objective_or_architecture_chan
     }
     disabled = dict(base, contrastive_weight=0.0)
     changed_architecture = dict(base, projection_dim=128)
+    changed_identity_policy = dict(base, identity_safe_contrastive=True)
     assert tower1_shared_protocol_signature(base) != (
         tower1_shared_protocol_signature(disabled)
     )
     assert tower1_shared_protocol_signature(base) != (
         tower1_shared_protocol_signature(changed_architecture)
+    )
+    assert tower1_shared_protocol_signature(base) != (
+        tower1_shared_protocol_signature(changed_identity_policy)
     )
 
 
