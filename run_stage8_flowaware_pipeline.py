@@ -21,6 +21,7 @@ from shared_core_v2 import (
     capture_training_hyperparameter_overrides,
     effective_shared_core_sha256,
     load_frozen_shared_core,
+    resolve_dataset_training_hyperparameters,
     restore_profile_training_hyperparameters,
 )
 from audit_flow_embeddings import audit_report_evidence
@@ -2038,6 +2039,14 @@ def main() -> None:
                     "provisional shared-core config forbids test; use "
                     "--splits train,valid --eval_splits valid"
                 )
+        independent_training_hyperparameters = (
+            resolve_dataset_training_hyperparameters(
+                frozen,
+                "flow-level",
+                args.dataset,
+                independent_training_hyperparameters,
+            )
+        )
         args.shared_core_overrides = apply_frozen_shared_core(
             args,
             "flow-level",

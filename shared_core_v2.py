@@ -133,7 +133,6 @@ _ACTIVATION_GUARDED_FIELDS = {
         "tower1_paired_logit_kl_weight": ("tower1", "paired_logit_kl_weight"),
         "tower1_paired_raw_consistency_weight": ("tower1", "paired_raw_consistency_weight"),
         "tower1_cross_scale_weight": ("tower1", "cross_scale_weight"),
-        "class_weight_strength": ("tower1", "class_weight_strength"),
         "protocol_pretrain_field_mask_probability": ("native_pretraining", "field_mask_probability"),
         "protocol_pretrain_payload_dropout_probability": ("native_pretraining", "payload_dropout_probability"),
         "protocol_pretrain_session_mask_probability": ("native_pretraining", "session_mask_probability"),
@@ -157,7 +156,6 @@ _ACTIVATION_GUARDED_FIELDS = {
         "tower1_paired_logit_kl_weight": ("tower1", "paired_logit_kl_weight"),
         "tower1_paired_raw_consistency_weight": ("tower1", "paired_raw_consistency_weight"),
         "tower1_cross_scale_weight": ("tower1", "cross_scale_weight"),
-        "tower1_class_weight_strength": ("tower1", "class_weight_strength"),
         "native_field_mask_probability": ("native_pretraining", "field_mask_probability"),
         "native_payload_dropout_probability": ("native_pretraining", "payload_dropout_probability"),
         "native_session_mask_probability": ("native_pretraining", "session_mask_probability"),
@@ -257,6 +255,40 @@ def effective_shared_core_sha256(
             "training_hyperparameter_overrides": independent,
         }
     )
+
+
+def resolve_dataset_training_hyperparameters(
+    payload: dict[str, Any],
+    task: str,
+    dataset: str,
+    explicit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge validation-frozen numeric defaults with explicit run overrides."""
+    task_key = {
+        "packet-level": "packet-level-classification",
+        "flow-level": "flow-level-classification",
+    }.get(task)
+    if task_key is None:
+        raise ValueError(f"unsupported shared-core task: {task}")
+    stored = (
+        (payload.get("dataset_numeric_hyperparameter_overrides") or {})
+        .get(task_key, {})
+        .get(dataset, {})
+    )
+    name_map = {
+        "packet-level": {"class_weight_strength": "class_weight_strength"},
+        "flow-level": {"class_weight_strength": "tower1_class_weight_strength"},
+    }
+    resolved = {
+        name_map[task][name]: value for name, value in stored.items()
+    }
+    resolved.update(explicit or {})
+    unsupported = sorted(set(resolved) - INDEPENDENT_TRAINING_HYPERPARAMETERS[task])
+    if unsupported:
+        raise ValueError(
+            f"unsupported independent training hyperparameters for {task}: {unsupported}"
+        )
+    return resolved
 
 
 def _validate_activation_topology(
@@ -445,6 +477,27 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         raise ValueError("shared-core v2 requires the fixed Tower1 weight decay")
     if float(tower1["class_weight_beta"]) != 0.9999:
         raise ValueError("shared-core v2 requires the fixed effective-number beta")
+    numeric = payload.get("dataset_numeric_hyperparameter_overrides") or {}
+    if numeric:
+        expected_tasks = {
+            "packet-level-classification",
+            "flow-level-classification",
+        }
+        if set(numeric) != expected_tasks or tower1["class_weight_basis"] != "flow":
+            raise ValueError("invalid dataset numeric hierarchy override topology")
+        for task_name, datasets in numeric.items():
+            if set(datasets) != REQUIRED_DATASETS:
+                raise ValueError(f"{task_name} numeric overrides do not cover VPN/TLS")
+            for dataset, values in datasets.items():
+                if set(values) != {"class_weight_strength"}:
+                    raise ValueError(
+                        f"unsupported numeric hierarchy fields for {task_name} {dataset}"
+                    )
+                strength = float(values["class_weight_strength"])
+                if not 0.0 <= strength <= 1.0:
+                    raise ValueError(
+                        f"class-weight strength outside [0,1] for {task_name} {dataset}"
+                    )
     extraction = payload.get("embedding_extraction") or {}
     if extraction.get("scheduler") != "cross_flow_length_bucketed_v1":
         raise ValueError("shared-core v2 requires the frozen length-bucketed scheduler")

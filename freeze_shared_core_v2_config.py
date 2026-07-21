@@ -288,8 +288,115 @@ def selected_class_weight_config(balance_report: dict[str, Any]) -> dict[str, An
     return {"class_weight_basis": basis, "class_weight_strength": strength}
 
 
+def validate_hierarchy_selection(
+    hierarchy_report: dict[str, Any],
+    balance_report: dict[str, Any],
+    *,
+    hierarchy_path: Path,
+    balance_path: Path,
+) -> dict[str, dict[str, Any]]:
+    if not (
+        hierarchy_report.get("schema")
+        == "hierarchy_adaptive_class_weight_selection_v1"
+        and hierarchy_report.get("status")
+        == "frozen_numeric_hyperparameters_from_validation"
+        and hierarchy_report.get("selection_scope") == SELECTION_SCOPE
+        and hierarchy_report.get("test_labels_used") is False
+        and hierarchy_report.get("shared_algorithm")
+        == "normalized_effective_flow_class_risk_power_eta"
+    ):
+        raise ValueError("invalid hierarchy class-weight selection")
+    class_input = (hierarchy_report.get("inputs") or {}).get(
+        "class_weight_selection"
+    ) or {}
+    if not (
+        Path(str(class_input.get("path") or "")).resolve() == balance_path.resolve()
+        and class_input.get("sha256") == file_sha256(balance_path)
+    ):
+        raise ValueError("hierarchy selection is not bound to balance evidence")
+    datasets = hierarchy_report.get("datasets") or {}
+    if set(datasets) != REQUIRED_DATASETS:
+        raise ValueError("hierarchy selection must cover exactly VPN and TLS-120")
+    expected_trainer = balance_report["multi_arm_selection"][
+        "all_arm_training_implementation_consistency"
+    ]["trainer_source_sha256"]
+    output: dict[str, dict[str, Any]] = {}
+    for dataset, row in datasets.items():
+        eta = float(row.get("selected_eta", -1.0))
+        if eta not in {0.0, 0.25, 0.5, 1.0}:
+            raise ValueError(f"unsupported hierarchy eta for {dataset}: {eta}")
+        parameters = row.get("training_hyperparameters") or {}
+        if not (
+            parameters.get("class_weight_basis") == "flow"
+            and math.isclose(
+                float(parameters.get("class_weight_strength", -1.0)),
+                eta,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError(f"hierarchy parameters disagree for {dataset}")
+        arms = row.get("arms") or {}
+        selected_arm = arms.get(str(eta)) or {}
+        if selected_arm.get("eligible") is not True:
+            raise ValueError(f"selected hierarchy eta is ineligible for {dataset}")
+        eligible = [item for item in arms.values() if item.get("eligible") is True]
+        recomputed = max(
+            eligible,
+            key=lambda item: (
+                float(item["macro_f1"]),
+                float(item["accuracy"]),
+                -float(item["eta"]),
+            ),
+        )
+        if not math.isclose(float(recomputed["eta"]), eta, abs_tol=1e-12):
+            raise ValueError(f"hierarchy selection ranking disagrees for {dataset}")
+        evidence = row.get("selected_training_evidence") or {}
+        metric = row.get("selected_validation_metric") or {}
+        if not (
+            evidence.get("trainer_source_stable_through_completion") is True
+            and evidence.get("trainer_source_sha256") == expected_trainer
+            and evidence.get("completion_trainer_source_sha256") == expected_trainer
+            and evidence.get("metric_path") == metric.get("path")
+            and evidence.get("metric_sha256") == metric.get("sha256")
+        ):
+            raise ValueError(f"hierarchy training evidence disagrees for {dataset}")
+        for path_field, hash_field in (
+            ("metric_path", "metric_sha256"),
+            ("final_checkpoint_path", "final_checkpoint_sha256"),
+            ("validation_history_path", "validation_history_sha256"),
+            ("provenance_path", "provenance_sha256"),
+        ):
+            path = Path(str(evidence.get(path_field) or ""))
+            if not path.is_file() or file_sha256(path) != evidence.get(hash_field):
+                raise ValueError(
+                    f"hierarchy {dataset} evidence no longer matches {path_field}"
+                )
+        observed_config = training_config(
+            evidence, f"hierarchy selected evidence {dataset}"
+        )
+        expected_basis = "packet" if eta == 0.0 else "flow"
+        expected_strength = 1.0 if eta == 0.0 else eta
+        require_config(
+            observed_config,
+            {
+                "class_weight_basis": expected_basis,
+                "class_weight_strength": expected_strength,
+            },
+            f"hierarchy selected evidence {dataset}",
+        )
+        output[dataset] = {
+            "class_weight_basis": "flow",
+            "class_weight_strength": eta,
+            "selected_training_evidence": evidence,
+        }
+    return output
+
+
 def validate_experiment_chain(
-    balance_report: dict[str, Any], paired_report: dict[str, Any]
+    balance_report: dict[str, Any],
+    paired_report: dict[str, Any],
+    hierarchy_weights: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     common = {
         "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
@@ -342,40 +449,52 @@ def validate_experiment_chain(
                 f"balance {role} {dataset}",
             )
 
-    selected_role = balance_report["selected"]
-    selected_rows = balance_completion[selected_role]["datasets"]
     paired_completion = paired_report["training_completion_evidence"]
     paired_baseline_rows = paired_completion["baseline"]["datasets"]
-    identity_fields = (
-        "metric_sha256",
-        "final_checkpoint_sha256",
-        "validation_history_sha256",
-        "provenance_sha256",
-    )
-    for dataset in sorted(REQUIRED_DATASETS):
-        if any(
-            paired_baseline_rows[dataset].get(field)
-            != selected_rows[dataset].get(field)
-            for field in identity_fields
-        ):
-            raise ValueError(
-                "paired selection baseline is not the artifact-identical "
-                f"balance-selected run for {dataset}"
-            )
+    if hierarchy_weights is None:
+        selected_role = balance_report["selected"]
+        selected_rows = balance_completion[selected_role]["datasets"]
+        identity_fields = (
+            "metric_sha256",
+            "final_checkpoint_sha256",
+            "validation_history_sha256",
+            "provenance_sha256",
+        )
+        for dataset in sorted(REQUIRED_DATASETS):
+            if any(
+                paired_baseline_rows[dataset].get(field)
+                != selected_rows[dataset].get(field)
+                for field in identity_fields
+            ):
+                raise ValueError(
+                    "paired selection baseline is not the artifact-identical "
+                    f"balance-selected run for {dataset}"
+                )
+        selected = selected_class_weight_config(balance_report)
+        hierarchy_weights = {dataset: selected for dataset in REQUIRED_DATASETS}
 
-    selected_weight = selected_class_weight_config(balance_report)
-    selected_basis = selected_weight["class_weight_basis"]
-    selected_strength = selected_weight["class_weight_strength"]
-    paired_expected = {
-        **common,
-        "class_weight_basis": selected_basis,
-        "class_weight_strength": selected_strength,
-        "paired_consistency_weight": 0.05,
-        "paired_cls_weight": 0.2,
-        "paired_logit_kl_weight": 0.5,
-        "paired_raw_consistency_weight": 1.0,
-    }
-    for dataset, row in paired_completion["candidate"]["datasets"].items():
+    for dataset in sorted(REQUIRED_DATASETS):
+        selected = hierarchy_weights[dataset]
+        base_expected = {
+            **common,
+            "class_weight_basis": selected["class_weight_basis"],
+            "class_weight_strength": selected["class_weight_strength"],
+            "paired_consistency_weight": 0.0,
+            "paired_cls_weight": 0.0,
+        }
+        require_config(
+            training_config(paired_baseline_rows[dataset], f"paired baseline {dataset}"),
+            base_expected,
+            f"paired baseline {dataset}",
+        )
+        paired_expected = {
+            **base_expected,
+            "paired_consistency_weight": 0.05,
+            "paired_cls_weight": 0.2,
+            "paired_logit_kl_weight": 0.5,
+            "paired_raw_consistency_weight": 1.0,
+        }
+        row = paired_completion["candidate"]["datasets"][dataset]
         config = training_config(row, f"paired candidate {dataset}")
         require_config(config, paired_expected, f"paired candidate {dataset}")
         if not config.get("paired_packet_aux_jsonl"):
@@ -396,12 +515,30 @@ def freeze_config(
     *,
     balance_path: Path,
     paired_path: Path,
+    hierarchy_report: dict[str, Any] | None = None,
+    hierarchy_path: Path | None = None,
 ) -> dict[str, Any]:
     validate_selection(balance_report, "balance selection")
     validate_selection(paired_report, "paired selection")
-    paired_factorial = validate_experiment_chain(balance_report, paired_report)
+    hierarchy_weights = None
+    if hierarchy_report is not None:
+        if hierarchy_path is None:
+            raise ValueError("hierarchy_path is required with hierarchy_report")
+        hierarchy_weights = validate_hierarchy_selection(
+            hierarchy_report,
+            balance_report,
+            hierarchy_path=hierarchy_path,
+            balance_path=balance_path,
+        )
+    paired_factorial = validate_experiment_chain(
+        balance_report, paired_report, hierarchy_weights
+    )
 
-    selected_weight = selected_class_weight_config(balance_report)
+    selected_weight = (
+        {"class_weight_basis": "flow", "class_weight_strength": 1.0}
+        if hierarchy_weights is not None
+        else selected_class_weight_config(balance_report)
+    )
     use_paired_invariance = paired_report["selected"] == "candidate"
     tower1 = {
         "base_model": "Qwen/Qwen2.5-7B-Instruct",
@@ -459,6 +596,8 @@ def freeze_config(
             "min_macro_f1_delta": MIN_MACRO_F1_DELTA,
             "max_accuracy_drop": MAX_ACCURACY_DROP,
             "same_candidate_required_on_every_dataset": True,
+            "dataset_specific_numeric_hyperparameters_allowed": True,
+            "dataset_specific_algorithm_choices_allowed": False,
             "test_labels_used": False,
         },
         "packet_core": {
@@ -508,6 +647,22 @@ def freeze_config(
             "content_group_loss_reduction": "group_mean",
         },
         "tower1": tower1,
+        "dataset_numeric_hyperparameter_overrides": (
+            {
+                task: {
+                    dataset: {
+                        "class_weight_strength": row["class_weight_strength"]
+                    }
+                    for dataset, row in sorted(hierarchy_weights.items())
+                }
+                for task in (
+                    "packet-level-classification",
+                    "flow-level-classification",
+                )
+            }
+            if hierarchy_weights is not None
+            else {}
+        ),
         "embedding_extraction": {
             "scheduler": "cross_flow_length_bucketed_v1",
             "embedding_mode": "concat",
@@ -543,6 +698,13 @@ def freeze_config(
             },
         },
     }
+    if hierarchy_report is not None and hierarchy_path is not None:
+        payload["selection_evidence"]["hierarchy_class_weight"] = {
+            "path": str(hierarchy_path),
+            "sha256": file_sha256(hierarchy_path),
+            "shared_algorithm": hierarchy_report["shared_algorithm"],
+            "datasets": hierarchy_report["datasets"],
+        }
     payload["config_sha256"] = canonical_sha256(payload)
     return payload
 
@@ -551,6 +713,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--balance_selection", required=True)
     parser.add_argument("--paired_selection", required=True)
+    parser.add_argument("--hierarchy_selection", default="")
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
@@ -558,11 +721,19 @@ def main() -> None:
     paired_path = Path(args.paired_selection)
     balance = json.loads(balance_path.read_text(encoding="utf-8"))
     paired = json.loads(paired_path.read_text(encoding="utf-8"))
+    hierarchy_path = Path(args.hierarchy_selection) if args.hierarchy_selection else None
+    hierarchy = (
+        json.loads(hierarchy_path.read_text(encoding="utf-8"))
+        if hierarchy_path is not None
+        else None
+    )
     payload = freeze_config(
         balance,
         paired,
         balance_path=balance_path,
         paired_path=paired_path,
+        hierarchy_report=hierarchy,
+        hierarchy_path=hierarchy_path,
     )
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)

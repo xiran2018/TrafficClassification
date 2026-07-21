@@ -194,6 +194,97 @@ def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
     assert fingerprint == canonical_sha256(frozen)
 
 
+def test_freeze_binds_hierarchy_numeric_overrides_before_paired_screen(tmp_path):
+    balance = report(tmp_path, "hierarchy_balance", "candidate")
+    trainer_sha = balance["training_implementation_consistency"][
+        "trainer_source_sha256"
+    ]
+    balance["multi_arm_selection"] = {
+        "selected_config": {
+            "class_weight_basis": "flow",
+            "class_weight_strength": 0.5,
+        },
+        "factorial_config_integrity": {"required": True, "status": "pass"},
+        "all_arm_training_implementation_consistency": {
+            "trainer_source_sha256": trainer_sha,
+        },
+    }
+    paired = report(
+        tmp_path,
+        "hierarchy_paired",
+        "candidate",
+        screen="paired",
+        paired_basis="flow",
+        paired_strength=0.5,
+    )
+    balance_path = write_report(tmp_path / "hierarchy_balance.json", balance)
+    hierarchy = {
+        "schema": "hierarchy_adaptive_class_weight_selection_v1",
+        "status": "frozen_numeric_hyperparameters_from_validation",
+        "selection_scope": "heldout_validation_only",
+        "test_labels_used": False,
+        "shared_algorithm": "normalized_effective_flow_class_risk_power_eta",
+        "inputs": {
+            "class_weight_selection": {
+                "path": str(balance_path.resolve()),
+                "sha256": hashlib.sha256(balance_path.read_bytes()).hexdigest(),
+            }
+        },
+        "datasets": {},
+    }
+    for dataset in ("vpn-app", "tls-120"):
+        evidence = deepcopy(
+            balance["training_completion_evidence"]["candidate"]["datasets"][
+                dataset
+            ]
+        )
+        hierarchy["datasets"][dataset] = {
+            "selected_eta": 0.5,
+            "training_hyperparameters": {
+                "class_weight_basis": "flow",
+                "class_weight_strength": 0.5,
+            },
+            "arms": {
+                "0.0": {
+                    "eta": 0.0,
+                    "accuracy": 0.8,
+                    "macro_f1": 0.6,
+                    "eligible": True,
+                },
+                "0.5": {
+                    "eta": 0.5,
+                    "accuracy": 0.8,
+                    "macro_f1": 0.61,
+                    "eligible": True,
+                },
+            },
+            "selected_validation_metric": {
+                "path": evidence["metric_path"],
+                "sha256": evidence["metric_sha256"],
+            },
+            "selected_training_evidence": evidence,
+        }
+    hierarchy_path = write_report(tmp_path / "hierarchy.json", hierarchy)
+    paired_path = write_report(tmp_path / "hierarchy_paired.json", paired)
+
+    frozen = freeze_config(
+        balance,
+        paired,
+        balance_path=balance_path,
+        paired_path=paired_path,
+        hierarchy_report=hierarchy,
+        hierarchy_path=hierarchy_path,
+    )
+
+    assert frozen["tower1"]["class_weight_basis"] == "flow"
+    assert frozen["dataset_numeric_hyperparameter_overrides"][
+        "packet-level-classification"
+    ]["vpn-app"]["class_weight_strength"] == 0.5
+    assert frozen["selection_evidence"]["hierarchy_class_weight"][
+        "sha256"
+    ] == hashlib.sha256(hierarchy_path.read_bytes()).hexdigest()
+
+
 def test_freeze_promotes_paired_invariance_only_when_both_datasets_pass(tmp_path):
     balance = report(tmp_path, "balance", "baseline")
     paired = bind_paired_baseline(

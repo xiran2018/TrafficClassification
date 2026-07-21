@@ -14,6 +14,7 @@ from shared_core_v2 import (
     capture_training_hyperparameter_overrides,
     effective_shared_core_sha256,
     load_frozen_shared_core,
+    resolve_dataset_training_hyperparameters,
     restore_profile_training_hyperparameters,
 )
 
@@ -548,6 +549,50 @@ def test_numeric_training_hyperparameters_can_differ_without_changing_core():
     assert packet.packet_context_policy == "single_packet"
     assert packet.lora_r == 16
     assert packet.byte_exact_shared_representation is True
+
+
+def test_dataset_numeric_hierarchy_defaults_are_resolved_and_fingerprinted():
+    payload = frozen_payload()
+    payload["dataset_numeric_hyperparameter_overrides"] = {
+        "packet-level-classification": {
+            "vpn-app": {"class_weight_strength": 0.0},
+            "tls-120": {"class_weight_strength": 0.5},
+        },
+        "flow-level-classification": {
+            "vpn-app": {"class_weight_strength": 0.25},
+            "tls-120": {"class_weight_strength": 1.0},
+        },
+    }
+
+    vpn_packet = resolve_dataset_training_hyperparameters(
+        payload, "packet-level", "vpn-app"
+    )
+    tls_flow = resolve_dataset_training_hyperparameters(
+        payload, "flow-level", "tls-120"
+    )
+    explicit = resolve_dataset_training_hyperparameters(
+        payload,
+        "packet-level",
+        "vpn-app",
+        {"class_weight_strength": 0.25},
+    )
+
+    assert vpn_packet == {"class_weight_strength": 0.0}
+    assert tls_flow == {"tower1_class_weight_strength": 1.0}
+    assert explicit == {"class_weight_strength": 0.25}
+    assert effective_shared_core_sha256(payload, "packet-level", vpn_packet) != (
+        effective_shared_core_sha256(payload, "packet-level", explicit)
+    )
+
+    packet = packet_args()
+    apply_frozen_shared_core(
+        packet,
+        "packet-level",
+        payload,
+        training_hyperparameter_overrides=vpn_packet,
+    )
+    assert packet.class_weight_basis == "flow"
+    assert packet.class_weight_strength == 0.0
 
 
 def test_numeric_override_cannot_disable_objective_or_change_architecture():
