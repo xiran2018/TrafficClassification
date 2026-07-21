@@ -33,6 +33,46 @@ def test_sampled_batches_reproduce_short_flow_replacement_and_epoch_seed():
     assert first[0].count(2) == 2
 
 
+def test_same_class_pairing_visits_each_flow_once_and_keeps_pairs_together():
+    source = [
+        {"flow_id": f"a{index}", "packet_uid": f"a{index}", "label_id": 0}
+        for index in range(4)
+    ] + [
+        {"flow_id": f"b{index}", "packet_uid": f"b{index}", "label_id": 1}
+        for index in range(4)
+    ]
+    batches = list(
+        sampled_batches(
+            source,
+            batch_size=4,
+            packets_per_flow=1,
+            seed=42,
+            epoch=0,
+            flow_pairing="same_class",
+        )
+    )
+
+    visited = [source[index]["flow_id"] for batch in batches for index in batch]
+    assert sorted(visited) == sorted(row["flow_id"] for row in source)
+    for batch in batches:
+        labels = [source[index]["label_id"] for index in batch]
+        assert all(labels.count(label) >= 2 for label in set(labels))
+
+
+def test_same_class_pairing_rejects_odd_flow_capacity():
+    with pytest.raises(ValueError, match="even number of flows"):
+        list(
+            sampled_batches(
+                rows(),
+                batch_size=6,
+                packets_per_flow=2,
+                seed=42,
+                epoch=0,
+                flow_pairing="same_class",
+            )
+        )
+
+
 def test_batch_exposure_deduplicates_alias_from_all_contrastive_roles():
     # Two copies of b0 simulate packets_per_flow=2 on a singleton flow.
     exposure = batch_exposure(
@@ -53,7 +93,7 @@ def test_batch_exposure_deduplicates_alias_from_all_contrastive_roles():
 def test_audit_reports_rates_without_using_predictions():
     report = audit_rows(
         rows(),
-        batch_size=6,
+        batch_size=8,
         packets_per_flow=2,
         epochs=2,
         seed=42,
@@ -65,6 +105,22 @@ def test_audit_reports_rates_without_using_predictions():
     assert aggregate["duplicate_row_rate"] == pytest.approx(1 / 6)
     assert aggregate["denominator_pairs_removed_by_identity_dedup_rate"] == pytest.approx(1 / 3)
     assert report["interpretation"]["scope"].endswith("no_validation_or_test_predictions")
+
+
+def test_same_class_pairing_restores_identity_safe_positive_coverage():
+    report = audit_rows(
+        rows(),
+        batch_size=8,
+        packets_per_flow=2,
+        epochs=2,
+        seed=42,
+        same_flow_weight=1.0,
+        same_label_weight=1.0,
+        flow_pairing="same_class",
+    )
+
+    assert report["flow_pairing"] == "same_class"
+    assert report["aggregate"]["identity_safe_valid_anchor_rate"] == 1.0
 
 
 def test_load_rows_requires_unique_explicit_packet_identity(tmp_path):

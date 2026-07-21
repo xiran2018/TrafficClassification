@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -50,19 +51,65 @@ def sampled_batches(
     packets_per_flow: int,
     seed: int,
     epoch: int,
+    flow_pairing: str = "random",
 ) -> Iterable[List[int]]:
     if batch_size <= 0 or packets_per_flow <= 0:
         raise ValueError("batch_size and packets_per_flow must be positive")
     flow_to_indices: Dict[str, List[int]] = {}
     for index, row in enumerate(rows):
         flow_to_indices.setdefault(row["flow_id"], []).append(index)
+    if flow_pairing not in {"random", "same_class"}:
+        raise ValueError("flow_pairing must be random or same_class")
+    flow_labels = {}
+    for row in rows:
+        previous = flow_labels.setdefault(row["flow_id"], row["label_id"])
+        if previous != row["label_id"]:
+            raise ValueError(f"conflicting labels for flow_id={row['flow_id']}")
+
     flows_per_batch = max(1, batch_size // packets_per_flow)
-    flows = list(flow_to_indices)
+    if flow_pairing == "same_class" and flows_per_batch % 2:
+        raise ValueError(
+            "same_class flow pairing requires an even number of flows per batch"
+        )
     rng = random.Random(seed + epoch)
-    rng.shuffle(flows)
-    for start in range(0, len(flows), flows_per_batch):
+    if flow_pairing == "random":
+        flows = list(flow_to_indices)
+        rng.shuffle(flows)
+        flow_batches = [
+            flows[start : start + flows_per_batch]
+            for start in range(0, len(flows), flows_per_batch)
+        ]
+    else:
+        class_flows = defaultdict(list)
+        for flow_id in flow_to_indices:
+            class_flows[flow_labels[flow_id]].append(flow_id)
+        pair_units = []
+        singleton_units = []
+        for label in sorted(class_flows):
+            label_flows = class_flows[label]
+            rng.shuffle(label_flows)
+            for start in range(0, len(label_flows), 2):
+                unit = label_flows[start : start + 2]
+                (pair_units if len(unit) == 2 else singleton_units).append(unit)
+        rng.shuffle(pair_units)
+        rng.shuffle(singleton_units)
+        flow_batches = []
+        while pair_units or singleton_units:
+            current = []
+            while len(current) < flows_per_batch:
+                remaining = flows_per_batch - len(current)
+                if pair_units and remaining >= 2:
+                    current.extend(pair_units.pop())
+                elif singleton_units:
+                    current.extend(singleton_units.pop())
+                else:
+                    break
+            if current:
+                flow_batches.append(current)
+
+    for selected_flows in flow_batches:
         batch = []
-        for flow_id in flows[start : start + flows_per_batch]:
+        for flow_id in selected_flows:
             indices = flow_to_indices[flow_id]
             if len(indices) >= packets_per_flow:
                 batch.extend(rng.sample(indices, packets_per_flow))
@@ -196,6 +243,7 @@ def audit_rows(
     seed: int,
     same_flow_weight: float,
     same_label_weight: float,
+    flow_pairing: str = "random",
 ) -> dict:
     if epochs <= 0:
         raise ValueError("epochs must be positive")
@@ -205,7 +253,12 @@ def audit_rows(
         batch_stats = [
             batch_exposure(rows, batch, same_flow_weight, same_label_weight)
             for batch in sampled_batches(
-                rows, batch_size, packets_per_flow, seed, epoch
+                rows,
+                batch_size,
+                packets_per_flow,
+                seed,
+                epoch,
+                flow_pairing=flow_pairing,
             )
         ]
         all_batch_stats.extend(batch_stats)
@@ -213,12 +266,17 @@ def audit_rows(
     return {
         "num_source_packets": len(rows),
         "num_source_flows": len({row["flow_id"] for row in rows}),
+        "expected_batches_per_epoch": math.ceil(
+            len({row["flow_id"] for row in rows})
+            / max(1, batch_size // packets_per_flow)
+        ),
         "batch_size": batch_size,
         "packets_per_flow": packets_per_flow,
         "epochs": epochs,
         "seed": seed,
         "same_flow_positive_weight": same_flow_weight,
         "same_label_positive_weight": same_label_weight,
+        "flow_pairing": flow_pairing,
         "aggregate": aggregate_exposure(all_batch_stats),
         "epochs_detail": epoch_reports,
         "interpretation": {
@@ -241,6 +299,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--same_flow_weight", type=float, default=1.0)
     parser.add_argument("--same_label_weight", type=float, default=1.0)
+    parser.add_argument(
+        "--flow_pairing", choices=["random", "same_class"], default="random"
+    )
     parser.add_argument("--output_json", default="")
     args = parser.parse_args()
 
@@ -255,6 +316,7 @@ def main() -> None:
             seed=args.seed,
             same_flow_weight=args.same_flow_weight,
             same_label_weight=args.same_label_weight,
+            flow_pairing=args.flow_pairing,
         )
         report["path"] = str(path)
         report["input_sha256"] = file_sha256(path)
@@ -275,6 +337,7 @@ def main() -> None:
         aggregate = report["aggregate"]
         print(
             f"{report['path']}: flows={report['num_source_flows']} "
+            f"flow_pairing={report['flow_pairing']} "
             f"duplicate_rows={aggregate['duplicate_row_rate']:.2%} "
             f"alias_positive_mass={aggregate['alias_share_of_naive_positive_weight']:.2%} "
             f"dedup_positive_mass_removed="

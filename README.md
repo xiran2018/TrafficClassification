@@ -5083,6 +5083,36 @@ VPN/TLS held-out histories under one unchanged implementation, best macro-F1
 gain of at least `0.005` on both datasets, and no held-out accuracy drop larger
 than `0.005`; test labels remain unavailable to the decision.
 
+Replay the exact eight-epoch sampler and measure the full weighted contrastive
+exposure, without loading predictions:
+
+```bash
+conda run -n llm-factory python audit_tower1_contrastive_exposure.py \
+  /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/vpn-app/fold0/train/packet_auxiliary.jsonl \
+  /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/tls-120/fold0/train/packet_auxiliary.jsonl \
+  --batch_size 16 --packets_per_flow 2 --epochs 8 --seed 42 \
+  --same_flow_weight 1 --same_label_weight 1 \
+  --output_json /tmp/two_tower_runs/paper_unified_tower1_contrastive_exposure_fold0.json
+```
+
+For fold 0, duplicate rows occupy `28.57%` of VPN and `14.42%` of TLS-120
+sampled positions, while alias pairs contribute `33.34%` and `27.13%` of the
+naive SupCon positive-weight mass. Keeping one contrastive role per packet
+identity would remove `56.45%/28.72%` of total positive mass and
+`49.51%/26.90%` of denominator pairs. Therefore identity-safe SupCon is a
+material objective change, not a bookkeeping-only fix; these training-input
+statistics justify an ablation but cannot promote it.
+
+The audit-only `--flow_pairing same_class` mode keeps same-class flow pairs in
+the same batch so identity deduplication does not remove every positive for a
+short-flow anchor. On fold 0 it lowers alias positive-mass share to
+`21.77%/14.06%` for VPN/TLS and gives full identity-safe positive coverage in
+the tested schedule. This is a second candidate, not part of the current
+sampler: first compare naive versus identity-safe under random pairing, and
+only then compare random versus same-class pairing under identity-safe SupCon.
+Combining both changes in one ablation would not identify which mechanism
+caused a gain.
+
 `train_tower1_multitask.py` now supports `--class_weight_basis {packet,flow}` and `--class_weight_strength ALPHA`. For normalized class-balanced weight `w_c`, the applied weight is proportional to `w_c ** ALPHA` and is renormalized to mean one. `ALPHA=0` disables class reweighting and `ALPHA=1` applies full correction. Both the packet-level and flow-level runners expose the same mechanism, so this is a shared Tower-1 objective rather than a dataset-specific classifier trick.
 
 The running `paper_unified` baselines retain the historical `packet` basis and are not changed retroactively. The pre-registered next comparison is:
