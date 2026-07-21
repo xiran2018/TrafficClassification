@@ -121,6 +121,36 @@ their own operational headroom. The real `llm-factory` environment has CUDA
 access to eight A800 GPUs even when CUDA is unavailable inside the default
 Codex sandbox.
 
+Paper-development Packet runs can keep the shared Test partition physically
+unread by using the explicit split contract:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_packet_level_pipeline.py \
+    --dataset vpn-service \
+    --fold 0 \
+    --stage paper_unified \
+    --framework_profile paper_unified \
+    --shared_core_config /tmp/two_tower_runs/shared_core_v2/provisional_method_config.json \
+    --splits train,valid \
+    --artifact_root /tmp/two_tower_runs/packet_scope_valid/artifacts \
+    --checkpoint_root /tmp/two_tower_runs/packet_scope_valid/checkpoints \
+    --semantic_embedding_device cuda \
+    --local_files_only
+```
+
+When `test_evaluation_allowed=false`, the runner accepts only a command whose
+`--splits` excludes `test`; requesting Test fails before preprocessing. The
+split audit, factual/intervened semantic caches, evaluators, and framework
+manifest then cover exactly `train,valid`, and the manifest records
+`test_labels_used=false`. The default remains `train,valid,test` for a final
+unlocked run. Test is triggered by a **method milestone**, not elapsed wall
+time: hierarchy, invariance objectives, method topology, and Flow
+noninferiority are selected on held-out validation first; the immutable final
+config then sets `test_evaluation_allowed=true` and permits one complete
+three-fold benchmark evaluation. Repeated Test inspection must not be used as
+a model-selection signal.
+
 The active strict-v2 unattended launchers under `/tmp/two_tower_runs` do not
 assume that GPU7 remains free. They scan `STRICT_GPU_CANDIDATES` (default
 `7 5 3 2 1 0 6 4`), require at least `60000` MiB free, acquire the existing
