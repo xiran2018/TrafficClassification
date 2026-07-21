@@ -5041,6 +5041,7 @@ conda run -n llm-factory python analyze_tower1_sampling_balance.py \
   reasoningDataset/packet-level/tls-120/fold{0,1,2}/train/packet_auxiliary.jsonl \
   --method effective \
   --strengths 0.5,1.0 \
+  --packets_per_flow 2 \
   --output_json /tmp/two_tower_runs/paper_unified_tower1_sampling_balance.json
 ```
 
@@ -5051,6 +5052,16 @@ VPN folds:     packet-count ratio=1.00, flow-count ratio=13.40-16.69
 TLS-120 folds: packet-count ratio=1.00, flow-count ratio=29.50-34.25
 ```
 
+The audit also records flow-length replacement exposure. With
+`packets_per_flow=2`, fold-0 contains `2693/4713` VPN singleton flows
+(`57.14%` of flows, `28.57%` of sampled slots) and `6118/21208` TLS-120
+singleton flows (`28.85%` of flows, `14.42%` of sampled slots). The sampler
+duplicates a row for these flows to preserve equal CE exposure per flow. Such a
+copy must not automatically be interpreted as an independent same-flow SupCon
+positive. This is a training-data diagnostic, not evidence for changing the
+method: a duplicate-identity contrastive mask requires a matched VPN/TLS
+validation ablation before it may enter the shared core.
+
 `train_tower1_multitask.py` now supports `--class_weight_basis {packet,flow}` and `--class_weight_strength ALPHA`. For normalized class-balanced weight `w_c`, the applied weight is proportional to `w_c ** ALPHA` and is renormalized to mean one. `ALPHA=0` disables class reweighting and `ALPHA=1` applies full correction. Both the packet-level and flow-level runners expose the same mechanism, so this is a shared Tower-1 objective rather than a dataset-specific classifier trick.
 
 The running `paper_unified` baselines retain the historical `packet` basis and are not changed retroactively. The pre-registered next comparison is:
@@ -5058,7 +5069,8 @@ The running `paper_unified` baselines retain the historical `packet` basis and a
 ```text
 baseline: basis=packet, strength=1.0 (all packet counts are equal, so weights are 1)
 candidate: basis=flow, strength=0.5 (square-root correction)
-selection: held-out packet macro-F1 only, with the same setting required for VPN and TLS-120
+selection: held-out packet macro-F1 gain >=0.005 and accuracy drop <=0.005,
+           with the same setting required for VPN and TLS-120
 test policy: evaluate the frozen selected setting once; do not select strength from test metrics
 ```
 
