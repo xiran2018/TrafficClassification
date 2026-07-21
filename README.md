@@ -162,7 +162,18 @@ during development. This policy avoids spending days on a validation-only
 direction that fails under distribution shift without silently tuning the
 reported final Test.
 
-Before that final Test is released, the four Packet application datasets that
+The active strict-v2 run applies this rule with an early direction check. After
+`shared_core_v2/final_method_config.json` has passed Packet selection and Flow
+validation noninferiority, `/tmp/two_tower_runs/run_milestone_dev_fold0.sh`
+runs VPN-app and TLS-120 fold 0 through both one-packet inference and one-flow
+inference. It writes only under
+`/tmp/two_tower_runs/milestone_dev_shared_core_v2` (apart from uniquely tagged
+Flow manifests) and does not wait for the four-dataset Packet applicability
+gate. These two results are explicitly a development benchmark. The later
+scope gate and full three-fold launch remain separate, so a poor core result is
+detected before spending the complete cross-dataset evaluation budget.
+
+Before the full benchmark Test is released, the four Packet application datasets that
 do not participate in VPN/TLS method selection run one locked-Test fold-0
 applicability screen with the already frozen method:
 
