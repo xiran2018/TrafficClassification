@@ -287,6 +287,10 @@ def tower1_train_cmd(args) -> List[str]:
             str(args.tower1_paired_logit_kl_weight),
             "--paired_raw_consistency_weight",
             str(args.tower1_paired_raw_consistency_weight),
+            "--cross_scale_weight",
+            str(args.tower1_cross_scale_weight),
+            "--cross_scale_temperature",
+            str(args.tower1_cross_scale_temperature),
         ]
     if args.flow_balanced_packet_batches:
         cmd += ["--flow_balanced_packet_batches", "--packets_per_flow", str(args.packets_per_flow)]
@@ -1711,6 +1715,8 @@ def main() -> None:
     ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier in Tower-1.")
     ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0, help="Raw last-token cosine term inside Tower-1 paired consistency.")
+    ap.add_argument("--tower1_cross_scale_weight", type=float, default=0.0, help="Availability-aware cross-intervention packet-to-flow context loss.")
+    ap.add_argument("--tower1_cross_scale_temperature", type=float, default=0.07)
     ap.add_argument("--flow_balanced_packet_batches", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--packets_per_flow", type=int, default=2)
     ap.add_argument("--tower1_lr", type=float, default=2e-5)
@@ -1983,6 +1989,10 @@ def main() -> None:
         ap.error("--tower1_class_weight_strength must be in [0, 1]")
     if args.tower1_paired_raw_consistency_weight < 0:
         ap.error("--tower1_paired_raw_consistency_weight must be non-negative")
+    if args.tower1_cross_scale_weight < 0 or args.tower1_cross_scale_temperature <= 0:
+        ap.error("Tower-1 cross-scale weight must be non-negative and temperature positive")
+    if args.tower1_cross_scale_weight > 0 and not args.use_intervention_views:
+        ap.error("--tower1_cross_scale_weight requires --use_intervention_views")
     if args.tower1_paired_consistency_weight < 0 or args.tower1_paired_cls_weight < 0:
         ap.error("Tower-1 paired loss weights must be non-negative")
     if args.tower1_paired_logit_kl_weight < 0:
@@ -2095,7 +2105,7 @@ def main() -> None:
         )
         if not args.paired_embedding_suffix:
             args.paired_embedding_suffix = tower2_data_suffix(intervention_args)
-        if args.tower1_paired_consistency_weight > 0:
+        if args.tower1_paired_consistency_weight > 0 or args.tower1_cross_scale_weight > 0:
             args.tower1_paired_data_suffix = intervention_suffix
 
     if not args.train_dir or not args.valid_dir or not args.test_dir:

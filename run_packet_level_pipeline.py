@@ -704,6 +704,8 @@ def main() -> None:
     ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0)
     ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5)
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0)
+    ap.add_argument("--tower1_cross_scale_weight", type=float, default=0.0)
+    ap.add_argument("--tower1_cross_scale_temperature", type=float, default=0.07)
     ap.add_argument("--class_weighting", choices=["none", "inverse", "effective"], default="effective")
     ap.add_argument("--class_weight_basis", choices=["packet", "flow"], default="packet")
     ap.add_argument("--class_weight_strength", type=float, default=1.0)
@@ -897,6 +899,10 @@ def main() -> None:
         ap.error("--tower1_paired_logit_kl_weight must be non-negative")
     if args.tower1_paired_raw_consistency_weight < 0:
         ap.error("--tower1_paired_raw_consistency_weight must be non-negative")
+    if args.tower1_cross_scale_weight < 0 or args.tower1_cross_scale_temperature <= 0:
+        ap.error("Tower-1 cross-scale weight must be non-negative and temperature positive")
+    if args.tower1_cross_scale_weight > 0 and not args.use_intervention_views:
+        ap.error("--tower1_cross_scale_weight requires --use_intervention_views")
     if args.tower1_paired_cls_weight > 0 and args.tower1_paired_consistency_weight <= 0:
         ap.error("--tower1_paired_cls_weight requires --tower1_paired_consistency_weight > 0")
     independent_training_hyperparameters = capture_training_hyperparameter_overrides(
@@ -1071,7 +1077,7 @@ def main() -> None:
             command.extend(["--init_checkpoint_dir", args.init_checkpoint_dir])
             if args.init_adapter_only:
                 command.append("--init_adapter_only")
-        if args.tower1_paired_consistency_weight > 0:
+        if args.tower1_paired_consistency_weight > 0 or args.tower1_cross_scale_weight > 0:
             paired_path = intervention_dirs["train"] / "packet_auxiliary.jsonl"
             if not args.dry_run and not paired_path.exists():
                 raise FileNotFoundError(
@@ -1085,6 +1091,8 @@ def main() -> None:
                     "--paired_cls_weight", str(args.tower1_paired_cls_weight),
                     "--paired_logit_kl_weight", str(args.tower1_paired_logit_kl_weight),
                     "--paired_raw_consistency_weight", str(args.tower1_paired_raw_consistency_weight),
+                    "--cross_scale_weight", str(args.tower1_cross_scale_weight),
+                    "--cross_scale_temperature", str(args.tower1_cross_scale_temperature),
                 ]
             )
         if args.local_files_only:
