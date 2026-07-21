@@ -1,6 +1,9 @@
+import hashlib
+import json
+
 import pytest
 
-from evaluate_hierarchy_adaptive_gate import evaluate
+from evaluate_hierarchy_adaptive_gate import evaluate, matched_trajectory_diagnostics
 
 
 def preregistration():
@@ -102,3 +105,54 @@ def test_rejects_incomplete_validation_history():
     ]["datasets"]["tls-120"]["validation_points"] = 7
     with pytest.raises(ValueError, match="complete validation evidence"):
         evaluate(incomplete, preregistration())
+
+
+def test_matched_trajectory_is_hash_bound_and_reporting_only(tmp_path):
+    payload = report(divergent=True)
+    completions = payload["multi_arm_selection"][
+        "all_arm_training_completion_evidence"
+    ]
+    for arm in ("packet_full", "flow_sqrt", "flow_full"):
+        for dataset in ("vpn-app", "tls-120"):
+            rows = []
+            for step in range(1, 9):
+                accuracy = 0.80
+                macro_f1 = 0.75
+                if arm == "flow_sqrt" and dataset == "tls-120":
+                    accuracy, macro_f1 = 0.81, 0.77
+                rows.append(
+                    {
+                        "step": step,
+                        "metrics": {
+                            "accuracy": accuracy,
+                            "macro_f1": macro_f1,
+                        },
+                    }
+                )
+            path = tmp_path / f"{dataset}_{arm}.jsonl"
+            path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            completions[arm]["datasets"][dataset].update(
+                {
+                    "validation_history_path": str(path),
+                    "validation_history_sha256": hashlib.sha256(
+                        path.read_bytes()
+                    ).hexdigest(),
+                }
+            )
+
+    diagnostics = matched_trajectory_diagnostics(payload, preregistration())
+    assert diagnostics["selection_role"] == "reporting_only_not_launch_gate"
+    assert diagnostics["datasets"]["tls-120"]["preferred_step_counts"][
+        "flow_sqrt"
+    ] == 8
+    assert diagnostics["datasets"]["vpn-app"]["preferred_step_counts"][
+        "packet_full"
+    ] == 8
+
+    path = tmp_path / "tls-120_flow_sqrt.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="trajectory hash mismatch"):
+        matched_trajectory_diagnostics(payload, preregistration())

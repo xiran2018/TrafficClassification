@@ -155,6 +155,119 @@ def evaluate(report: dict[str, Any], prereg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def matched_trajectory_diagnostics(
+    report: dict[str, Any], prereg: dict[str, Any]
+) -> dict[str, Any]:
+    """Report matched-step stability without changing the preregistered gate."""
+    multi = report["multi_arm_selection"]
+    completions = multi["all_arm_training_completion_evidence"]
+    eligibility = prereg["launch_gate"]["eligibility"]
+    min_delta = float(eligibility["minimum_macro_f1_gain_over_packet_full"])
+    max_drop = float(eligibility["maximum_accuracy_drop_from_packet_full"])
+    datasets = sorted(completions["packet_full"]["datasets"])
+    output: dict[str, Any] = {}
+    for dataset in datasets:
+        histories: dict[str, dict[int, dict[str, Any]]] = {}
+        for arm in ARM_PARAMETERS:
+            evidence = completions[arm]["datasets"][dataset]
+            path = Path(str(evidence.get("validation_history_path") or ""))
+            expected_hash = str(evidence.get("validation_history_sha256") or "")
+            if not path.is_file() or file_sha256(path) != expected_hash:
+                raise ValueError(
+                    f"{dataset} {arm} validation trajectory hash mismatch"
+                )
+            rows = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            histories[arm] = {int(row["step"]): row["metrics"] for row in rows}
+        common_steps = sorted(set.intersection(*(set(rows) for rows in histories.values())))
+        required_points = int(prereg["launch_gate"]["required_validation_points_per_arm"])
+        if len(common_steps) != required_points:
+            raise ValueError(
+                f"{dataset} has {len(common_steps)} matched steps, expected {required_points}"
+            )
+
+        trajectory = []
+        preference_counts = {arm: 0 for arm in ARM_PARAMETERS}
+        eligible_counts = {arm: 0 for arm in ARM_PARAMETERS}
+        delta_sums = {
+            arm: {"accuracy": 0.0, "macro_f1": 0.0}
+            for arm in ("flow_sqrt", "flow_full")
+        }
+        for step in common_steps:
+            baseline = histories["packet_full"][step]
+            arms = {
+                "packet_full": {
+                    "accuracy": float(baseline["accuracy"]),
+                    "macro_f1": float(baseline["macro_f1"]),
+                    "delta_accuracy": 0.0,
+                    "delta_macro_f1": 0.0,
+                    "eligible": True,
+                }
+            }
+            for arm in ("flow_sqrt", "flow_full"):
+                metrics = histories[arm][step]
+                delta_accuracy = float(metrics["accuracy"]) - float(
+                    baseline["accuracy"]
+                )
+                delta_f1 = float(metrics["macro_f1"]) - float(
+                    baseline["macro_f1"]
+                )
+                arms[arm] = {
+                    "accuracy": float(metrics["accuracy"]),
+                    "macro_f1": float(metrics["macro_f1"]),
+                    "delta_accuracy": delta_accuracy,
+                    "delta_macro_f1": delta_f1,
+                    "eligible": bool(
+                        delta_f1 >= min_delta and delta_accuracy >= -max_drop
+                    ),
+                }
+                delta_sums[arm]["accuracy"] += delta_accuracy
+                delta_sums[arm]["macro_f1"] += delta_f1
+            for arm, row in arms.items():
+                eligible_counts[arm] += int(row["eligible"])
+            eligible_arms = [arm for arm, row in arms.items() if row["eligible"]]
+
+            def key(arm: str) -> tuple[float, float, float, float]:
+                params = ARM_PARAMETERS[arm]
+                return (
+                    arms[arm]["macro_f1"],
+                    arms[arm]["accuracy"],
+                    -params["alpha"],
+                    -params["gamma"],
+                )
+
+            preferred = max(eligible_arms, key=key)
+            preference_counts[preferred] += 1
+            trajectory.append(
+                {"step": step, "preferred_eligible_arm": preferred, "arms": arms}
+            )
+        denominator = float(len(common_steps))
+        output[dataset] = {
+            "matched_steps": common_steps,
+            "trajectory": trajectory,
+            "eligible_step_counts": eligible_counts,
+            "preferred_step_counts": preference_counts,
+            "last_three_preferred_arms": [
+                row["preferred_eligible_arm"] for row in trajectory[-3:]
+            ],
+            "mean_candidate_deltas": {
+                arm: {
+                    metric: value / denominator
+                    for metric, value in metrics.items()
+                }
+                for arm, metrics in delta_sums.items()
+            },
+        }
+    return {
+        "selection_role": "reporting_only_not_launch_gate",
+        "test_labels_used": False,
+        "datasets": output,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--class_weight_selection", required=True)
@@ -163,7 +276,12 @@ def main() -> None:
     args = parser.parse_args()
     report_path = Path(args.class_weight_selection)
     prereg_path = Path(args.preregistration)
-    payload = evaluate(load_json(report_path), load_json(prereg_path))
+    report = load_json(report_path)
+    prereg = load_json(prereg_path)
+    payload = evaluate(report, prereg)
+    payload["matched_trajectory_diagnostics"] = matched_trajectory_diagnostics(
+        report, prereg
+    )
     payload["inputs"] = {
         "class_weight_selection": {
             "path": str(report_path.resolve()),
