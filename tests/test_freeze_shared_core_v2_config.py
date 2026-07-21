@@ -228,7 +228,8 @@ def test_freeze_supports_preregistered_full_flow_correction(tmp_path):
         "selected_config": {
             "class_weight_basis": "flow",
             "class_weight_strength": 1.0,
-        }
+        },
+        "factorial_config_integrity": {"required": True, "status": "pass"},
     }
     paired = bind_paired_baseline(
         report(
@@ -250,6 +251,28 @@ def test_freeze_supports_preregistered_full_flow_correction(tmp_path):
     assert frozen["tower1"]["class_weight_basis"] == "flow"
     assert frozen["tower1"]["class_weight_strength"] == 1.0
     assert frozen["tower1"]["paired_consistency_weight"] == 0.05
+
+
+def test_freeze_rejects_multi_arm_selection_without_factorial_integrity(tmp_path):
+    balance = report(tmp_path, "balance_uncontrolled", "baseline")
+    balance["multi_arm_selection"] = {
+        "selected_config": {
+            "class_weight_basis": "packet",
+            "class_weight_strength": 1.0,
+        },
+        "factorial_config_integrity": {"required": True, "status": "fail"},
+    }
+    paired = bind_paired_baseline(
+        report(tmp_path, "paired_uncontrolled", "baseline", screen="paired"),
+        balance,
+    )
+    with pytest.raises(ValueError, match="factorial integrity"):
+        freeze_config(
+            balance,
+            paired,
+            balance_path=write_report(tmp_path / "balance_uncontrolled.json", balance),
+            paired_path=write_report(tmp_path / "paired_uncontrolled.json", paired),
+        )
 
 
 def test_freeze_rejects_single_dataset_or_non_validation_selection(tmp_path):

@@ -224,9 +224,17 @@ def selected_class_weight_config(balance_report: dict[str, Any]) -> dict[str, An
         raise ValueError(
             f"unsupported balance-selected class-weight protocol: {(basis, strength)}"
         )
-    declared = (balance_report.get("multi_arm_selection") or {}).get(
-        "selected_config"
-    )
+    multi_arm = balance_report.get("multi_arm_selection")
+    if multi_arm is not None:
+        factorial_integrity = multi_arm.get("factorial_config_integrity") or {}
+        if not (
+            factorial_integrity.get("required") is True
+            and factorial_integrity.get("status") == "pass"
+        ):
+            raise ValueError(
+                "multi-arm class-weight selection lacks passing factorial integrity"
+            )
+    declared = (multi_arm or {}).get("selected_config")
     if declared is not None and not (
         declared.get("class_weight_basis") == basis
         and math.isclose(
