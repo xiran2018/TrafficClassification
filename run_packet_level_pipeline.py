@@ -299,7 +299,10 @@ def semantic_cache_policy_evidence(args, artifacts: Path) -> dict:
         else "legacy_per_flow_v1"
     )
     splits = {}
-    for split in ("train", "valid", "test"):
+    execution_splits = tuple(
+        getattr(args, "execution_splits", ("train", "valid", "test"))
+    )
+    for split in execution_splits:
         views = {}
         for view, suffix, expected_header in (
             ("factual", "_full", "full"),
@@ -576,6 +579,8 @@ def write_framework_manifest(
                     "mask_ip_port" if args.framework_profile == "paper_unified" else ""
                 ),
                 "shared_test_dir": args.shared_test_dir,
+                "executed_splits": list(args.execution_splits),
+                "test_labels_used": "test" in args.execution_splits,
                 "dry_run": args.dry_run,
                 "completed": effective_completed,
             },
@@ -636,6 +641,14 @@ def main() -> None:
         "--shared_test_dir",
         default="",
         help="Reuse an already preprocessed shared test directory instead of writing a fold-local copy.",
+    )
+    ap.add_argument(
+        "--splits",
+        default="train,valid,test",
+        help=(
+            "Comma-separated execution splits. Use train,valid for a locked-Test "
+            "development run; paper_unified always requires train and valid."
+        ),
     )
     ap.add_argument("--base_model", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--init_checkpoint_dir", default="")
@@ -890,6 +903,22 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()
+    requested_splits = tuple(
+        name.strip() for name in args.splits.split(",") if name.strip()
+    )
+    if (
+        not requested_splits
+        or len(set(requested_splits)) != len(requested_splits)
+        or not set(requested_splits) <= {"train", "valid", "test"}
+    ):
+        ap.error("--splits must be a unique subset of train,valid,test")
+    if args.stage == "paper_unified" and not {"train", "valid"} <= set(
+        requested_splits
+    ):
+        ap.error("paper_unified requires --splits to include train,valid")
+    if args.stage in {"fusion", "packet_best", "all"} and "test" not in requested_splits:
+        ap.error(f"stage {args.stage} requires the test split")
+    args.execution_splits = requested_splits
     if args.semantic_embedding_num_shards <= 0:
         ap.error("--semantic_embedding_num_shards must be positive")
     if not 0.0 <= args.class_weight_strength <= 1.0:
@@ -919,10 +948,10 @@ def main() -> None:
         frozen = load_frozen_shared_core(args.shared_core_config)
         if not (frozen.get("selection_protocol") or {}).get(
             "test_evaluation_allowed", True
-        ):
+        ) and "test" in args.execution_splits:
             ap.error(
-                "provisional shared-core config is restricted to Flow validation "
-                "and cannot run the Packet pipeline"
+                "provisional shared-core config forbids Packet Test; use "
+                "--splits train,valid"
             )
         independent_training_hyperparameters = (
             resolve_dataset_training_hyperparameters(
@@ -1174,6 +1203,8 @@ def main() -> None:
             ("valid", valid_source, valid_dir),
             ("test", test_source, test_dir),
         ):
+            if split not in args.execution_splits:
+                continue
             if split == "test" and args.shared_test_dir:
                 required = output_dir / "packet_auxiliary.jsonl"
                 if not required.exists():
@@ -1217,18 +1248,19 @@ def main() -> None:
                 run(intervention_command, args.dry_run)
 
     if args.stage in {"audit", "paper_unified", "all"}:
-        run(
-            [
-                sys.executable,
-                "audit_packet_flow_split.py",
-                "--train", str(train_dir / "packet_auxiliary.jsonl"),
-                "--valid", str(valid_dir / "packet_auxiliary.jsonl"),
-                "--test", str(test_dir / "packet_auxiliary.jsonl"),
-                "--output_json", str(artifacts / "flow_split_audit.json"),
-                "--fail_on_overlap",
-            ],
-            args.dry_run,
-        )
+        audit_command = [
+            sys.executable,
+            "audit_packet_flow_split.py",
+            "--train", str(train_dir / "packet_auxiliary.jsonl"),
+            "--valid", str(valid_dir / "packet_auxiliary.jsonl"),
+            "--output_json", str(artifacts / "flow_split_audit.json"),
+            "--fail_on_overlap",
+        ]
+        if "test" in args.execution_splits:
+            audit_command.extend(
+                ["--test", str(test_dir / "packet_auxiliary.jsonl")]
+            )
+        run(audit_command, args.dry_run)
 
     if should_pretrain_protocol_content:
         run(protocol_content_pretrain_command(), args.dry_run)
@@ -1248,6 +1280,8 @@ def main() -> None:
     if args.stage == "paper_unified":
         run(tower1_packet_train_command(), args.dry_run)
         for split_name, split_dir in (("train", train_dir), ("valid", valid_dir), ("test", test_dir)):
+            if split_name not in args.execution_splits:
+                continue
             for intervened, prompt_dir, policy in (
                 (False, split_dir, "full"),
                 (True, intervention_dirs[split_name], "mask_ip_port"),
@@ -1293,6 +1327,8 @@ def main() -> None:
             args.dry_run,
         )
         for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
+            if split_name not in args.execution_splits:
+                continue
             run(
                 [
                     sys.executable,
@@ -1429,6 +1465,8 @@ def main() -> None:
             )
         run(byte_command, args.dry_run)
         for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
+            if split_name not in args.execution_splits:
+                continue
             output_stem = (
                 f"{split_name}_unified_packet_single_head"
                 if args.stage == "paper_unified"
@@ -1493,6 +1531,8 @@ def main() -> None:
 
     if args.stage in {"test", "all"}:
         for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
+            if split_name not in args.execution_splits:
+                continue
             command = [
                 sys.executable,
                 "test_tower1_packet.py",

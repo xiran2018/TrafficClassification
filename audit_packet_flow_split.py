@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from itertools import combinations
 from pathlib import Path
 
 
@@ -38,14 +39,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", required=True)
     ap.add_argument("--valid", required=True)
-    ap.add_argument("--test", required=True)
+    ap.add_argument("--test", default="")
     ap.add_argument("--output_json", default="")
     ap.add_argument("--fail_on_overlap", action="store_true")
     args = ap.parse_args()
 
-    summaries = {name: load_summary(path) for name, path in (("train", args.train), ("valid", args.valid), ("test", args.test))}
+    split_paths = {"train": args.train, "valid": args.valid}
+    if args.test:
+        split_paths["test"] = args.test
+    summaries = {name: load_summary(path) for name, path in split_paths.items()}
     overlaps = {}
-    for left, right in (("train", "valid"), ("train", "test"), ("valid", "test")):
+    for left, right in combinations(summaries, 2):
         shared = summaries[left]["flow_ids"] & summaries[right]["flow_ids"]
         overlaps[f"{left}_{right}"] = {"count": len(shared), "examples": sorted(shared)[:20]}
     output = {

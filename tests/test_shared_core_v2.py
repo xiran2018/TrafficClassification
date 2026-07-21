@@ -101,6 +101,12 @@ def test_packet_semantic_cache_policy_evidence_requires_every_split_and_view(tmp
     assert evidence["verified"] is False
     assert evidence["splits"]["test"]["intervened"]["verified"] is False
 
+    args.execution_splits = ("train", "valid")
+    evidence = semantic_cache_policy_evidence(args, tmp_path)
+    assert evidence["verified"] is True
+    assert set(evidence["splits"]) == {"train", "valid"}
+    args.execution_splits = ("train", "valid", "test")
+
     payload["embedding_scheduler"] = "cross_flow_length_bucketed_v1"
     payload["packet_context_policy"] = "flow_context"
     drifted.write_text(json.dumps(payload), encoding="utf-8")
@@ -777,6 +783,88 @@ def test_packet_runner_common_reference_keeps_method_and_effective_hash_equal(tm
     notes = manifest["framework"]["notes"]
     assert notes["shared_core_method_sha256"] == frozen_payload()["config_sha256"]
     assert notes["shared_core_config_sha256"] == notes["shared_core_method_sha256"]
+
+
+def test_packet_runner_allows_locked_test_valid_only_development(tmp_path):
+    payload = frozen_payload()
+    payload["selection_protocol"]["test_evaluation_allowed"] = False
+    unsigned = {key: value for key, value in payload.items() if key != "config_sha256"}
+    payload["config_sha256"] = canonical_sha256(unsigned)
+    config = write_payload(tmp_path / "provisional.json", payload)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "run_packet_level_pipeline.py"),
+            "--dataset",
+            "vpn-app",
+            "--fold",
+            "0",
+            "--stage",
+            "paper_unified",
+            "--splits",
+            "train,valid",
+            "--dry_run",
+            "--artifact_root",
+            str(tmp_path / "packet_artifacts"),
+            "--checkpoint_root",
+            str(tmp_path / "packet_checkpoints"),
+            "--shared_core_config",
+            str(config),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "test_semantic_flow_embeddings" not in result.stdout
+    audit_line = next(
+        line for line in result.stdout.splitlines() if "audit_packet_flow_split.py" in line
+    )
+    assert "--test" not in audit_line
+    manifest = json.loads(
+        (
+            tmp_path
+            / "packet_artifacts/vpn-app/fold0/packet_framework_manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    notes = manifest["framework"]["notes"]
+    assert notes["executed_splits"] == ["train", "valid"]
+    assert notes["test_labels_used"] is False
+
+
+def test_packet_split_audit_accepts_train_valid_without_test(tmp_path):
+    rows = {
+        "train": {"flow_id": "train-flow", "label": "a"},
+        "valid": {"flow_id": "valid-flow", "label": "a"},
+    }
+    paths = {}
+    for split, row in rows.items():
+        path = tmp_path / f"{split}.jsonl"
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        paths[split] = path
+    output = tmp_path / "audit.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "audit_packet_flow_split.py"),
+            "--train",
+            str(paths["train"]),
+            "--valid",
+            str(paths["valid"]),
+            "--output_json",
+            str(output),
+            "--fail_on_overlap",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert set(report["splits"]) == {"train", "valid"}
+    assert report["flow_overlap"]["train_valid"]["count"] == 0
 
 
 def test_packet_runner_preserves_declared_numeric_overrides(tmp_path):
