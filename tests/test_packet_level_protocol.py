@@ -23,6 +23,7 @@ from fuse_packet_experts import (
     temperature_scale,
 )
 from models.packet_byte_transformer import PacketByteTransformer
+from test_packet_byte_transformer import load_packet_uids
 from train_packet_byte_transformer import (
     MASK_TOKEN,
     PacketByteDataset,
@@ -826,8 +827,19 @@ def test_weighted_packet_probability_fusion(tmp_path, monkeypatch):
     output_json = tmp_path / "fused.json"
     output_npz = tmp_path / "fused.npz"
     label_map = tmp_path / "label_map.json"
-    np.savez_compressed(first_path, y_true=y_true, probabilities=first)
-    np.savez_compressed(second_path, y_true=y_true, probabilities=second)
+    packet_uids = np.asarray(["flow-a_0", "flow-b_0"])
+    np.savez_compressed(
+        first_path,
+        y_true=y_true,
+        probabilities=first,
+        packet_uids=packet_uids,
+    )
+    np.savez_compressed(
+        second_path,
+        y_true=y_true,
+        probabilities=second,
+        packet_uids=packet_uids,
+    )
     label_map.write_text(json.dumps({"zero": 0, "one": 1}), encoding="utf-8")
     monkeypatch.setattr(
         sys,
@@ -844,9 +856,76 @@ def test_weighted_packet_probability_fusion(tmp_path, monkeypatch):
 
     fuse_crossfold_main()
 
-    fused = np.load(output_npz)["probabilities"]
-    np.testing.assert_allclose(fused, 0.25 * first + 0.75 * second)
-    assert json.loads(output_json.read_text(encoding="utf-8"))["weights"] == [0.25, 0.75]
+    with np.load(output_npz) as fused_payload:
+        np.testing.assert_allclose(
+            fused_payload["probabilities"], 0.25 * first + 0.75 * second
+        )
+        np.testing.assert_array_equal(fused_payload["packet_uids"], packet_uids)
+    result = json.loads(output_json.read_text(encoding="utf-8"))
+    assert result["weights"] == [0.25, 0.75]
+    assert result["alignment"]["packet_uids"] == "exact_row_match"
+    assert len(result["input_sha256"]) == 2
+    assert result["artifacts"]["output_npz"]["sha256"]
+
+
+def test_packet_probability_fusion_rejects_uid_mismatch(tmp_path, monkeypatch):
+    y_true = np.asarray([0, 1], dtype=np.int64)
+    probabilities = np.asarray([[0.9, 0.1], [0.1, 0.9]], dtype=np.float32)
+    paths = [tmp_path / "first.npz", tmp_path / "second.npz"]
+    np.savez_compressed(
+        paths[0],
+        y_true=y_true,
+        probabilities=probabilities,
+        packet_uids=np.asarray(["p0", "p1"]),
+    )
+    np.savez_compressed(
+        paths[1],
+        y_true=y_true,
+        probabilities=probabilities,
+        packet_uids=np.asarray(["p1", "p0"]),
+    )
+    label_map = tmp_path / "label_map.json"
+    label_map.write_text(json.dumps({"zero": 0, "one": 1}), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fuse_packet_crossfold.py",
+            "--inputs",
+            *(str(path) for path in paths),
+            "--label_map",
+            str(label_map),
+            "--output_json",
+            str(tmp_path / "fused.json"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="packet-UID alignment mismatch"):
+        fuse_crossfold_main()
+
+
+def test_packet_uid_loader_requires_unique_explicit_ids(tmp_path):
+    index = tmp_path / "packet_index.jsonl"
+    index.write_text(
+        json.dumps({"packet_uid": "flow-a_0"})
+        + "\n"
+        + json.dumps({"packet_uid": "flow-a_1"})
+        + "\n",
+        encoding="utf-8",
+    )
+    np.testing.assert_array_equal(
+        load_packet_uids(index), np.asarray(["flow-a_0", "flow-a_1"])
+    )
+
+    index.write_text(
+        json.dumps({"packet_uid": "duplicate"})
+        + "\n"
+        + json.dumps({"packet_uid": "duplicate"})
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="duplicate packet_uid"):
+        load_packet_uids(index)
 
 
 def test_packet_prior_calibration_npz_contract(tmp_path, monkeypatch):

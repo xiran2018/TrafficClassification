@@ -12,9 +12,29 @@ from torch.utils.data import DataLoader
 
 from models.packet_byte_transformer import PacketByteTransformer
 from packet_eval_utils import packet_classification_metrics
-from train_packet_byte_transformer import PacketByteDataset, predict_packet_views
+from train_packet_byte_transformer import PacketByteDataset, predict_packet_views, sha256_file
 from train_packet_byte_transformer import packet_content_group_metrics
 from train_tower1_multitask import load_label_names
+
+
+def load_packet_uids(packet_index: str | Path) -> np.ndarray:
+    packet_uids: list[str] = []
+    seen: set[str] = set()
+    with Path(packet_index).open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            packet_uid = str(row.get("packet_uid") or "")
+            if not packet_uid:
+                raise ValueError(f"{packet_index}:{line_number}: missing packet_uid")
+            if packet_uid in seen:
+                raise ValueError(f"{packet_index}:{line_number}: duplicate packet_uid")
+            seen.add(packet_uid)
+            packet_uids.append(packet_uid)
+    if not packet_uids:
+        raise ValueError(f"{packet_index}: packet index is empty")
+    return np.asarray(packet_uids, dtype=np.str_)
 
 
 def main() -> None:
@@ -125,6 +145,12 @@ def main() -> None:
             label_names,
         )
     )
+    packet_uids = load_packet_uids(args.packet_index)
+    if len(packet_uids) != len(y_true):
+        raise ValueError(
+            f"packet index/prediction length mismatch: {len(packet_uids)} != {len(y_true)}"
+        )
+    artifact_hash_cache: dict[str, str] = {}
     payload = {
         "task": "packet-level-classification",
         "sample_unit": "one_packet",
@@ -142,6 +168,24 @@ def main() -> None:
         ),
         "checkpoint": args.checkpoint,
         "packet_index": args.packet_index,
+        "provenance": {
+            "checkpoint": {
+                "path": str(Path(args.checkpoint).expanduser().resolve()),
+                "sha256": sha256_file(args.checkpoint, artifact_hash_cache),
+            },
+            "packet_index": {
+                "path": str(Path(args.packet_index).expanduser().resolve()),
+                "sha256": sha256_file(args.packet_index, artifact_hash_cache),
+            },
+            "label_map": {
+                "path": str(Path(args.label_map).expanduser().resolve()),
+                "sha256": sha256_file(args.label_map, artifact_hash_cache),
+            },
+            "checkpoint_training_input_evidence": checkpoint.get(
+                "training_input_evidence"
+            ),
+            "prediction_npz": None,
+        },
         "inference_config": inference_config,
         "mechanism_sensitivity_config": {
             "scope": (
@@ -199,10 +243,6 @@ def main() -> None:
                 label_names,
             )
         )
-    output_json = Path(args.output_json)
-    output_json.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_json, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
     if args.output_npz:
         output_npz = Path(args.output_npz)
         output_npz.parent.mkdir(parents=True, exist_ok=True)
@@ -212,7 +252,18 @@ def main() -> None:
             probabilities=probabilities,
             content_group_ids=content_group_ids,
             flow_ids=dataset.flow_ids.cpu().numpy(),
+            packet_uids=packet_uids,
         )
+        payload["provenance"]["prediction_npz"] = {
+            "path": str(output_npz.expanduser().resolve()),
+            "sha256": sha256_file(output_npz, artifact_hash_cache),
+            "num_packets": int(len(packet_uids)),
+            "packet_uid_alignment": "exact_packet_index_row_order",
+        }
+    output_json = Path(args.output_json)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
     print(f"accuracy={metrics['accuracy']:.4f} macro_f1={metrics['macro_f1']:.4f}")
     print(f"saved {output_json}" + (f" and {args.output_npz}" if args.output_npz else ""))
 

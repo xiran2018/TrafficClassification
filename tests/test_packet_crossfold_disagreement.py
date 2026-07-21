@@ -79,3 +79,42 @@ def test_report_accepts_evaluator_packet_index_binding(tmp_path: Path) -> None:
     report = build_report(inputs, sources, index, label_map)
 
     assert report["alignment"]["num_packets"] == 4
+
+
+def test_report_verifies_npz_packet_uids(tmp_path: Path) -> None:
+    inputs, sources, index, label_map = write_fixture(tmp_path)
+    packet_uids = np.asarray(["p0", "p1", "p2", "p3"])
+    for _, path in inputs:
+        with np.load(path) as payload:
+            y_true = payload["y_true"]
+            probabilities = payload["probabilities"]
+        np.savez(
+            path,
+            y_true=y_true,
+            probabilities=probabilities,
+            packet_uids=packet_uids,
+        )
+
+    report = build_report(inputs, sources, index, label_map)
+
+    assert report["alignment"]["npz_packet_uids"] == "exact_packet_index_row_match"
+
+
+def test_report_rejects_npz_packet_uid_order_mismatch(tmp_path: Path) -> None:
+    inputs, sources, index, label_map = write_fixture(tmp_path)
+    for input_index, (_, path) in enumerate(inputs):
+        with np.load(path) as payload:
+            y_true = payload["y_true"]
+            probabilities = payload["probabilities"]
+        packet_uids = np.asarray(["p0", "p1", "p2", "p3"])
+        if input_index == 1:
+            packet_uids = packet_uids[::-1]
+        np.savez(
+            path,
+            y_true=y_true,
+            probabilities=probabilities,
+            packet_uids=packet_uids,
+        )
+
+    with pytest.raises(ValueError, match="packet_uids do not match"):
+        build_report(inputs, sources, index, label_map)

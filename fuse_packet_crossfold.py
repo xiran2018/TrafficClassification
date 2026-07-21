@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,6 +11,14 @@ import numpy as np
 
 from packet_eval_utils import packet_classification_metrics
 from train_tower1_multitask import load_label_names
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> None:
@@ -52,9 +61,18 @@ def main() -> None:
             raise ValueError("--weight_grid_size must be at least 2")
         valid_arrays = [np.load(path) for path in args.validation_inputs]
         y_valid = valid_arrays[0]["y_true"].astype(np.int64)
+        valid_packet_uids = (
+            valid_arrays[0]["packet_uids"] if "packet_uids" in valid_arrays[0] else None
+        )
         for path, data in zip(args.validation_inputs, valid_arrays):
             if not np.array_equal(y_valid, data["y_true"]):
                 raise ValueError(f"validation label alignment mismatch: {path}")
+            if ("packet_uids" in data) != (valid_packet_uids is not None):
+                raise ValueError(f"validation packet-UID availability mismatch: {path}")
+            if valid_packet_uids is not None and not np.array_equal(
+                valid_packet_uids, data["packet_uids"]
+            ):
+                raise ValueError(f"validation packet-UID alignment mismatch: {path}")
         valid_probabilities = [data["probabilities"].astype(np.float32) for data in valid_arrays]
         best = None
         for first_weight in np.linspace(0.0, 1.0, args.weight_grid_size):
@@ -92,6 +110,7 @@ def main() -> None:
         weights = np.full(len(arrays), 1.0 / len(arrays), dtype=np.float64)
     y_true = arrays[0]["y_true"].astype(np.int64)
     flow_ids = arrays[0]["flow_ids"] if "flow_ids" in arrays[0] else None
+    packet_uids = arrays[0]["packet_uids"] if "packet_uids" in arrays[0] else None
     fused = None
     for path, data, weight in zip(args.inputs, arrays, weights):
         if not np.array_equal(y_true, data["y_true"]):
@@ -100,6 +119,10 @@ def main() -> None:
             raise ValueError(f"flow-id availability mismatch: {path}")
         if flow_ids is not None and not np.array_equal(flow_ids, data["flow_ids"]):
             raise ValueError(f"flow-id alignment mismatch: {path}")
+        if ("packet_uids" in data) != (packet_uids is not None):
+            raise ValueError(f"packet-UID availability mismatch: {path}")
+        if packet_uids is not None and not np.array_equal(packet_uids, data["packet_uids"]):
+            raise ValueError(f"packet-UID alignment mismatch: {path}")
         probabilities = data["probabilities"].astype(np.float32)
         contribution = np.log(np.clip(probabilities, 1e-12, 1.0)) if args.method == "log_mean" else probabilities
         contribution = float(weight) * contribution
@@ -114,14 +137,19 @@ def main() -> None:
         "sample_unit": "one_packet",
         "method": args.method,
         "inputs": args.inputs,
+        "input_sha256": [sha256_file(path) for path in args.inputs],
         "weights": weights.tolist(),
         "weight_selection": selection,
+        "alignment": {
+            "true_labels": "exact_row_match",
+            "flow_ids": "exact_row_match" if flow_ids is not None else "unavailable",
+            "packet_uids": (
+                "exact_row_match" if packet_uids is not None else "unavailable"
+            ),
+        },
         "metrics": metrics,
     }
-    path = Path(args.output_json)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
+    output["artifacts"] = {"output_npz": None, "output_validation_npz": None}
     if args.output_npz:
         output_npz = Path(args.output_npz)
         output_npz.parent.mkdir(parents=True, exist_ok=True)
@@ -131,17 +159,33 @@ def main() -> None:
         }
         if flow_ids is not None:
             output_arrays["flow_ids"] = flow_ids
+        if packet_uids is not None:
+            output_arrays["packet_uids"] = packet_uids
         np.savez_compressed(output_npz, **output_arrays)
+        output["artifacts"]["output_npz"] = {
+            "path": str(output_npz.expanduser().resolve()),
+            "sha256": sha256_file(output_npz),
+        }
     if args.output_validation_npz:
         if not args.validation_inputs:
             raise ValueError("--output_validation_npz requires --validation_inputs")
         output_validation_npz = Path(args.output_validation_npz)
         output_validation_npz.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            output_validation_npz,
-            y_true=y_valid,
-            probabilities=np.asarray(best[3], dtype=np.float32),
-        )
+        validation_arrays = {
+            "y_true": y_valid,
+            "probabilities": np.asarray(best[3], dtype=np.float32),
+        }
+        if valid_packet_uids is not None:
+            validation_arrays["packet_uids"] = valid_packet_uids
+        np.savez_compressed(output_validation_npz, **validation_arrays)
+        output["artifacts"]["output_validation_npz"] = {
+            "path": str(output_validation_npz.expanduser().resolve()),
+            "sha256": sha256_file(output_validation_npz),
+        }
+    path = Path(args.output_json)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
     print(f"accuracy={metrics['accuracy']:.4f} macro_f1={metrics['macro_f1']:.4f}")
     print(f"saved {path}" + (f" and {args.output_npz}" if args.output_npz else ""))
 

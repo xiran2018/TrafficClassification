@@ -5627,6 +5627,18 @@ strict-v2 shared neural core. Promotion still requires the same-method
 strict-v2 three-fold diagnostic on both tasks and both datasets, followed by an
 OOF-only matched training ablation.
 
+New strict-v2 Packet evaluations remove the historical row-order ambiguity at
+the source. `test_packet_byte_transformer.py` writes the exact `packet_uids`
+alongside `y_true`, probabilities, content groups, and flow IDs. Its JSON binds
+the checkpoint, packet index, label map, and generated NPZ by SHA-256.
+`fuse_packet_crossfold.py` requires identical packet UID arrays across folds,
+preserves them in the consensus NPZ, records every input hash, and binds the
+generated consensus NPZ hash after writing it. The diagnostic still checks the
+shared source index and true labels, so an internally consistent but unrelated
+NPZ cannot satisfy the strict evidence contract. Historical files remain
+readable through the explicit source-index fallback, but only UID-bearing
+strict-v2 outputs qualify for the final matched-method stability analysis.
+
 Paper-safe distillation must use only task-local training data and OOF teacher
 predictions. Concatenating disjoint validation folds with
 `build_consensus_distill_targets.py --align union` improves coverage, but each
