@@ -5406,14 +5406,18 @@ promotion remains tied to `exact_shared_core_v2`; independently optimized
 results are reported alongside it under `unified_method_v2`, not mislabeled as
 the exact numerical baseline.
 
-Strict runners also snapshot every non-test Python source file at process
-launch and completion. The manifest records the per-file SHA-256 list, one
-canonical source-tree fingerprint, and any added, removed, or changed paths.
-The cross-task audit requires Packet and Flow to have individually stable trees
-and the same fingerprint; publication rejects an audit without this proof.
-Accordingly, once a strict Packet/Flow run starts, do not edit or add `.py`
-files until that run and its audit finish. README, logs, and metric JSONs do not
-belong to the executable-source scope and may still be updated.
+Strict runners snapshot one common **Packet+Flow execution dependency
+closure** at process launch and completion. The closure starts from both
+`run_packet_level_pipeline.py` and `run_stage8_flowaware_pipeline.py`, follows
+local imports recursively, and includes local `.py` programs actually invoked
+by either runner. The manifest records the per-file SHA-256 list, canonical
+closure fingerprint, and any added, removed, or changed dependency paths. Both
+tasks therefore have the same source scope and must produce the same stable
+fingerprint. Editing an executed preprocessor, model, loss, trainer, or
+evaluator invalidates the run; adding an unimported audit or dormant candidate
+does not falsely change the executed method. Publication rejects missing or
+unstable closure evidence. README, logs, tests, and metric JSONs are outside
+the executable-method scope and may still be updated during long runs.
 
 After those six reports pass, publication uses one predeclared aggregation
 rule for every dataset and task: equal-weight three-fold `log_mean`. Run:

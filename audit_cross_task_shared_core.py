@@ -365,8 +365,10 @@ def audit_cross_task_fold(
         == "algorithm_source_stability_evidence_v1"
         and packet_source_evidence.get("status") == "pass"
         and flow_source_evidence.get("status") == "pass"
-        and packet_source_evidence.get("scope") == "all_non_test_python_sources"
-        and flow_source_evidence.get("scope") == "all_non_test_python_sources"
+        and packet_source_evidence.get("scope")
+        == "entrypoint_dependency_closure_v1"
+        and flow_source_evidence.get("scope")
+        == "entrypoint_dependency_closure_v1"
         and isinstance(packet_source_fingerprint, str)
         and len(packet_source_fingerprint) == 64
         and packet_source_fingerprint == flow_source_fingerprint

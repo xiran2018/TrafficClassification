@@ -163,7 +163,7 @@ def manifest(
         "algorithm_source_evidence": {
             "schema": "algorithm_source_stability_evidence_v1",
             "status": "pass",
-            "scope": "all_non_test_python_sources",
+            "scope": "entrypoint_dependency_closure_v1",
             "launch_fingerprint": "f" * 64,
             "completion_fingerprint": "f" * 64,
             "changed_paths": [],

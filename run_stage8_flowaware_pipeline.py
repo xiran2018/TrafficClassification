@@ -31,7 +31,7 @@ from embedding_shard_utils import (
 )
 from method_source_provenance import (
     complete_source_stability,
-    source_tree_snapshot,
+    unified_method_source_snapshot,
 )
 
 
@@ -1309,7 +1309,7 @@ def write_manifest(args, completed: bool = False) -> None:
     root.mkdir(parents=True, exist_ok=True)
     source_root = Path(__file__).resolve().parent
     if not hasattr(args, "_algorithm_source_launch"):
-        args._algorithm_source_launch = source_tree_snapshot(source_root)
+        args._algorithm_source_launch = unified_method_source_snapshot(source_root)
     if completed:
         source_evidence = complete_source_stability(
             args._algorithm_source_launch, source_root
@@ -1318,7 +1318,7 @@ def write_manifest(args, completed: bool = False) -> None:
         source_evidence = {
             "schema": "algorithm_source_stability_evidence_v1",
             "status": "running",
-            "scope": "all_non_test_python_sources",
+            "scope": args._algorithm_source_launch["scope"],
             "launch_fingerprint": args._algorithm_source_launch["fingerprint"],
             "completion_fingerprint": None,
             "num_launch_files": args._algorithm_source_launch["num_files"],
