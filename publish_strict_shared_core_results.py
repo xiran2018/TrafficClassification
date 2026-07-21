@@ -15,6 +15,13 @@ from typing import Any
 from unified_framework_spec import FLOW_LEVEL_RESULTS, PACKET_LEVEL_RESULTS
 
 
+PACKET_SCOPE_APPLICATION_DATASETS = {
+    "ustc-app",
+    "ustc-binary",
+    "vpn-binary",
+    "vpn-service",
+}
+
 def load_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -548,6 +555,69 @@ def validate_session_novelty_evidence(
     return payload
 
 
+def validate_packet_scope_evidence(
+    path: str | Path, *, expected_fingerprint: str
+) -> dict[str, Any]:
+    payload = load_json(path)
+    if payload.get("schema") != "packet_scope_validation_gate_v1":
+        raise ValueError("Packet-scope validation gate has the wrong schema")
+    if payload.get("selection_scope") != "locked_test_fold0_validation_only":
+        raise ValueError("Packet-scope evidence is not locked-Test validation")
+    if payload.get("test_labels_used") is not False:
+        raise ValueError("Packet-scope validation evidence used Test labels")
+    if not (
+        payload.get("all_datasets_pass") is True
+        and payload.get("test_evaluation_released") is True
+    ):
+        raise ValueError("Packet-scope validation did not release Test")
+    if set(payload.get("required_datasets") or []) != PACKET_SCOPE_APPLICATION_DATASETS:
+        raise ValueError("Packet-scope validation has the wrong dataset scope")
+    thresholds = payload.get("thresholds") or {}
+    if not (
+        math.isclose(
+            float(thresholds.get("chance_normalized_accuracy_min", -1.0)),
+            0.70,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            float(thresholds.get("chance_normalized_macro_f1_min", -1.0)),
+            0.65,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError("Packet-scope validation thresholds changed")
+    config_binding = payload.get("method_config") or {}
+    if config_binding.get("config_sha256") != expected_fingerprint:
+        raise ValueError("Packet-scope gate used a different shared method")
+    config_path = Path(str(config_binding.get("path") or ""))
+    if not config_path.is_file() or sha256_file(config_path) != config_binding.get(
+        "sha256"
+    ):
+        raise ValueError("Packet-scope gate has a stale method-config binding")
+    datasets = payload.get("datasets") or {}
+    if set(datasets) != PACKET_SCOPE_APPLICATION_DATASETS:
+        raise ValueError("Packet-scope gate result set is incomplete")
+    for dataset, row in datasets.items():
+        if not (
+            row.get("dataset") == dataset
+            and row.get("fold") == 0
+            and row.get("evaluation_split") == "valid"
+            and row.get("passes") is True
+            and row.get("test_prediction_artifacts_present") is False
+        ):
+            raise ValueError(f"invalid Packet-scope evidence for {dataset}")
+        for name in ("manifest", "result"):
+            binding = row.get(name) or {}
+            source = Path(str(binding.get("path") or ""))
+            if not source.is_file() or sha256_file(source) != binding.get("sha256"):
+                raise ValueError(
+                    f"Packet-scope {dataset} {name} binding is stale"
+                )
+    return payload
+
+
 def publish_canonical_result(
     payload: dict[str, Any],
     destination: Path,
@@ -559,9 +629,10 @@ def publish_canonical_result(
     bootstrap_evidence: str,
     method_archive_manifest: str,
     method_archive_manifest_sha256: str,
+    packet_scope_validation: dict[str, Any] | None,
 ) -> None:
     published = dict(payload)
-    published["publication_provenance"] = {
+    provenance = {
         "status": "strict_shared_core_v2",
         "shared_core_method_sha256": fingerprint,
         "shared_core_config_sha256": fingerprint,
@@ -582,6 +653,14 @@ def publish_canonical_result(
         "method_archive_manifest": method_archive_manifest,
         "method_archive_manifest_sha256": method_archive_manifest_sha256,
     }
+    if packet_scope_validation is not None:
+        provenance["packet_scope_validation_gate"] = packet_scope_validation[
+            "archived_path"
+        ]
+        provenance["packet_scope_validation_gate_sha256"] = (
+            packet_scope_validation["archived_sha256"]
+        )
+    published["publication_provenance"] = provenance
     atomic_write_json(destination, published)
 
 
@@ -604,6 +683,7 @@ def main() -> None:
     parser.add_argument("--flow_bootstrap", required=True)
     parser.add_argument("--packet_session_novelty", required=True)
     parser.add_argument("--flow_session_novelty", required=True)
+    parser.add_argument("--packet_scope_validation_gate", default="")
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
@@ -618,6 +698,32 @@ def main() -> None:
         expected_fingerprint=fingerprint,
         archive_root=args.method_archive_root,
     )
+    frozen_config = load_json(args.shared_core_config)
+    packet_scope_required = PACKET_SCOPE_APPLICATION_DATASETS <= set(
+        (frozen_config.get("task_datasets") or {}).get(
+            "packet-level-classification", []
+        )
+    )
+    if packet_scope_required and not args.packet_scope_validation_gate:
+        raise ValueError(
+            "six-dataset final config requires Packet-scope validation evidence"
+        )
+    packet_scope_validation = None
+    if args.packet_scope_validation_gate:
+        validate_packet_scope_evidence(
+            args.packet_scope_validation_gate,
+            expected_fingerprint=fingerprint,
+        )
+        archived_scope_gate = (
+            Path(args.method_archive_root) / "packet_scope_validation_gate.json"
+        )
+        atomic_copy(args.packet_scope_validation_gate, archived_scope_gate)
+        packet_scope_validation = {
+            "source_path": str(Path(args.packet_scope_validation_gate).resolve()),
+            "source_sha256": sha256_file(args.packet_scope_validation_gate),
+            "archived_path": str(archived_scope_gate),
+            "archived_sha256": sha256_file(archived_scope_gate),
+        }
     packet_payload = load_json(args.packet_candidate)
     flow_payload = load_json(args.flow_candidate)
     validate_fixed_consensus(packet_payload, "packet-level")
@@ -740,6 +846,7 @@ def main() -> None:
             method_archive_manifest_sha256=frozen_method_evidence[
                 "archive_manifest_sha256"
             ],
+            packet_scope_validation=packet_scope_validation,
         )
         for source, destination in packet_manifest_copies:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -761,6 +868,7 @@ def main() -> None:
             method_archive_manifest_sha256=frozen_method_evidence[
                 "archive_manifest_sha256"
             ],
+            packet_scope_validation=packet_scope_validation,
         )
         for source, destination in flow_manifest_copies:
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -787,6 +895,7 @@ def main() -> None:
             for path in audit_paths
         ],
         "frozen_method_evidence": frozen_method_evidence,
+        "packet_scope_validation_evidence": packet_scope_validation,
         "uncertainty_evidence": {
             "packet": {
                 "path": args.packet_bootstrap,

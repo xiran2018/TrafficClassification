@@ -6,6 +6,7 @@ from pathlib import Path
 from publish_strict_shared_core_results import (
     archive_frozen_method_evidence,
     canonical_sha256,
+    validate_packet_scope_evidence,
     validated_audits,
 )
 
@@ -47,6 +48,55 @@ def test_audits_share_method_identity_despite_distinct_effective_configs(tmp_pat
 
     assert len(paths) == 3
     assert fingerprint == method
+
+
+def test_packet_scope_gate_rehashes_all_locked_test_evidence(tmp_path):
+    method_config = write_json(tmp_path / "final.json", {"method": "shared"})
+    fingerprint = "a" * 64
+    datasets = {}
+    for dataset in ("vpn-binary", "vpn-service", "ustc-app", "ustc-binary"):
+        manifest = write_json(tmp_path / dataset / "manifest.json", {"dataset": dataset})
+        result = write_json(tmp_path / dataset / "valid.json", {"accuracy": 0.9})
+        datasets[dataset] = {
+            "dataset": dataset,
+            "fold": 0,
+            "evaluation_split": "valid",
+            "passes": True,
+            "test_prediction_artifacts_present": False,
+            "manifest": {"path": str(manifest), "sha256": file_sha256(manifest)},
+            "result": {"path": str(result), "sha256": file_sha256(result)},
+        }
+    gate = write_json(
+        tmp_path / "gate.json",
+        {
+            "schema": "packet_scope_validation_gate_v1",
+            "selection_scope": "locked_test_fold0_validation_only",
+            "test_labels_used": False,
+            "all_datasets_pass": True,
+            "test_evaluation_released": True,
+            "required_datasets": sorted(datasets),
+            "thresholds": {
+                "chance_normalized_accuracy_min": 0.70,
+                "chance_normalized_macro_f1_min": 0.65,
+            },
+            "method_config": {
+                "path": str(method_config),
+                "sha256": file_sha256(method_config),
+                "config_sha256": fingerprint,
+            },
+            "datasets": datasets,
+        },
+    )
+    assert validate_packet_scope_evidence(
+        gate, expected_fingerprint=fingerprint
+    )["all_datasets_pass"] is True
+
+    manifest = Path(datasets["ustc-app"]["manifest"]["path"])
+    manifest.write_text("changed", encoding="utf-8")
+    import pytest
+
+    with pytest.raises(ValueError, match="binding is stale"):
+        validate_packet_scope_evidence(gate, expected_fingerprint=fingerprint)
 
 
 def prepare_inputs(
