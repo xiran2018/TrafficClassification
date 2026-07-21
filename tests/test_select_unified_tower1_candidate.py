@@ -187,6 +187,41 @@ def test_training_completion_requires_final_checkpoint_and_full_history(tmp_path
     assert report["datasets"]["vpn-app"]["provenance_verified"] is True
 
 
+def test_training_completion_matches_trainer_accuracy_tiebreak(tmp_path):
+    output = tmp_path / "run"
+    metric = write_completion_artifacts(
+        output,
+        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 0.8],
+        best_index=7,
+    )
+    history_path = output / "packet_validation_history.jsonl"
+    rows = [
+        json.loads(line)
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rows[6]["metrics"]["accuracy"] = 0.80
+    rows[7]["metrics"]["accuracy"] = 0.85
+    history_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    best = json.loads(metric.read_text(encoding="utf-8"))
+    best["metrics"] = rows[7]["metrics"]
+    metric.write_text(json.dumps(best), encoding="utf-8")
+    contract_path = output / "tower1_training_contract.json"
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["completed_artifacts"]["validation_history"]["sha256"] = (
+        hashlib.sha256(history_path.read_bytes()).hexdigest()
+    )
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+    report = training_completion_evidence({"vpn-app": metric}, 8)
+
+    row = report["datasets"]["vpn-app"]
+    assert report["status"] == "pass"
+    assert row["best_metric_matches_history"] is True
+    assert row["best_history_step"] == 8
+
+
 def test_training_completion_can_require_epoch_resampled_scheduler(tmp_path):
     output = tmp_path / "run"
     metric = write_completion_artifacts(output, [index / 10 for index in range(8)])

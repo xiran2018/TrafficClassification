@@ -15,6 +15,25 @@ Status: working research constraint, not a claim of publication readiness.
 
 ## Related-Work Collisions
 
+The uploaded papers impose the following claim boundary. This table is a
+design constraint: a checked implementation component is not automatically a
+paper contribution.
+
+| Prior work | Capability already established | Claim that is not allowed | Evidence needed for a narrower claim here |
+| --- | --- | --- | --- |
+| SWEET | Per-packet leakage diagnosis, Per-flow Split, downstream header filtering, strong simple packet encoder and packet-vote flow inference | Per-flow evaluation, field masking, or packet voting is novel | One fixed Packet-to-Flow protocol, independently retrained on each task, with protocol-matched Packet and Flow gains over the SWEET baseline |
+| TrafficFormer | Masked traffic pretraining, same-flow/order supervision, and random initialization field augmentation during fine-tuning | Masked bytes, IP/port randomization, or same-flow pretraining is novel | Aligned factual/intervened views must feed a learned bounded reliability mechanism, and that mechanism must beat factual-only and ordinary random augmentation on VPN and TLS |
+| MIETT | Multi-instance packet-to-flow modeling, intra/inter-packet attention, relative packet position, and flow contrastive learning | Hierarchical attention or flow SupCon is novel | The shared current-packet representation contract must improve both strict Packet inference and Flow aggregation, not only a bag classifier |
+| DigTraffic | Length/timing interaction channels, typed message edges, and edge-aware graph attention | Dual structural channels, edge attributes, or a graph Transformer is novel | A single task-independent structural schema must provide reproducible cross-dataset gains; otherwise graph processing remains an ablation |
+| TrafficLLM | Traffic-aware LLM representation, multi-task instruction tuning, masked meta-information, and parameter-efficient adaptation | Qwen/LoRA, traffic prompts, or generic multi-task applicability is novel | Demonstrate auditable single-packet input scope, task-local retraining, and intervention-conditioned reliability under domain/content-group evaluation |
+
+Consequently, the main contribution cannot be described as a collection of
+field randomization, LLM embeddings, contrastive learning, attention pooling,
+and graph edges. The algorithmic claim must be the **learned relationship**
+between aligned shortcut interventions, packet-local semantic/content/
+structural evidence, and cross-scale reuse. Protocol rigor and provenance are
+required evidence, but are not substitutes for an algorithmic contribution.
+
 ### MIETT
 
 MIETT already treats packets as instances in a flow bag, applies intra-packet and inter-packet attention, and introduces packet-relative-position and flow-contrastive pretraining. Therefore the following are not sufficient novelty claims here:

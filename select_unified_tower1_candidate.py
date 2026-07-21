@@ -75,23 +75,35 @@ def training_completion_evidence(
                 validation_points = len(history)
                 best_payload = json.loads(metric_path.read_text(encoding="utf-8"))
                 best_step = int(best_payload["step"])
-                best_value = float(best_payload["metrics"]["macro_f1"])
-                history_values = [
-                    (int(row["step"]), float(row["metrics"]["macro_f1"]))
-                    for row in history
-                ]
-                best_history_step, best_history_macro_f1 = max(
-                    history_values, key=lambda item: item[1]
+                select_metric = str(best_payload["select_metric"])
+                if select_metric not in {"macro_f1", "accuracy"}:
+                    raise ValueError(f"Unsupported select metric: {select_metric}")
+
+                def trainer_selection_key(row: dict) -> tuple[float, float, float]:
+                    metrics = row["metrics"]
+                    return (
+                        float(metrics[select_metric]),
+                        float(metrics["macro_f1"]),
+                        float(metrics["accuracy"]),
+                    )
+
+                best_history_row = max(history, key=trainer_selection_key)
+                best_history_step = int(best_history_row["step"])
+                best_history_macro_f1 = float(
+                    best_history_row["metrics"]["macro_f1"]
                 )
+                best_metrics = best_payload["metrics"]
                 best_metric_matches_history = bool(
-                    best_payload.get("select_metric") == "macro_f1"
-                    and math.isfinite(best_value)
-                    and best_step == best_history_step
-                    and math.isclose(
-                        best_value,
-                        best_history_macro_f1,
-                        rel_tol=0.0,
-                        abs_tol=1e-12,
+                    best_step == best_history_step
+                    and all(
+                        math.isfinite(float(best_metrics[name]))
+                        and math.isclose(
+                            float(best_metrics[name]),
+                            float(best_history_row["metrics"][name]),
+                            rel_tol=0.0,
+                            abs_tol=1e-12,
+                        )
+                        for name in ("macro_f1", "accuracy")
                     )
                 )
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
