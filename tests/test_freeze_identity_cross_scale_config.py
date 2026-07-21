@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -33,27 +34,37 @@ def write(path: Path, payload):
     return path
 
 
-def cross_scale_exposure(active_rate=0.6):
+def cross_scale_exposure(tmp_path, active_rate=0.6):
+    reports = {}
+    for name in ("vpn-app", "tls-120"):
+        factual = tmp_path / f"{name}_factual.jsonl"
+        paired = tmp_path / f"{name}_paired.jsonl"
+        factual.write_text(f"{name}:factual", encoding="utf-8")
+        paired.write_text(f"{name}:paired", encoding="utf-8")
+        reports[name] = {
+            "source_packets": 100,
+            "source_flows": 20,
+            "epochs": 8,
+            "batch_size": 16,
+            "packets_per_flow": 2,
+            "seed": 42,
+            "factual_path": str(factual),
+            "factual_sha256": hashlib.sha256(factual.read_bytes()).hexdigest(),
+            "paired_path": str(paired),
+            "paired_sha256": hashlib.sha256(paired.read_bytes()).hexdigest(),
+            "aggregate": {
+                "paired_identity_rate": 1.0,
+                "bidirectional_valid_anchor_rate": active_rate,
+                "alias_only_false_context_anchor_rate": 0.2,
+            },
+        }
     return {
         "schema": "cross_scale_sampler_exposure_audit_v1",
         "scope": "training_inputs_and_exact_sampler_only",
         "test_predictions_used": False,
         "identity_policy": "exact_packet_uid_compaction",
         "context_policy": "leave_one_distinct_packet_out",
-        "reports": {
-            name: {
-                "epochs": 8,
-                "batch_size": 16,
-                "packets_per_flow": 2,
-                "seed": 42,
-                "aggregate": {
-                    "paired_identity_rate": 1.0,
-                    "bidirectional_valid_anchor_rate": active_rate,
-                    "alias_only_false_context_anchor_rate": 0.2,
-                },
-            }
-            for name in ("vpn-app", "tls-120")
-        },
+        "reports": reports,
     }
 
 
@@ -73,7 +84,7 @@ def finalize(tmp_path, d1, incremental=None, overall=None, exposure=None):
     )
     overall_path = write(tmp_path / "overall.json", overall) if overall else None
     exposure = exposure if exposure is not None else (
-        cross_scale_exposure() if incremental is not None else None
+        cross_scale_exposure(tmp_path) if incremental is not None else None
     )
     exposure_path = write(tmp_path / "exposure.json", exposure) if exposure else None
     return freeze_method_config(
@@ -170,6 +181,8 @@ def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
     incremental = selection("candidate", 0.002)
     overall = selection("candidate", 0.005)
     provisional = finalize(tmp_path, d1, incremental, overall)
+    exposure = cross_scale_exposure(tmp_path)
+    exposure_path = write(tmp_path / "exposure_flow.json", exposure)
 
     gate_path = write(tmp_path / "flow_gate.json", flow_gate("candidate"))
     promoted = freeze_method_config(
@@ -181,10 +194,8 @@ def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
         d2_incremental_path=tmp_path / "incremental.json",
         d2_overall=overall,
         d2_overall_path=tmp_path / "overall.json",
-        cross_scale_exposure=cross_scale_exposure(),
-        cross_scale_exposure_path=write(
-            tmp_path / "exposure_flow.json", cross_scale_exposure()
-        ),
+        cross_scale_exposure=exposure,
+        cross_scale_exposure_path=exposure_path,
         flow_noninferiority=flow_gate("candidate"),
         flow_noninferiority_path=gate_path,
     )
@@ -201,8 +212,8 @@ def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
         d2_incremental_path=tmp_path / "incremental.json",
         d2_overall=overall,
         d2_overall_path=tmp_path / "overall.json",
-        cross_scale_exposure=cross_scale_exposure(),
-        cross_scale_exposure_path=tmp_path / "exposure_flow.json",
+        cross_scale_exposure=exposure,
+        cross_scale_exposure_path=exposure_path,
         flow_noninferiority=flow_gate("baseline"),
         flow_noninferiority_path=rejected_gate_path,
     )
@@ -224,5 +235,20 @@ def test_d2_rejects_insufficient_effective_sampler_exposure(tmp_path):
             selection("candidate", 0.005),
             selection("candidate", 0.002),
             selection("candidate", 0.005),
-            exposure=cross_scale_exposure(active_rate=0.49),
+            exposure=cross_scale_exposure(tmp_path, active_rate=0.49),
+        )
+
+
+def test_d2_rejects_stale_sampler_input_binding(tmp_path):
+    exposure = cross_scale_exposure(tmp_path)
+    Path(exposure["reports"]["vpn-app"]["factual_path"]).write_text(
+        "mutated", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="stale"):
+        finalize(
+            tmp_path,
+            selection("candidate", 0.005),
+            selection("candidate", 0.002),
+            selection("candidate", 0.005),
+            exposure=exposure,
         )

@@ -99,8 +99,22 @@ def validate_cross_scale_exposure(report: dict[str, Any]) -> None:
         raise ValueError("cross-scale exposure audit must cover VPN and TLS-120")
     for dataset, dataset_report in reports.items():
         aggregate = dataset_report.get("aggregate") or {}
+        input_bindings_valid = True
+        for prefix in ("factual", "paired"):
+            path = Path(str(dataset_report.get(f"{prefix}_path") or ""))
+            expected_sha256 = dataset_report.get(f"{prefix}_sha256")
+            input_bindings_valid = bool(
+                input_bindings_valid
+                and path.is_file()
+                and isinstance(expected_sha256, str)
+                and len(expected_sha256) == 64
+                and file_sha256(path) == expected_sha256
+            )
         if not (
-            int(dataset_report.get("epochs", 0)) == 8
+            input_bindings_valid
+            and int(dataset_report.get("source_packets", 0)) > 0
+            and int(dataset_report.get("source_flows", 0)) > 0
+            and int(dataset_report.get("epochs", 0)) == 8
             and int(dataset_report.get("batch_size", 0)) == 16
             and int(dataset_report.get("packets_per_flow", 0)) == 2
             and int(dataset_report.get("seed", -1)) == 42
@@ -120,7 +134,7 @@ def validate_cross_scale_exposure(report: dict[str, Any]) -> None:
             > 0.0
         ):
             raise ValueError(
-                f"cross-scale exposure is insufficient or inconsistent for {dataset}"
+                f"cross-scale exposure is insufficient, stale, or inconsistent for {dataset}"
             )
 
 
