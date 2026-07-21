@@ -5260,6 +5260,34 @@ test policy: evaluate the frozen selected setting once; do not select strength f
 
 Full flow-count correction is not the first candidate because its maximum normalized weight is approximately `2.98` on VPN but `16.20` on TLS-120. The shared square-root correction limits the observed ranges to approximately `0.46-1.86` on VPN and `0.72-4.30` on TLS-120, reducing variance while correcting the sampler/loss mismatch.
 
+`analyze_class_weight_mechanism.py` binds the training packet file and both
+validation histories by SHA-256, compares only one explicitly named matched
+checkpoint, and reports per-class F1 deltas and rank associations. It is
+descriptive-only and records `test_labels_used=false`. On the completed current
+VPN fold-0 histories at step `4720`, flow/square-root weighting changes
+Accuracy/Macro-F1 by `+0.00248/+0.01628`; class F1 delta is negatively
+associated with `log1p(train flow count)` (`rho=-0.621`, `p=0.0103`) and
+positively associated with packets-per-flow and the applied weight ratio. This
+supports correction of the packet/flow hierarchy mismatch on VPN. At the
+currently matched TLS-120 epoch-3 checkpoint (`7953`), aggregate deltas are
+`+0.00559/+0.00569`, but flow-count versus F1-delta association is effectively
+zero (`rho=0.0183`, `p=0.8425`). Therefore the paper may report a cross-dataset
+aggregate benefit if the completed gate passes, but it must not claim that
+flow scarcity explains every TLS class gain. The Train-only bounded-risk rule
+exists precisely to reduce correction strength when that hierarchy signal is
+weaker; final claims wait for all eight checkpoints.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python analyze_class_weight_mechanism.py \
+    --train_jsonl /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/vpn-app/fold0/train/packet_auxiliary.jsonl \
+    --baseline_history /tmp/two_tower_runs/shared_core_v2_validation_resampled/baseline/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+    --candidate_history /tmp/two_tower_runs/shared_core_v2_validation_resampled/balance/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+    --step 4720 --baseline_basis packet --baseline_strength 1 \
+    --candidate_basis flow --candidate_strength 0.5 \
+    --output_json /tmp/two_tower_runs/vpn_flow_basis_mechanism_current_v2.json
+```
+
 The next mechanism is pre-registered only after the sampler-aware comparison: train Tower-1 with the same full-header and `mask_ip_port` paired view already consumed by the shared downstream intervention router. Both task runners expose the same Tower-1 loss; the packet runner uses:
 
 ```text
