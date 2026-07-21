@@ -1,0 +1,422 @@
+{
+  "defaults": {
+    "framework_profile": "paper_unified",
+    "framework_profile_description": "CCF-A paper profile: both tasks use field-aware shortcut intervention, label-free protocol content, semantic and strict current-packet structural channels, one bounded tri-channel router, content-group risk, and fixed cross-fold consensus. Flow classification uses one sequence backbone with mean aggregation; optional graph, stacker, and prior experts are excluded from the main path.",
+    "shared_core_modules": [
+      "label_free_protocol_content_pretraining",
+      "field_aware_header_intervention",
+      "semantic_tower1_channel",
+      "current_packet_structural_encoder",
+      "shared_intervention_view_fusion",
+      "bounded_tri_channel_router",
+      "per_flow_split_guard",
+      "content_group_empirical_risk",
+      "validation_only_selection",
+      "fixed_cross_fold_consensus"
+    ],
+    "targets": {
+      "vpn-app": {
+        "accuracy": 0.75,
+        "macro_f1": 0.65
+      },
+      "tls-120": {
+        "accuracy": 0.78,
+        "macro_f1": 0.7
+      },
+      "tls": {
+        "accuracy": 0.78,
+        "macro_f1": 0.7
+      }
+    },
+    "paper_safe_results": {
+      "vpn-app": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+      "tls-120": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json"
+    },
+    "unified_expert_slots": [
+      "base",
+      "graph",
+      "seq",
+      "prior_base",
+      "emb_lr",
+      "emb_et",
+      "proto_emb",
+      "paired",
+      "slot_stacker",
+      "soft_gate"
+    ],
+    "unified_expert_slots_csv": "base,graph,seq,prior_base,emb_lr,emb_et,proto_emb,paired,slot_stacker,soft_gate"
+  },
+  "unified_framework": {
+    "status": "review",
+    "shared_core_matches_defaults": true,
+    "paper_unified_flow_manifest_passes": 0,
+    "paper_unified_packet_manifest_passes": 0,
+    "flow_scope": [
+      "vpn-app",
+      "tls-120"
+    ],
+    "packet_scope": [
+      "vpn-app",
+      "tls-120",
+      "vpn-service",
+      "vpn-binary",
+      "ustc-app",
+      "ustc-binary"
+    ]
+  },
+  "flow_datasets": [
+    {
+      "dataset": "vpn-app",
+      "path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+      "exists": true,
+      "target": {
+        "accuracy": 0.75,
+        "macro_f1": 0.65
+      },
+      "ok": true,
+      "errors": [],
+      "accuracy": 0.7511961722488039,
+      "macro_f1": 0.7522269064093092,
+      "num_flows": 1672,
+      "target_met": true,
+      "slot_status": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": []
+      }
+    },
+    {
+      "dataset": "tls-120",
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json",
+      "exists": true,
+      "target": {
+        "accuracy": 0.78,
+        "macro_f1": 0.7
+      },
+      "ok": true,
+      "errors": [],
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "num_flows": 11542,
+      "target_met": true,
+      "slot_status": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": []
+      }
+    }
+  ],
+  "packet_datasets": [
+    {
+      "dataset": "vpn-app",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": 0.9,
+      "target_macro_f1": 0.76,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/vpn-app/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/vpn-app/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "insufficient_fold_manifests",
+        "glob": "reasoningDataset/packet-level/vpn-app/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 0,
+        "candidate_manifest_count": 0,
+        "manifest_count": 4,
+        "matching_manifests": [],
+        "required_result_path": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+        "fold_manifest_count": 0,
+        "completed_folds": [],
+        "result_bound_manifest_count": 0,
+        "result_bound_manifests": []
+      },
+      "accuracy": 0.9066244022994682,
+      "macro_f1": 0.8112461556528934,
+      "num_samples": 111678,
+      "metric_status": "pass",
+      "publication_status": "needs_paper_unified_repro",
+      "status": "needs_paper_unified_repro"
+    },
+    {
+      "dataset": "tls-120",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": 0.85,
+      "target_macro_f1": 0.78,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/tls-120/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/tls-120/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "insufficient_fold_manifests",
+        "glob": "reasoningDataset/packet-level/tls-120/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 0,
+        "candidate_manifest_count": 0,
+        "manifest_count": 4,
+        "matching_manifests": [],
+        "required_result_path": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+        "fold_manifest_count": 0,
+        "completed_folds": [],
+        "result_bound_manifest_count": 0,
+        "result_bound_manifests": []
+      },
+      "accuracy": 0.8744011667996404,
+      "macro_f1": 0.8479274094708068,
+      "num_samples": 553994,
+      "metric_status": "pass",
+      "publication_status": "needs_paper_unified_repro",
+      "status": "needs_paper_unified_repro"
+    },
+    {
+      "dataset": "vpn-service",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/vpn-service/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/vpn-service/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/vpn-service/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/vpn-service/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "insufficient_fold_manifests",
+        "glob": "reasoningDataset/packet-level/vpn-service/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 0,
+        "candidate_manifest_count": 0,
+        "manifest_count": 4,
+        "matching_manifests": [],
+        "required_result_path": "reasoningDataset/packet-level/vpn-service/paper_default_result.json",
+        "fold_manifest_count": 0,
+        "completed_folds": [],
+        "result_bound_manifest_count": 0,
+        "result_bound_manifests": []
+      },
+      "accuracy": 0.9512068098556138,
+      "macro_f1": 0.9434656797061393,
+      "num_samples": null,
+      "metric_status": "pass",
+      "publication_status": "needs_paper_unified_repro",
+      "status": "needs_paper_unified_repro"
+    },
+    {
+      "dataset": "vpn-binary",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/vpn-binary/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "insufficient_fold_manifests",
+        "glob": "reasoningDataset/packet-level/vpn-binary/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 0,
+        "candidate_manifest_count": 0,
+        "manifest_count": 4,
+        "matching_manifests": [],
+        "required_result_path": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+        "fold_manifest_count": 0,
+        "completed_folds": [],
+        "result_bound_manifest_count": 0,
+        "result_bound_manifests": []
+      },
+      "accuracy": 0.9999186212633597,
+      "macro_f1": 0.9999186068245844,
+      "num_samples": 110594,
+      "metric_status": "pass",
+      "publication_status": "needs_paper_unified_repro",
+      "status": "needs_paper_unified_repro"
+    },
+    {
+      "dataset": "ustc-app",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/ustc-app/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/ustc-app/*/packet_framework_manifest.json",
+      "note": "Packet-level only; excluded from current flow-level claims.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/ustc-app/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/ustc-app/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "insufficient_fold_manifests",
+        "glob": "reasoningDataset/packet-level/ustc-app/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 0,
+        "candidate_manifest_count": 0,
+        "manifest_count": 4,
+        "matching_manifests": [],
+        "required_result_path": "reasoningDataset/packet-level/ustc-app/paper_default_result.json",
+        "fold_manifest_count": 0,
+        "completed_folds": [],
+        "result_bound_manifest_count": 0,
+        "result_bound_manifests": []
+      },
+      "accuracy": 0.9773248211171217,
+      "macro_f1": 0.9848701958816448,
+      "num_samples": 609477,
+      "metric_status": "pass",
+      "publication_status": "needs_paper_unified_repro",
+      "status": "needs_paper_unified_repro"
+    },
+    {
+      "dataset": "ustc-binary",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/ustc-binary/*/packet_framework_manifest.json",
+      "note": "All three folds are exact; fold0 path is used as an audit anchor.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "insufficient_fold_manifests",
+        "glob": "reasoningDataset/packet-level/ustc-binary/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 0,
+        "candidate_manifest_count": 0,
+        "manifest_count": 4,
+        "matching_manifests": [],
+        "required_result_path": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json",
+        "fold_manifest_count": 0,
+        "completed_folds": [],
+        "result_bound_manifest_count": 0,
+        "result_bound_manifests": []
+      },
+      "accuracy": 1.0,
+      "macro_f1": 1.0,
+      "num_samples": 609332,
+      "metric_status": "pass",
+      "publication_status": "needs_paper_unified_repro",
+      "status": "needs_paper_unified_repro"
+    }
+  ],
+  "datasets": [
+    {
+      "dataset": "vpn-app",
+      "path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+      "exists": true,
+      "target": {
+        "accuracy": 0.75,
+        "macro_f1": 0.65
+      },
+      "ok": true,
+      "errors": [],
+      "accuracy": 0.7511961722488039,
+      "macro_f1": 0.7522269064093092,
+      "num_flows": 1672,
+      "target_met": true,
+      "slot_status": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": []
+      }
+    },
+    {
+      "dataset": "tls-120",
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json",
+      "exists": true,
+      "target": {
+        "accuracy": 0.78,
+        "macro_f1": 0.7
+      },
+      "ok": true,
+      "errors": [],
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "num_flows": 11542,
+      "target_met": true,
+      "slot_status": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": []
+      }
+    }
+  ],
+  "ok": false
+}

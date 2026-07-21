@@ -159,9 +159,11 @@ class QwenPacketMultiTaskModel(nn.Module):
         same_label_positive_weight: float = 1.0,
         flow_proto_weight: float = 0.0,
         flow_proto_positive: str = "same_class",
+        flow_proto_context: str = "inclusive",
         paired_consistency_weight: float = 0.0,
         paired_cls_weight: float = 0.0,
         paired_logit_kl_weight: float = 0.5,
+        paired_raw_consistency_weight: float = 1.0,
     ) -> Tower1LossOutput:
         device = next(self.parameters()).device
         zero = torch.zeros((), device=device)
@@ -215,6 +217,7 @@ class QwenPacketMultiTaskModel(nn.Module):
                     flow_ids.long(),
                     temperature=temperature,
                     positive_mode=flow_proto_positive,
+                    context_mode=flow_proto_context,
                 )
             if paired_consistency_weight > 0 and "paired_input_ids" in packet_batch:
                 paired_mask = packet_batch.get("paired_mask")
@@ -223,7 +226,7 @@ class QwenPacketMultiTaskModel(nn.Module):
                 else:
                     paired_mask = paired_mask.bool()
                 if paired_mask.any():
-                    _, paired_projected, paired_logits = self.encode_packets(
+                    paired_embeddings, paired_projected, paired_logits = self.encode_packets(
                         packet_batch["paired_input_ids"], packet_batch["paired_attention_mask"]
                     )
                     paired_consistency_loss = paired_view_consistency_loss(
@@ -232,6 +235,9 @@ class QwenPacketMultiTaskModel(nn.Module):
                         packet_logits[paired_mask],
                         paired_logits[paired_mask],
                         logit_kl_weight=paired_logit_kl_weight,
+                        raw_z=packet_embeddings[paired_mask],
+                        paired_raw_z=paired_embeddings[paired_mask],
+                        raw_consistency_weight=paired_raw_consistency_weight,
                     )
                     if paired_cls_weight > 0:
                         paired_ce_each = F.cross_entropy(paired_logits[paired_mask], labels[paired_mask], reduction="none")
@@ -335,13 +341,17 @@ def packet_to_flow_prototype_loss(
     flow_ids: torch.Tensor,
     temperature: float = 0.07,
     positive_mode: str = "same_class",
+    context_mode: str = "inclusive",
 ) -> torch.Tensor:
     """Contrast packets against batch-local flow prototypes.
 
     This is a flow-level companion to packet-packet SupCon: packets are pulled
     toward their own-flow or same-class flow prototypes and pushed away from
-    different-class flow prototypes.
+    different-class flow prototypes. ``leave_one_out`` removes the anchor
+    packet from its own-flow prototype, preventing a self-inclusion shortcut.
     """
+    if context_mode not in {"inclusive", "leave_one_out"}:
+        raise ValueError("context_mode must be inclusive or leave_one_out")
     if z.size(0) <= 1:
         return z.sum() * 0.0
     z = F.normalize(z.float(), p=2, dim=-1)
@@ -361,14 +371,32 @@ def packet_to_flow_prototype_loss(
         flow_label_values = labels[inverse == proto_idx]
         proto_labels[proto_idx] = torch.mode(flow_label_values).values
 
-    logits = torch.matmul(z, prototypes.T) / max(float(temperature), 1e-6)
+    temperature = max(float(temperature), 1e-6)
+    logits = torch.matmul(z, prototypes.T) / temperature
+    candidate_mask = torch.ones_like(logits, dtype=torch.bool)
+    if context_mode == "leave_one_out":
+        own_counts = counts[inverse] - 1.0
+        has_own_context = own_counts > 0
+        own_sum = proto_sum[inverse] - z
+        own_prototypes = F.normalize(
+            own_sum / own_counts.clamp(min=1.0).unsqueeze(1), p=2, dim=-1
+        )
+        own_logits = (z * own_prototypes).sum(dim=-1) / temperature
+        own_columns = F.one_hot(inverse, num_classes=unique_flows.numel()).bool()
+        logits = torch.where(own_columns, own_logits.unsqueeze(1), logits)
+        candidate_mask = candidate_mask & (~own_columns | has_own_context.unsqueeze(1))
+        logits = logits.masked_fill(~candidate_mask, -1e9)
+    else:
+        has_own_context = torch.ones_like(inverse, dtype=torch.bool)
     logits = logits - logits.max(dim=1, keepdim=True).values.detach()
     proto_ids = torch.arange(unique_flows.numel(), device=z.device)
     own_flow_mask = proto_ids.unsqueeze(0) == inverse.unsqueeze(1)
     if positive_mode == "own_flow":
-        pos_mask = own_flow_mask
+        pos_mask = own_flow_mask & has_own_context.unsqueeze(1)
     else:
-        pos_mask = labels.view(-1, 1).eq(proto_labels.view(1, -1)) | own_flow_mask
+        pos_mask = (
+            labels.view(-1, 1).eq(proto_labels.view(1, -1)) | own_flow_mask
+        ) & candidate_mask
     valid = pos_mask.sum(dim=1) > 0
     if valid.sum() == 0:
         return z.sum() * 0.0
@@ -383,19 +411,30 @@ def paired_view_consistency_loss(
     logits: torch.Tensor,
     paired_logits: torch.Tensor,
     logit_kl_weight: float = 0.5,
+    raw_z: torch.Tensor | None = None,
+    paired_raw_z: torch.Tensor | None = None,
+    raw_consistency_weight: float = 1.0,
 ) -> torch.Tensor:
     """Keep full-header and randomized/masked-header packet views close.
 
-    The representation term pulls projected packet embeddings together. The
-    symmetric KL term keeps class evidence stable without requiring the paired
-    view to be a separate expert. Both terms are differentiable zeros for empty
-    batches so callers can enable the loss conditionally.
+    Projected and raw last-token representations are both constrained because
+    downstream concat embeddings expose both. The symmetric KL term keeps class
+    evidence stable without requiring the paired view to be a separate expert.
     """
     if z.numel() == 0:
         return logits.sum() * 0.0
     z = F.normalize(z.float(), p=2, dim=-1)
     paired_z = F.normalize(paired_z.float(), p=2, dim=-1)
     rep_loss = (1.0 - (z * paired_z).sum(dim=-1)).mean()
+    if (raw_z is None) != (paired_raw_z is None):
+        raise ValueError("raw paired consistency requires both raw_z and paired_raw_z")
+    if raw_consistency_weight < 0:
+        raise ValueError("raw_consistency_weight must be non-negative")
+    if raw_z is not None and raw_consistency_weight > 0:
+        raw_z = F.normalize(raw_z.float(), p=2, dim=-1)
+        paired_raw_z = F.normalize(paired_raw_z.float(), p=2, dim=-1)
+        raw_loss = (1.0 - (raw_z * paired_raw_z).sum(dim=-1)).mean()
+        rep_loss = rep_loss + float(raw_consistency_weight) * raw_loss
     if logit_kl_weight <= 0:
         return rep_loss
     p_log = F.log_softmax(logits.float(), dim=-1)

@@ -17,6 +17,10 @@ DATASET_PRESETS = {
         "num_classes": 16,
         "label_map": "reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json",
         "base_selector_input": DEFAULT_PAPER_SAFE_RESULTS["vpn-app"],
+        "embedding_suffix": "rawproj_flowaware_change_weight_split2_retrain",
+        "paired_output_suffix": "flowaware_ipport_rand_change_weight_split2_retrain",
+        "paired_embedding_suffix": "rawproj_flowaware_ipport_rand_change_weight_split2_retrain",
+        "tower1_output_dir": "checkpoints/tower1_qwen_multitask_vpn_app_flowaware_change_weight_split2_retrain",
         "slot_stacker_inputs": [
             ("prior_base", "reasoningDataset/vpn-app/test_fusion_vpn_full_stage5_flow_embedding_prior_ensemble_softcap_k31_vote.json"),
             ("emb_lr", "reasoningDataset/vpn-app/test_flow_embedding_classifier_logreg_meta_valid_acc.json"),
@@ -31,6 +35,10 @@ DATASET_PRESETS = {
         "num_classes": 120,
         "label_map": "reasoningDataset/tls-120/train_tower1_change_weight/label_map.json",
         "base_selector_input": DEFAULT_PAPER_SAFE_RESULTS["tls-120"],
+        "embedding_suffix": "rawproj_flowaware_change_weight_fold2",
+        "paired_output_suffix": "flowaware_ipport_rand_change_weight_fold2",
+        "paired_embedding_suffix": "rawproj_flowaware_ipport_rand_change_weight_fold2",
+        "tower1_output_dir": "checkpoints/tower1_qwen_multitask_tls_120_flowaware_change_weight_fold2",
         "slot_stacker_inputs": [
             ("graph", "reasoningDataset/tls-120/fusion_input_graph_acc_ft.json"),
             ("seq", "reasoningDataset/tls-120/fusion_input_seq_baseline.json"),
@@ -72,6 +80,21 @@ def paired_view_outputs_exist(args) -> bool:
         root / f"test_tower2_{suffix}" / "graph_dataset.pt",
     ]
     return all(path.exists() for path in required)
+
+
+def paired_losses_enabled(args) -> bool:
+    return any(
+        float(getattr(args, name, 0.0)) > 0.0
+        for name in (
+            "paired_view_weight",
+            "paired_consistency_weight",
+            "paired_alignment_weight",
+            "paired_crossview_contrastive_weight",
+            "paired_variance_weight",
+            "paired_covariance_weight",
+            "view_domain_adversarial_weight",
+        )
+    )
 
 
 def final_outputs_exist(args) -> bool:
@@ -149,7 +172,7 @@ def selected_model_types(args) -> List[str]:
 
 
 def runner_base(args) -> List[str]:
-    return [
+    cmd = [
         "python",
         "run_stage8_flowaware_pipeline.py",
         "--dataset",
@@ -158,6 +181,8 @@ def runner_base(args) -> List[str]:
         str(args.num_classes),
         "--model_types",
         args.model_types,
+        "--framework_profile",
+        getattr(args, "framework_profile", "paper_unified"),
         "--seed",
         str(args.seed),
         "--flow_pooling",
@@ -166,6 +191,9 @@ def runner_base(args) -> List[str]:
         str(args.multi_view_gate_entropy_weight),
         "--no_progress",
     ]
+    if args.tower1_output_dir:
+        cmd += ["--tower1_output_dir", args.tower1_output_dir]
+    return cmd
 
 
 def recommendation_cmd(args) -> List[str]:
@@ -355,6 +383,7 @@ def final_selector_cmd(args) -> List[str]:
 
 def stage_commands(args) -> List[Dict[str, Any]]:
     base = runner_base(args)
+    use_paired_losses = paired_losses_enabled(args)
     paired_common = [
         "--output_suffix",
         args.paired_output_suffix,
@@ -366,12 +395,6 @@ def stage_commands(args) -> List[Dict[str, Any]]:
         args.embedding_suffix,
         "--run_tag",
         args.run_tag,
-        "--paired_embedding_suffix",
-        args.paired_embedding_suffix,
-        "--paired_view_weight",
-        str(args.paired_view_weight),
-        "--paired_consistency_weight",
-        str(args.paired_consistency_weight),
         "--consistency_weight",
         str(args.consistency_weight),
         "--meta_dropout_prob",
@@ -389,6 +412,52 @@ def stage_commands(args) -> List[Dict[str, Any]]:
         "--tower2_early_stop_patience",
         str(args.tower2_early_stop_patience),
     ]
+    if use_paired_losses:
+        train_common += [
+            "--paired_embedding_suffix",
+            args.paired_embedding_suffix,
+            "--paired_view_weight",
+            str(args.paired_view_weight),
+            "--paired_consistency_weight",
+            str(args.paired_consistency_weight),
+            "--paired_alignment_weight",
+            str(args.paired_alignment_weight),
+            "--paired_crossview_contrastive_weight",
+            str(args.paired_crossview_contrastive_weight),
+            "--paired_crossview_temperature",
+            str(args.paired_crossview_temperature),
+            "--paired_variance_weight",
+            str(args.paired_variance_weight),
+            "--paired_variance_target",
+            str(args.paired_variance_target),
+            "--paired_covariance_weight",
+            str(args.paired_covariance_weight),
+            "--view_domain_adversarial_weight",
+            str(args.view_domain_adversarial_weight),
+        ]
+    if args.distill_targets_json:
+        train_common += [
+            "--distill_targets_json",
+            args.distill_targets_json,
+            "--distill_weight",
+            str(args.distill_weight),
+            "--distill_class_prior_weight",
+            str(args.distill_class_prior_weight),
+            "--distill_temperature",
+            str(args.distill_temperature),
+            "--distill_min_confidence",
+            str(args.distill_min_confidence),
+            "--distill_max_confidence",
+            str(args.distill_max_confidence),
+            "--distill_confidence_power",
+            str(args.distill_confidence_power),
+            "--distill_min_coverage",
+            str(args.distill_min_coverage),
+            "--distill_low_coverage_action",
+            args.distill_low_coverage_action,
+        ]
+    slot_cmd = slot_stacker_cmd(args) if args.enable_slot_stacker else []
+    soft_cmd = soft_gate_cmd(args) if args.enable_soft_expert_gate else []
     return [
         {
             "name": "diagnose_before",
@@ -401,19 +470,19 @@ def stage_commands(args) -> List[Dict[str, Any]]:
             "cmd": base
             + ["--stage", "tower1_preprocess", "--output_suffix", args.paired_output_suffix, "--embedding_header_policy", args.embedding_header_policy],
             "requires_cuda": False,
-            "skip_if": args.skip_existing and paired_view_outputs_exist(args),
+            "skip_if": (not use_paired_losses) or (args.skip_existing and paired_view_outputs_exist(args)),
         },
         {
             "name": "paired_embeddings",
             "cmd": base + ["--stage", "embeddings"] + paired_common + ["--require_cuda"],
             "requires_cuda": True,
-            "skip_if": args.skip_existing and paired_view_outputs_exist(args),
+            "skip_if": (not use_paired_losses) or (args.skip_existing and paired_view_outputs_exist(args)),
         },
         {
             "name": "paired_tower2_preprocess",
             "cmd": base + ["--stage", "tower2_preprocess", "--embedding_suffix", args.paired_embedding_suffix],
             "requires_cuda": False,
-            "skip_if": args.skip_existing and paired_view_outputs_exist(args),
+            "skip_if": (not use_paired_losses) or (args.skip_existing and paired_view_outputs_exist(args)),
         },
         {
             "name": "paired_tower2_train",
@@ -441,13 +510,13 @@ def stage_commands(args) -> List[Dict[str, Any]]:
         },
         {
             "name": "slot_stacker",
-            "cmd": slot_stacker_cmd(args),
+            "cmd": slot_cmd,
             "requires_cuda": False,
             "skip_if": (not args.enable_slot_stacker) or (args.skip_existing and slot_stacker_output_exists(args)),
         },
         {
             "name": "soft_expert_gate",
-            "cmd": soft_gate_cmd(args),
+            "cmd": soft_cmd,
             "requires_cuda": False,
             "skip_if": (not args.enable_soft_expert_gate) or (args.skip_existing and soft_gate_output_exists(args)),
         },
@@ -474,10 +543,19 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
         "cuda": cuda,
         "embedding_suffix": args.embedding_suffix,
         "paired_embedding_suffix": args.paired_embedding_suffix,
+        "paired_output_suffix": args.paired_output_suffix,
+        "tower1_output_dir": args.tower1_output_dir,
         "run_tag": args.run_tag,
         "experiment_config": {
             "paired_view_weight": args.paired_view_weight,
             "paired_consistency_weight": args.paired_consistency_weight,
+            "paired_alignment_weight": args.paired_alignment_weight,
+            "paired_crossview_contrastive_weight": args.paired_crossview_contrastive_weight,
+            "paired_crossview_temperature": args.paired_crossview_temperature,
+            "paired_variance_weight": args.paired_variance_weight,
+            "paired_variance_target": args.paired_variance_target,
+            "paired_covariance_weight": args.paired_covariance_weight,
+            "view_domain_adversarial_weight": args.view_domain_adversarial_weight,
             "consistency_weight": args.consistency_weight,
             "meta_dropout_prob": args.meta_dropout_prob,
             "embedding_dropout_prob": args.embedding_dropout_prob,
@@ -487,6 +565,7 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "tower2_epochs": args.tower2_epochs,
             "tower2_early_stop_patience": args.tower2_early_stop_patience,
             "model_types": args.model_types,
+            "framework_profile": getattr(args, "framework_profile", "paper_unified"),
             "seed": args.seed,
             "flow_pooling": args.flow_pooling,
             "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
@@ -509,6 +588,15 @@ def write_plan(args, stages: List[Dict[str, Any]], cuda: Dict[str, Any], execute
             "soft_gate_weight_decay": args.soft_gate_weight_decay,
             "soft_gate_entropy_weight": args.soft_gate_entropy_weight,
             "soft_gate_cv_splits": args.soft_gate_cv_splits,
+            "distill_targets_json": args.distill_targets_json,
+            "distill_weight": args.distill_weight,
+            "distill_class_prior_weight": args.distill_class_prior_weight,
+            "distill_temperature": args.distill_temperature,
+            "distill_min_confidence": args.distill_min_confidence,
+            "distill_max_confidence": args.distill_max_confidence,
+            "distill_confidence_power": args.distill_confidence_power,
+            "distill_min_coverage": args.distill_min_coverage,
+            "distill_low_coverage_action": args.distill_low_coverage_action,
         },
         "base_selector_input": args.base_selector_input or default_base_selector_input(args),
         "paired_prior_output": paired_prior_output_path(args),
@@ -540,16 +628,39 @@ def main() -> None:
     ap.add_argument("--paired_output_suffix", default="flowaware_ipport_rand_change_weight")
     ap.add_argument("--paired_embedding_suffix", default="rawproj_flowaware_ipport_rand_change_weight")
     ap.add_argument("--embedding_header_policy", choices=["randomize_ip_port", "mask_ip_port"], default="randomize_ip_port")
+    ap.add_argument("--tower1_output_dir", default="", help="Optional existing Tower-1 checkpoint directory passed to Stage-8 embedding extraction.")
     ap.add_argument("--run_tag", default="paired_ipport")
     ap.add_argument("--model_types", default="graph,seq")
+    ap.add_argument(
+        "--framework_profile",
+        choices=["legacy", "paper_unified"],
+        default="paper_unified",
+        help="Shared paper-facing module profile passed to Stage-8. Use legacy only for historical ablations.",
+    )
     ap.add_argument("--paired_view_weight", type=float, default=0.2)
     ap.add_argument("--paired_consistency_weight", type=float, default=0.1)
+    ap.add_argument("--paired_alignment_weight", type=float, default=0.0)
+    ap.add_argument("--paired_crossview_contrastive_weight", type=float, default=0.0)
+    ap.add_argument("--paired_crossview_temperature", type=float, default=0.07)
+    ap.add_argument("--paired_variance_weight", type=float, default=0.0)
+    ap.add_argument("--paired_variance_target", type=float, default=0.04)
+    ap.add_argument("--paired_covariance_weight", type=float, default=0.0)
+    ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0)
     ap.add_argument("--consistency_weight", type=float, default=0.05)
     ap.add_argument("--meta_dropout_prob", type=float, default=0.1)
     ap.add_argument("--embedding_dropout_prob", type=float, default=0.05)
     ap.add_argument("--window_dropout_prob", type=float, default=0.1)
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
     ap.add_argument("--confidence_penalty_weight", type=float, default=0.0)
+    ap.add_argument("--distill_targets_json", default="", help="Optional flow-id soft teacher JSON passed through to Tower-2 training.")
+    ap.add_argument("--distill_weight", type=float, default=0.0)
+    ap.add_argument("--distill_class_prior_weight", type=float, default=0.0)
+    ap.add_argument("--distill_temperature", type=float, default=2.0)
+    ap.add_argument("--distill_min_confidence", type=float, default=0.0)
+    ap.add_argument("--distill_max_confidence", type=float, default=0.0)
+    ap.add_argument("--distill_confidence_power", type=float, default=0.0)
+    ap.add_argument("--distill_min_coverage", type=float, default=0.0)
+    ap.add_argument("--distill_low_coverage_action", choices=["warn", "disable_flow", "fail"], default="warn")
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
@@ -679,6 +790,14 @@ def main() -> None:
         args.final_selector_rank_candidate_limit = int(preset.get("final_selector_rank_candidate_limit", 256))
     if args.final_selector_rank_bootstrap_samples <= 0:
         args.final_selector_rank_bootstrap_samples = int(args.final_selector_bootstrap_samples)
+    if args.embedding_suffix == "rawproj_flowaware_change_weight":
+        args.embedding_suffix = str(preset.get("embedding_suffix", args.embedding_suffix))
+    if args.paired_output_suffix == "flowaware_ipport_rand_change_weight":
+        args.paired_output_suffix = str(preset.get("paired_output_suffix", args.paired_output_suffix))
+    if args.paired_embedding_suffix == "rawproj_flowaware_ipport_rand_change_weight":
+        args.paired_embedding_suffix = str(preset.get("paired_embedding_suffix", args.paired_embedding_suffix))
+    if not args.tower1_output_dir:
+        args.tower1_output_dir = str(preset.get("tower1_output_dir", ""))
     if not args.plan_json:
         args.plan_json = str(Path("reasoningDataset") / args.dataset / f"recommended_experiment_plan_{args.run_tag}.json")
 

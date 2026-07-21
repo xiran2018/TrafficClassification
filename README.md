@@ -80,14 +80,160 @@ dataset-level `test` directory.
 
 `run_packet_level_pipeline.py` applies the same strict-one-packet framework to
 all six SWEET packet-level datasets. Each dataset/fold is trained independently.
-The recommended `packet_best` stage combines a dual-channel current-packet
-Transformer and a current-packet structural expert. The neural branch encodes
-the normalized L3 header/full-packet prefix and the parsed transport payload in
-independent local mixers/Transformers, then learns a content gate over both
-views and parsed metadata. A validation-only reliability gate or weighted blend
-may fuse the neural and tree experts or shut an unhelpful expert off.
+For new paper-facing runs, use `--stage paper_unified`; the runner now defaults
+to `--framework_profile paper_unified`, so the explicit flag in commands below
+is mainly for readable logs and reproducibility ledgers. Use
+`--framework_profile legacy` only for historical ablations. The paper-unified
+profile runs preprocessing, split audit, Tower-1/Qwen semantic training, and a
+single shared neural packet encoder with protocol-aware content, current-packet
+structure, and semantic channels. The protocol-aware
+encoder is the same `ProtocolAwarePacketContentEncoder` used by the flow native
+branch: it consumes only the current packet bytes and protocol-field IDs; the
+flow-native content pretraining applies its fixed session-field intervention.
+For paper runs, the same Tower1 checkpoint encodes aligned factual `full`
+and intervened `mask_ip_port` prompts. `SharedInterventionViewFusion` combines
+those two semantic observations before the three representations are fused by
+the learned `SharedPacketChannelFusion`. The paper profile uses its
+`semantic_anchor` mode: the normalized semantic representation is the stable
+base, while native content and current-packet structure enter only through a
+bounded, sample-dependent residual. Thus the reported gate weights are the
+actual route for non-semantic evidence instead of allowing a hidden
+`sum(channels)` path to bypass the gate. There is no paper-main tree expert or
+post-hoc probability stacker.
 Dataset-specific behavior is learned from each fold rather than implemented as
 dataset-specific model branches.
+
+Long packet runs coordinate GPU phases with the same physical-GPU file lock
+used by `extract_packet_embeddings_qwen.py`. This prevents Tower1 or the shared
+packet head from loading while a sharded embedding worker occupies the same
+card. On the eight-A800 host, an unattended run can additionally require launch
+headroom without changing the model or its framework fingerprint:
+
+```bash
+export CUDA_VISIBLE_DEVICES=5
+export PACKET_GPU_MIN_FREE_MB=40000
+conda run --no-capture-output -n llm-factory \
+  python run_packet_level_pipeline.py ...
+```
+
+The default threshold is `0` (lock only), so smaller installations can choose
+their own operational headroom. The real `llm-factory` environment has CUDA
+access to eight A800 GPUs even when CUDA is unavailable inside the default
+Codex sandbox.
+
+The active strict-v2 unattended launchers under `/tmp/two_tower_runs` do not
+assume that GPU7 remains free. They scan `STRICT_GPU_CANDIDATES` (default
+`7 5 3 2 1 0 6 4`), require at least `60000` MiB free, acquire the existing
+per-GPU Qwen embedding lock without blocking, recheck memory after the lock,
+and retry every 120 seconds when no A800 is safe. This is an execution policy
+only; the selected physical GPU is not a model or dataset hyperparameter.
+
+The contract is deliberately narrower than "enable every module ever tried":
+
+- Every paper-main dataset executes factual/intervened semantic,
+  protocol-content, and strict
+  current-packet structural encoders, followed by the same
+  `SharedInterventionViewFusion` and `SharedPacketChannelFusion` implementations.
+- Encoder, projection, classifier, and per-sample channel-gate parameters are
+  learned independently from each dataset's training fold. They are not manual
+  VPN/TLS weights.
+- The `full + mask_ip_port` intervention pair, module graph, objective family,
+  validation metric, and cross-fold `log_mean` rule define one
+  `paper_unified` method. VPN/TLS and Packet/Flow train all model parameters
+  independently. Numeric optimization hyperparameters such as learning rate,
+  schedule, epoch budget, batch size, weight decay, temperature, and nonzero
+  loss coefficients may be set independently for each dataset/task and are
+  recorded in the execution contract; changing whether an objective is enabled
+  or replacing a module is a method change and is rejected by the shared-core
+  audit.
+- Shortcut control is deliberately asymmetric rather than claiming that every
+  header bit is discarded. The semantic anchor is formed from the factual and
+  endpoint-masked views, while the protocol-content and packet-local structural
+  channels may retain specialized evidence. Those channels can affect the
+  shared packet representation only through the same learned residual path,
+  whose multiplier is fixed at `0.25` in both packet and flow models. This
+  implements an endpoint-stable core with bounded environment-specific
+specialization; it is not an unrestricted full-header shortcut model.
+  `test_packet_byte_transformer.py` records the raw and effective learned
+  routing distributions under `learned_gate_diagnostics`, including named
+  semantic/content/structural weights and factual/intervened weights. This is
+  the packet-side counterpart of Tower2's gate diagnostics and provides direct
+  evidence that datasets learn parameters inside one fixed module graph.
+  Both evaluators also expose the same inference-only sensitivity controls:
+  `--ablate_input_channel semantic|content|structural` and
+  `--ablate_intervention_view factual_only|intervened_only`. Their result JSON
+  is explicitly marked `inference_only_not_retrained_ablation`; these runs show
+  checkpoint sensitivity and must not be presented as substitutes for matched
+  from-scratch component ablations.
+- Packet and flow differ only after the shared packet representation: packet
+  classification uses one packet head; flow classification uses one sequence
+  encoder, mean aggregation, and one flow head.
+- Stability grouping follows the task's valid statistical unit. Packet data are
+  audited by recovered flow ID, sampled with equal flow participation, and
+  selected by packet macro-F1. Its source files are class-merged PCAPs (for VPN
+  fold0, 16 PCAP hashes for 16 labels), so treating each whole PCAP hash as one
+  validation item would be a meaningless class-level vote. Flow data instead
+  use content-hash group guards because repeated flow/window content is the
+  relevant duplication risk. This is a task-protocol difference, not a
+  dataset-specific model module.
+- Tree experts, graph/multi-view alternatives, hierarchical/confusion heads,
+  probability fusion, stackers, and target-prior calibration are historical or
+  ablation modules. They are not silently passed through and then selected for
+  the paper main result.
+
+Tower1 uses an eight-epoch upper bound with gradient accumulation 1 in both
+tasks. Every epoch is evaluated on a deterministic flow-balanced validation
+subset containing at most two non-repeated packets per flow, and `best/` is
+selected by held-out packet macro-F1. Both factual and intervened embedding
+views are extracted from that same checkpoint. The flow-balanced sampler has
+the same definition in both tasks, but its epoch length follows the number of
+training flows rather than being tuned per task. The VPN flow-classification
+fold has 704 training flows and therefore 88 batches per epoch at eight flows
+per batch; the VPN packet-classification Per-flow Split fold0 has 4,713 flows
+and therefore 590 batches. The earlier two-epoch/final protocol provided too
+few optimizer updates and is retained only as a historical ablation.
+
+The current strict folds retain the frozen eight-epoch protocol for a fair
+baseline. Their Tower1 validation histories show fold0/fold1 peaking at epoch
+8 and fold2 at epoch 5; the mean fold Macro-F1 still rises through epoch 8
+(`0.0278, 0.1962, 0.3640, 0.4480, 0.4926, 0.5044, 0.5154, 0.5412`). This is
+evidence of a truncated optimization budget in some folds, not a license to
+select an epoch from test results. `train_tower1_multitask.py` and both unified
+runners now expose validation-only Tower1 patience, defaulting to disabled for
+backward compatibility. After the frozen packet/flow baselines finish, the
+pre-registered training-only candidate is a common maximum of 12 epochs with
+patience 3 for every dataset and task; promotion requires multi-fold held-out
+improvement before any shared-test comparison.
+
+The semantic-anchor change was admitted by a controlled VPN fold-0 experiment,
+not by selecting on test labels. With identical data and Tower2 settings across
+seeds 42/43/44, legacy fusion obtained `55.66 +/- 1.12%` flow accuracy and
+`53.74 +/- 0.57%` macro-F1; semantic-anchor fusion obtained
+`56.44 +/- 1.31%` and `53.96 +/- 0.82%`. The mean changes are `+0.78` and
+`+0.22` percentage points. A 5,000-sample paired bootstrap for seed 42 gave an
+accuracy win rate of `92.24%`, but its 95% interval crossed zero and McNemar
+`p=0.156`; this supports a better-defined and more stable shared fusion path,
+not a statistically significant single-fold SOTA claim. The same profile must
+still be evaluated on all VPN/TLS folds and packet-level tasks before this
+result can enter the paper's headline table.
+
+The first two strict `paper_unified` VPN folds expose a separate target-prior
+shift: fixed fold01 `log_mean` gives accuracy `0.616029`, macro-F1 `0.580074`,
+macro recall `0.675415`, and macro precision `0.556790`. Both fold-local train
+and validation flow sets are nearly class-balanced, while the shared test set
+is strongly imbalanced. `attach_oof_validation.py` can concatenate only each
+model's own held-out validation predictions (with fold-prefixed IDs) onto a
+fixed consensus payload; it never constructs a validation ensemble from models
+that may have trained on that fold. A diagnostic blend of BBSE and EM prior
+estimates, with correction strength selected by target-prior-weighted OOF
+validation macro-F1, selected `0.5` and reached `0.648325/0.631159`. This is
+promising but remains a transductive label-shift candidate until the identical
+rule is frozen and verified on VPN fold012 and TLS-120. It must not be compared
+as an inductive SWEET result without an explicit transductive protocol.
+
+Consequently, old best-result rows below remain historical evidence. They do
+not become paper-unified evidence until all three folds have current profile
+fingerprints and the fixed consensus has been bound to the canonical result.
 
 The packet branch is:
 
@@ -95,12 +241,12 @@ The packet branch is:
 class-level PCAP
 -> recover real bidirectional flow IDs for split audit/training batches only
 -> one packet per model input (no sequence/window/inter-arrival features)
--> L3/full-packet byte mixer + downsampled Transformer
--> independent current-packet payload mixer + Transformer
--> learned header/payload/meta content gate
--> validation-selected current-packet tree expert
--> nested OOF temperature/reliability selection on validation only
--> optional validation-selected label-shift calibration from unlabeled target probabilities
+-> Tower-1/Qwen current-packet semantic representation
+-> shared protocol-aware current-packet content representation
+-> shared 13-dimensional current-packet structural representation (no IAT)
+-> learned semantic/content/structural representation-level gate
+-> one packet classification head
+-> fixed three-fold log-mean consensus
 -> one prediction per packet on the shared test set
 ```
 
@@ -108,18 +254,17 @@ Run a path audit before starting GPU work:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
-  python run_packet_level_pipeline.py \
+    python run_packet_level_pipeline.py \
     --dataset vpn-app \
     --fold 0 \
-    --stage all \
+    --stage paper_unified \
     --local_files_only \
     --dry_run
 ```
 
-Run all three folds separately. `packet_best` assumes preprocessing and the
-flow-overlap audit have completed. Do not merge the prepared fold directories:
-each `train_val_split_i` contains its own training/validation partition, and
-all folds use the same `test/` set.
+Run all three folds separately with the paper-facing profile. Do not merge the
+prepared fold directories: each `train_val_split_i` contains its own
+training/validation partition, and all folds use the same `test/` set.
 
 ```bash
 for fold in 0 1 2; do
@@ -127,23 +272,11 @@ for fold in 0 1 2; do
     python run_packet_level_pipeline.py \
       --dataset vpn-app \
       --fold ${fold} \
-      --stage preprocess \
-      --max_packets_per_flow 1000
-
-  conda run --no-capture-output -n llm-factory \
-    python run_packet_level_pipeline.py \
-      --dataset vpn-app \
-      --fold ${fold} \
-      --stage audit
-
-  CUDA_VISIBLE_DEVICES=${fold} conda run --no-capture-output -n llm-factory \
-    python run_packet_level_pipeline.py \
-      --dataset vpn-app \
-      --fold ${fold} \
-      --stage packet_best \
-      --byte_max_bytes 64 \
-      --byte_use_payload_channel \
-      --byte_max_payload_bytes 128 \
+      --stage paper_unified \
+      --framework_profile paper_unified \
+      --max_packets_per_flow 1000 \
+      --byte_max_bytes 128 \
+      --byte_use_protocol_fields \
       --byte_epochs 12 \
       --byte_batch_size 512 \
       --byte_eval_batch_size 2048
@@ -163,9 +296,226 @@ the much larger QA corpus when packet classification is the only objective;
 long-flow cap. The existing flow-level commands keep the default
 `--input_layout flow_pcaps` and are behaviorally unchanged.
 
-The original Qwen-LoRA packet head remains available through `--stage train`
-and `--stage test` as a semantic ablation. It is not forced into the final
-fusion when validation evidence favors the smaller byte or structural channel.
+The Qwen-LoRA encoder is executed by `--stage paper_unified`; its packet-aligned
+embeddings enter the neural model before classification. Cache manifests bind
+both views to the same packet-index hash, their distinct header policies,
+packet IDs, and strict
+current-packet scope. ExtraTrees/RandomForest and probability-level fusion are
+kept only under legacy/ablation stages.
+
+### Unified packet-to-flow framework audit
+
+The paper-facing direction is not separate packet and flow pipelines. The
+current contract is stored in `unified_framework_spec.py`. Packet-level and
+flow-level tasks share exactly six representation components:
+
+```text
+label-free protocol-content pretraining
+field-aware factual/intervened observations
+Tower1 current-packet semantic channel
+13-dimensional current-packet structural channel
+shared factual/intervened representation fusion
+one semantic-anchored bounded tri-channel router
+```
+
+The task-specific part is only the final strict-current-packet classifier or
+`packet_to_flow_proj` followed by the window/flow aggregator. Per-flow split,
+content-group `group_mean` risk, validation-only freezing, and fixed equal
+three-fold `log_mean` are training/evaluation protocol guards, not extra model
+blocks. Graph, statistics, prior calibration, selectors, and probability
+stackers are excluded from the main path and retained only as ablations.
+
+The code now separates three module roles for paper writing and audits:
+
+- **Paper main modules** are the six shared packet representation components plus
+  the task-specific packet head or flow/window aggregator. These are the modules
+  every dataset/task must expose under `paper_unified`.
+- **Unified candidate experts** are available through the same expert-slot or
+  validation-gated interface on every flow dataset. Dataset-specific behavior
+  should come from learned gates, trained expert weights, identity fallback, or
+  validation-only rejection, not from manually swapping modules per dataset.
+- **Ablation-only modules** remain in the code for reproducibility and negative
+  evidence, but they are not part of the default main claim. This includes
+  confidence penalty, VPN-specific hierarchical coarse heads, VPN-specific
+  confusion groups, unconstrained stackers, unsafe target-tuned priors, manual
+  single-split threshold routing, and residual-fusion grid searches.
+
+Run the audit after changing either task path:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python audit_unified_framework.py \
+    --output_json reasoningDataset/unified_framework_audit.json \
+    --output_md reasoningDataset/unified_framework_audit.md
+```
+
+This audit is deliberately stricter than a metric table: it checks that the
+current flow-level paper scope remains VPN/TLS only, that SWEET packet-level
+datasets are represented in the packet branch, and that both tasks advertise the
+same shared core modules. It also separates `metric_status` from
+`publication_status`: a result can pass accuracy/F1 while still being marked
+`needs_paper_unified_repro` if no matching `paper_unified` runner manifest exists
+for that dataset/task. Each manifest stores a stable
+`framework_profile_fingerprint` derived from the paper profile's shared module
+status, task overrides, candidate expert family, and ablation-only module list.
+For the field-aware intervention contract, the flow runner verifies both cache
+families independently on every requested split: the factual cache must attest
+`full`, and the aligned intervention cache must attest `mask_ip_port`. Only then
+does the manifest record
+`factual_full_plus_mask_ip_port_intervention`; recording the factual `full`
+policy alone is intentionally rejected by the audit. This mirrors the packet
+runner and prevents a stale or missing intervention cache from satisfying the
+paper claim. Existing completed manifests may be regenerated from their stored
+arguments only after both cache evidences pass; no audit field should be edited
+by hand.
+When the default profile changes, older manifests without the current
+fingerprint stop counting as paper provenance. Passing the metric table alone
+does not prove the final CCF-A claim; the provenance gate prevents the codebase
+from drifting back into unrelated task-specific recipes or stale default
+settings.
+
+When the audit reports `needs_paper_unified_repro`, generate the next rerun
+queue with:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python make_unified_repro_plan.py \
+    --audit_json reasoningDataset/unified_framework_audit.json \
+    --output_json reasoningDataset/unified_repro_plan.json \
+    --output_md reasoningDataset/unified_repro_plan.md
+```
+
+The plan intentionally emits real `paper_unified` runner commands instead of
+editing the audit by hand. A dry-run manifest is useful for debugging, but a
+paper-facing pass should be backed by rerunning the corresponding flow or packet
+pipeline under `--framework_profile paper_unified`.
+For flow-level results, publication provenance requires three completed current-
+fingerprint fold manifests plus a canonical result binding. Old embeddings
+without attested aligned `full` and `mask_ip_port` views and old native embeddings without
+`representation_scope=strict_current_packet` are rejected rather than promoted.
+Flow rerun commands include
+`--require_cuda`, so they fail early in CPU-only sandboxes and should be launched
+from the real `llm-factory` A800 environment.
+
+If `reasoningDataset/unified_framework_audit.json` reports `status=review`,
+read it as a provenance gate rather than an accuracy failure. For example, a
+result can meet the target metrics while still requiring a fresh
+`paper_unified` manifest that binds the canonical result path after framework
+defaults change. Generate the repro plan below and rerun the listed flow or
+packet jobs instead of editing the audit file by hand.
+
+For packet-level provenance, the plan uses the runner stage
+`--stage paper_unified`: this reruns preprocessing, the Per-flow Split audit,
+Tower-1 training and embedding extraction, then the shared tri-channel packet
+encoder and its single classification head. After folds
+0/1/2, the plan runs a fixed log-mean packet consensus and writes the canonical
+`paper_default_result.json`; it does not tune fold weights on the shared test.
+
+Execute the queue with the resumable runner. By default it runs only one action,
+writes a ledger, and skips successful actions on the next invocation:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_unified_repro_plan.py \
+    --plan_json reasoningDataset/unified_repro_plan.json \
+    --ledger_json reasoningDataset/unified_repro_ledger.json \
+    --log_dir logs/unified_repro \
+    --max_actions 1
+```
+
+Useful filters:
+
+```bash
+# Run all remaining flow-level provenance jobs.
+conda run --no-capture-output -n llm-factory \
+  python run_unified_repro_plan.py \
+    --task flow-level \
+    --max_actions -1
+
+# Run the TLS-120 packet folds only.
+conda run --no-capture-output -n llm-factory \
+  python run_unified_repro_plan.py \
+    --task packet-level \
+    --dataset tls-120 \
+    --max_actions -1
+```
+
+After a batch finishes, rerun `audit_unified_framework.py` and
+`make_unified_repro_plan.py`; completed datasets disappear from the next plan
+only after their metric file and non-dry-run `paper_unified` manifest both
+satisfy the publication gate.
+
+Use the shared paper profile for new CCF-A-oriented experiments:
+
+```bash
+# Packet-level: one current packet is still the only model input.
+conda run --no-capture-output -n llm-factory \
+  python run_packet_level_pipeline.py \
+    --dataset vpn-app \
+    --fold 0 \
+    --stage paper_unified \
+    --framework_profile paper_unified
+
+# Flow-level: flow packet sequence input, same shared packet modules, then
+# window/flow aggregation.
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --stage paper_unified \
+    --framework_profile paper_unified \
+    --run_tag paper_unified
+```
+
+`paper_unified` intentionally trades some dataset-specific tuning freedom for a
+clean paper claim. It constructs a factual `full` semantic view and a
+counterfactual `mask_ip_port` semantic view from the same Tower1 checkpoint.
+Both tasks fuse those views with the same bounded
+`SharedInterventionViewFusion` before executing current-packet content,
+structural, and semantic channels through the same `SharedPacketChannelFusion`.
+The main path trains one classifier rather than two view-specific classifiers
+followed by probability fusion,
+uses exact-PCAP content-group guards to reduce duplicate-content shortcut
+learning, uses validation-only selection, and restricts calibration to
+validation-only or label-free target-prior mechanisms. In the flow runner this
+means Tower-2 preprocessing attaches `content_group_id` by default, Tower-2
+selects `best.pt` with `content_group_macro_f1`, main flow CE can be averaged
+per content group, and balanced batches can prefer one flow per content group.
+The default paper profile also disables VPN-specific hierarchical coarse groups
+and VPN-specific confusion groups, and it uses the standard SupCon/dual-loss
+setting instead of a dataset-specific confusion-aware SupCon default; those
+switches remain available only for ablation runs.
+Dataset differences should appear as learned gate/expert weights or selected
+validation-safe expert weights, not as manually invented dataset-specific
+pipelines.
+
+For a command-level flow audit, use `--dry_run`. A real paper-unified run cannot
+reuse legacy embeddings whose header policy or current-packet scope is unknown:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset tls-120 \
+    --num_classes 120 \
+    --fold 0 \
+    --stage all \
+    --embedding_header_policy full \
+    --run_tag paper_unified_smoke \
+    --tower2_epochs 1 \
+    --paper_unified_stages model \
+    --dry_run
+```
+
+The default `--paper_unified_stages model` is the paper-facing main path.
+Graph, multi-view pooling, flow-statistics experts, stackers, target priors, and
+probability selectors remain explicit ablations/candidates and are not silently
+run per dataset. The flow main path is one sequence backbone, mean flow
+aggregation, strict-current-packet native content, Qwen semantic embeddings,
+protocol metadata, and a learned adaptive shared channel gate.
+
+`train_tower2.py` still exposes `--confidence_penalty_weight` for calibration
+ablations, but it is not part of the default `paper_unified` main claim because
+the VPN 30-epoch comparison only showed a tiny Acc/F1 change and a modest
+calibration improvement.
 
 ### Current packet-level results
 
@@ -183,6 +533,14 @@ one shared test set unless the row explicitly says that every fold is exact.
 | USTC-binary | 609,332 | 1.0000 | 1.0000 | PASS | structural; each fold is exact |
 | VPN-service | 111,368 | **0.9512** | **0.9435** | PASS | dual-channel + RF + validation-weighted EM prior |
 | VPN-binary | 110,594 | 0.9999 | 0.9999 | **9 errors; exact target not met** | dual-channel cross-fold mean |
+
+The paper-facing packet-level default artifact for every dataset is stored as
+`reasoningDataset/packet-level/<dataset>/paper_default_result.json`, and each
+dataset binds that result through
+`reasoningDataset/packet-level/<dataset>/result_bound/packet_framework_manifest.json`.
+Older `/tmp/two_tower_runs/packet_level/...` paths may still appear as
+historical source inputs inside manifests, but they are not the default
+publication result paths.
 
 The binary numbers are reported without rounding them into a false claim:
 VPN-binary is `0.9999186213/0.9999186068` with confusion matrix
@@ -378,7 +736,10 @@ conda run --no-capture-output -n llm-factory \
     --output_npz reasoningDataset/packet-level/vpn-service/test_dual_rf_prior_em.npz
 ```
 
-After running `packet_best` for TLS folds 0/1/2, reproduce the pooled result:
+The commands below reproduce the earlier TLS tree/probability-fusion ablation;
+they are **not** the current `paper_unified` main path. For current experiments,
+use `make_unified_repro_plan.py`, which consumes
+`test_unified_packet_single_head.npz` from each fold.
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -925,6 +1286,44 @@ python extract_packet_embeddings_qwen.py \
 
 For ablations, use `--embedding_mode raw` or `--embedding_mode projected`. The older `--use_projected_embedding` flag is kept as an alias for `--embedding_mode projected`.
 
+The unified Packet and Flow runners buffer up to 128 packets from adjacent
+flows so that short flows share the same Qwen forward micro-batch. The resulting NPY
+files and JSONL index remain one row/file per flow, with the original packet
+order restored before writing. `--batch_size` still controls the actual model
+micro-batch and therefore GPU memory; `--flow_batch_packets` only controls the
+CPU-side cross-flow buffer. The extractor's bare-CLI default remains `0` for
+legacy one-flow-at-a-time reproducibility; both unified runners explicitly pass
+`128`, and strict shared-core v2 freezes that value together with scheduler
+version `cross_flow_length_bucketed_v1`. `embedding_config.json`
+records both values for auditing. New paper-unified extraction also records a
+content hash over the selected `best/adapter` directory and `best/tower1_heads.pt`.
+`audit_flow_embeddings.py --require_model_provenance` recomputes those hashes
+when embeddings are created, and framework-manifest evidence recomputes them
+again when the audit is consumed. Thus a path-correct but replaced Tower1
+checkpoint cannot be presented as the validation-selected embedding source.
+
+Both unified runners also support deterministic flow-id sharding for semantic
+embedding extraction. Flow uses `--embedding_num_shards N` with
+`--embedding_cuda_devices 0,1,...`; Packet uses
+`--semantic_embedding_num_shards N` with
+`--semantic_embedding_cuda_devices 0,1,...`. Every flow is assigned by the
+same SHA-1 scheduler, each shard retains one complete per-flow embedding file,
+and `embedding_shard_utils.py` rejects missing flows, duplicate flows,
+misassigned flows, missing NPY files, and extraction-contract drift before it
+atomically publishes the merged index. The merged `embedding_config.json`
+retains embedding mode, micro-batch, cross-flow buffer, scheduler, header and
+packet-context policies, plus shard provenance. The exact-coverage audit runs
+after the merge. Shard count and device placement are execution resources, not
+learned/model hyperparameters, so they are recorded but do not change the
+strict shared-core model fingerprint.
+
+An execution-only scheduler simulation on the VPN shared test packet index
+(`6,681` flows, `111,678` packets) reduced Qwen micro-batch calls from `18,843`
+to `14,088` (`-25.23%`) and the character-length padding proxy from `83.03M`
+to `66.37M` (`-20.07%`). This is a runtime result, not a classification metric;
+the model batch remains eight and the per-packet embedding contract is
+unchanged.
+
 ### Projection-only ablation
 
 ```bash
@@ -946,6 +1345,7 @@ python extract_packet_embeddings_qwen.py \
 ```bash
 python preprocess_tower2.py \
   --flow_embedding_index reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --content_group_index reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
   --output_dir reasoningDataset/vpn-app/train_tower2_rawproj_change_weight \
   --window_size 32 \
   --stride 16
@@ -956,12 +1356,14 @@ python preprocess_tower2.py \
 ```bash
 python preprocess_tower2.py \
   --flow_embedding_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --content_group_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
   --output_dir reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight \
   --window_size 32 \
   --stride 16
 
 python preprocess_tower2.py \
   --flow_embedding_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --content_group_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
   --output_dir reasoningDataset/vpn-app/test_tower2_rawproj_change_weight \
   --window_size 32 \
   --stride 16
@@ -972,7 +1374,16 @@ Outputs:
 ```text
 seq_dataset.pt
  graph_dataset.pt
+content_group_manifest.json  # only when --content_group_index is provided
 ```
+
+`--content_group_index` is optional and does not change the model input
+features. It hashes each source PCAP with SHA256 and attaches
+`content_group_id/content_hash` metadata to every Tower-2 window. This makes
+future group-aware samplers, validation splits, and content-group CI checks use
+the same exact-content definition as the paper evidence pack instead of relying
+on post-hoc bookkeeping. If omitted, preprocessing keeps the historical dataset
+format.
 
 The graph version constructs typed packet-interaction edges:
 
@@ -988,7 +1399,13 @@ retransmission_candidate
 
 ---
 
-## 6. Train Tower 2: staged sequence Transformer experiments
+## 6. Archived Tower-2 sequence ablations
+
+The commands in this section are kept only to reproduce earlier
+`rawproj_change_weight` ablations. They are not the current paper-facing entry
+point. For new VPN/TLS experiments, use the `paper_unified` runner and the
+Stage-8 automation below so reports, manifests, CI gates, and shared-module
+audits stay synchronized.
 
 The next experiments use the `rawproj_change_weight` Tower-2 data and enable changes step by step.
 
@@ -1129,7 +1546,11 @@ python train_tower2.py \
 
 ---
 
-## 7. Train Tower 2: staged graph Transformer experiments
+## 7. Archived Tower-2 graph ablations
+
+The graph commands below mirror the historical step-by-step sequence ablations.
+They remain useful for controlled comparisons, but they should not be copied as
+the default training recipe for new paper runs.
 
 Stage 1 adds flow/window dual loss and keeps SupCon off:
 
@@ -1270,49 +1691,49 @@ python train_tower2.py \
 
 `--select_metric flow_macro_f1` saves `best.pt` by validation macro-F1 instead of validation accuracy. `--hierarchical_weight` adds a coarse-label loss, while `--hierarchical_logit_weight` adds the coarse log-probability back to each fine-class logit at train/test time. `--contrastive_mode confusion` uses only configured same-group hard negatives in SupCon instead of pushing against every different class.
 
-Stage 6 replaces the flat fine classifier with true coarse-to-fine expert heads, weights SupCon negatives by a validation confusion matrix, and uses a flow-level Transformer over window embeddings. Generate the validation confusion file from Stage 5 first; do not use the test metrics JSON for training.
+When Tower-2 datasets were built with `--content_group_index`, flow-level
+validation also reports `val_group_acc` and `val_group_macro_f1`. New
+robustness-oriented runs can select checkpoints with
+`--select_metric content_group_macro_f1` or
+`--select_metric content_group_accuracy`. The group metric counts duplicated
+exact-PCAP content once by `content_group_id`, so it aligns checkpoint selection
+with the content-group CI evidence used in the paper reports. If a dataset lacks
+content-group metadata, requesting a `content_group_*` metric fails explicitly
+instead of silently falling back to ordinary flow metrics.
 
-```bash
-python test_tower2.py \
-  --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_macro_hier_conf_supcon/best.pt \
-  --dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
-  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
-  --output_json reasoningDataset/vpn-app/valid_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json
+For internal validation splits, use `--split_group_key content_group_id` when
+no external `--valid_dataset` is supplied. This keeps duplicate exact-PCAP
+content entirely on the train side or the validation side, rather than splitting
+different `flow_id` aliases of the same content across both sides. With
+`--balanced_flow_batches`, add `--content_group_unique_batches` to prefer at
+most one flow from each `content_group_id` in a contrastive batch. This prevents
+SupCon positives from being dominated by duplicate content and makes the batch
+closer to the content-group robustness claim. Both switches are no-ops for old
+datasets unless the Tower-2 samples contain `content_group_id`.
 
-python train_tower2.py \
-  --model_type graph \
-  --dataset reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/graph_dataset.pt \
-  --valid_dataset reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/graph_dataset.pt \
-  --output_dir checkpoints/tower2_graph_flow_rawproj_change_weight_expert_weighted_supcon_flowtrans \
-  --num_classes 16 \
-  --epochs 30 \
-  --batch_size 16 \
-  --hidden_dim 256 \
-  --num_layers 2 \
-  --num_heads 4 \
-  --train_level flow \
-  --select_metric flow_macro_f1 \
-  --flow_pooling transformer \
-  --flow_transformer_layers 1 \
-  --flow_transformer_heads 4 \
-  --window_loss_weight 0.3 \
-  --class_weighting effective \
-  --class_weight_beta 0.9999 \
-  --hierarchical_mode expert \
-  --hierarchical_weight 0.2 \
-  --coarse_groups vpn_app \
-  --balanced_flow_batches \
-  --samples_per_class 2 \
-  --contrastive_mode confusion_weighted \
-  --confusion_groups vpn_app \
-  --confusion_matrix_json reasoningDataset/vpn-app/valid_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json \
-  --confusion_matrix_level flow \
-  --confusion_weight_power 1.0 \
-  --flow_contrastive_weight 0.03 \
-  --flow_temperature 0.07 \
-  --aux_weight 0 \
-  --coherence_weight 0
+`--content_group_loss_reduction group_mean` applies the same idea to the
+flow-level main CE loss: losses are averaged inside each `content_group_id`
+first and then across groups. Duplicate exact-content flows therefore do not get
+larger supervised weight merely because they appear multiple times. A robust
+paper-facing flow run can combine:
+
+```text
+--split_group_key content_group_id
+--content_group_unique_batches
+--content_group_loss_reduction group_mean
+--select_metric content_group_macro_f1
 ```
+
+Use those switches with Tower-2 datasets generated by `--content_group_index`.
+When an external `--valid_dataset` is provided, `--split_group_key` is ignored
+because the validation split is already fixed, but group metrics and group-mean
+training still use the metadata carried inside the datasets.
+
+Historical Stage 6 ablation: true coarse-to-fine expert heads,
+confusion-matrix-weighted SupCon, and flow-level Transformer pooling were tested
+after Stage 5. They did not improve the current paper-safe VPN/TLS defaults, so
+they are no longer part of the recommended training path. The code paths remain
+available only for loading old checkpoints and reproducing the ablation.
 
 Stage 7 keeps the Stage 5 model/loss setup and tests input regularization in three steps: randomize only IP/port in packet embedding prompts, then add Tower-2 meta-feature dropout, then add graph edge-attribute dropout. This reuses the trained Tower-1 checkpoint; it only regenerates `packet_index.jsonl`, packet embeddings, and Tower-2 datasets.
 
@@ -1502,7 +1923,27 @@ python train_tower2.py \
 
 ---
 
-## 8. Test
+## 8. Archived manual tests and current unified flow
+
+The manual test snippets below reproduce old ablation tables. Current headline
+results are generated through the unified reports:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python audit_unified_framework.py \
+    --output_json reasoningDataset/unified_framework_audit.json \
+    --output_md reasoningDataset/unified_framework_audit.md
+
+conda run --no-capture-output -n llm-factory \
+  python make_paper_evidence_pack.py \
+    --output_json reasoningDataset/paper_evidence_pack.json \
+    --output_md reasoningDataset/paper_evidence_pack.md
+
+conda run --no-capture-output -n llm-factory \
+  python make_paper_method_card.py \
+    --output_json reasoningDataset/paper_method_card.json \
+    --output_md reasoningDataset/paper_method_card.md
+```
 
 ### Sequence model staged loss comparison
 
@@ -1568,15 +2009,11 @@ python test_tower2.py \
   --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_macro_hier_conf_supcon.json
 ```
 
-### Expert heads + weighted SupCon + flow Transformer
+### Historical expert-head ablation
 
-```bash
-python test_tower2.py \
-  --checkpoint checkpoints/tower2_graph_flow_rawproj_change_weight_expert_weighted_supcon_flowtrans/best.pt \
-  --dataset reasoningDataset/vpn-app/test_tower2_rawproj_change_weight/graph_dataset.pt \
-  --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
-  --output_json reasoningDataset/vpn-app/test_graph_metrics_flow_rawproj_change_weight_expert_weighted_supcon_flowtrans.json
-```
+The expert-head + weighted-SupCon + flow-Transformer branch was evaluated and
+kept only as a historical ablation. It is not part of the current recommended
+VPN/TLS flow-level path.
 
 ### IP/port randomization + Tower-2 dropout ablation
 
@@ -1640,6 +2077,12 @@ packet preprocessing
 
 The residual calibration/expert module, validation-gated selector, and cross-fold consensus are available to both VPN and TLS-120, but their weights or source choices are selected without target labels. This keeps one unified framework diagram while allowing data-driven weights. Do not claim that every module is forced on at non-zero weight; claim that both datasets pass through the same candidate framework and harmful modules are validation-gated down to zero, to the base identity path, or to a conservative cross-fold consensus.
 
+The direct Stage-8 flow runner also defaults to
+`--framework_profile paper_unified`. Keeping `--framework_profile paper_unified`
+in shell snippets is still recommended because the generated command then
+self-documents the paper-facing contract; `legacy` should be used only when
+reproducing historical ablations.
+
 Current unified-framework target status:
 
 ```text
@@ -1679,6 +2122,19 @@ VPN headline: accuracy=0.7512, macro-F1=0.7522
 TLS-120 headline: accuracy=0.8461, macro-F1=0.8292
 ```
 
+The centralized paper defaults now point to the same cross-fold consensus files
+used by the headline table:
+
+```text
+vpn-app  -> reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json
+tls-120  -> reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json
+```
+
+This makes the main table, evidence pack, defaults audit, and autonomous loop
+use the same paper-facing result. Single-fold selectors remain important
+ablation inputs, while the consensus result is reported as the strongest
+same-dataset stability module.
+
 Next CCF-A-oriented iteration: consensus distillation.
 
 The current headline is strong, but reviewers may view a pure cross-fold
@@ -1695,6 +2151,8 @@ fusion rule.
 --distill_temperature FLOAT   soften teacher/student probabilities
 --distill_min_confidence FLOAT
 --distill_confidence_power FLOAT
+--distill_min_coverage FLOAT
+--distill_low_coverage_action warn|disable_flow|fail
 ```
 
 Important paper-safety rule: do not train a supervised paper model on the shared
@@ -1753,6 +2211,174 @@ train a Tower-2 student with `--distill_targets_json` and then evaluate the
 student on the shared test set and the cross-split summary. Avoid using
 near-perfect multi-split validation teachers as headline evidence unless a
 content-duplicate audit proves the split is clean.
+
+Coverage-aware distillation safety: OOF teachers may cover only part of the
+student training flows, especially when the teacher was built from another
+ready-made fold or embedding namespace. `train_tower2.py` therefore supports a
+coverage gate. With `--distill_low_coverage_action disable_flow`, flow-id KL is
+disabled when matched-flow coverage falls below `--distill_min_coverage`, while
+class-conditional teacher-prior distillation can remain active. This prevents a
+small, biased teacher subset from dominating the deployable student and gives a
+clean paper ablation: full flow-id distillation vs coverage-gated prior-only
+distillation vs no distillation.
+
+2026-07-19 update: the first train-namespace VPN consensus-student run used
+`distill_weight=0.05`, `distill_temperature=4.0`, and confidence-weighted KL.
+It produced only `0.6986` accuracy / `0.6772` macro-F1 after the final selector,
+below the current paper-safe VPN cross-fold result of `0.7512` / `0.7522`, and
+its manifest still recorded the legacy profile. The teacher itself had high
+average confidence (`0.9964`) but only `0.7326` accuracy / `0.7395` macro-F1 on
+the remapped train namespace, so strong flow-id KL can over-transfer wrong
+targets.
+
+The runner has since been fixed so recommended-suite children explicitly pass
+`--framework_profile paper_unified`, and Tower-2 now supports
+`--distill_max_confidence` to soft-cap overconfident teacher distributions by
+mixing them with a uniform prior before temperature softening. A lighter
+paper-unified run with `--distill_weight 0.02`,
+`--distill_temperature 6.0`, `--distill_max_confidence 0.85`, and
+`--distill_confidence_power 0.0` completed under
+`run_tag=calibrated_distill_student`. It improved the graph student's validation
+macro-F1 to `0.6040` and produced a valid `paper_unified` manifest, but test
+generalization remained weak: graph `0.5275/0.5003`, seq `0.5191/0.4827`,
+graph+seq fusion `0.5431/0.5146`, and final selector `0.6986/0.6772`. Keep both
+distillation attempts as ablations. Do not promote the current remapped-teacher
+student as the headline result; the next paper-grade direction should change
+teacher construction or add native structural pretraining, not merely retune KL
+weight.
+
+Audit teacher coverage before training:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python audit_distillation_teacher_coverage.py \
+    --teacher_json reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_currentbest.json \
+    --dataset train_seq reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
+    --dataset valid_seq reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --min_coverage 0.50 \
+    --low_coverage_action disable_flow \
+    --output_json reasoningDataset/vpn-app/distill_teacher_coverage_vpn_oof_currentbest_vs_split0_rawproj.json
+
+conda run --no-capture-output -n llm-factory \
+  python audit_distillation_teacher_coverage.py \
+    --teacher_json reasoningDataset/tls-120/valid_oof_consensus_distill_targets_crossfold_currentbest.json \
+    --dataset train_seq reasoningDataset/tls-120/train_tower2_rawproj_change_weight/seq_dataset.pt \
+    --dataset valid_seq reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/seq_dataset.pt \
+    --min_coverage 0.50 \
+    --low_coverage_action disable_flow \
+    --output_json reasoningDataset/tls-120/distill_teacher_coverage_tls_oof_currentbest_vs_split0_rawproj.json
+```
+
+Current coverage audit:
+
+```text
+VPN OOF teacher vs split0 rawproj Tower-2:
+  teacher flows=1056, teacher acc/F1=0.6818/0.6922
+  train coverage=0/704 = 0.0000
+  valid coverage=352/352 = 1.0000
+  recommendation=disable_flow_id_kl_keep_class_prior
+
+TLS-120 OOF teacher vs split0 rawproj Tower-2:
+  teacher flows=8160, teacher acc/F1=0.8479/0.8230
+  train coverage=0/6910 = 0.0000
+  valid coverage=2456/3455 = 0.7109
+  recommendation=disable_flow_id_kl_keep_class_prior
+```
+
+VPN split0 one-epoch smoke with coverage gate:
+
+```text
+checkpoint: /tmp/two_tower_runs/vpn_seq_coverage_distill_smoke/best.pt
+coverage log: train_seq_flow matched 0/704, action=disable_flow
+class-prior teacher: mean diagonal mass=0.6818, min diagonal mass=0.3939
+valid acc/F1 after 1 epoch: 0.6080/0.6052
+test flow acc/F1 after 1 epoch: 0.6208/0.5621
+```
+
+Interpretation: current OOF teacher files are useful for teacher-quality and
+prior-structure analysis, but they are not in the split0 training namespace.
+The next paper-grade distillation run should either construct train-namespace
+OOF teachers or train fold-specific students before distilling into a final
+deployable model.
+
+Train-namespace OOF teacher remapping fixes the split-local `flow_id` problem.
+The SWEET split folders reuse canonical PCAP names such as
+`<label>/00004.pcap`, but each preprocessing run creates a local hash-like
+`flow_id`. `remap_distillation_targets_by_pcap.py` maps teacher probabilities
+through the canonical `label/basename(pcap_path)` key and emits teacher targets
+using the target training split's `flow_id` values:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python remap_distillation_targets_by_pcap.py \
+    --teacher_json reasoningDataset/vpn-app/valid_oof_consensus_distill_targets_crossfold_currentbest.json \
+    --source_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --source_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight_split1/flow_embedding_index.jsonl \
+    --source_index reasoningDataset/vpn-app/valid_embeddings_rawproj_change_weight_split2/flow_embedding_index.jsonl \
+    --target_index reasoningDataset/vpn-app/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --label_map reasoningDataset/vpn-app/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/vpn-app/train_namespace_oof_teacher_from_valid_consensus_split0_rawproj.json
+
+conda run --no-capture-output -n llm-factory \
+  python remap_distillation_targets_by_pcap.py \
+    --teacher_json reasoningDataset/tls-120/valid_oof_consensus_distill_targets_crossfold_currentbest.json \
+    --source_index reasoningDataset/tls-120/valid_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --source_index reasoningDataset/tls-120/valid_embeddings_rawproj_flowaware_change_weight_fold1/flow_embedding_index.jsonl \
+    --source_index reasoningDataset/tls-120/valid_embeddings_rawproj_flowaware_change_weight_fold2/flow_embedding_index.jsonl \
+    --target_index reasoningDataset/tls-120/train_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --label_map reasoningDataset/tls-120/train_tower1_change_weight/label_map.json \
+    --output_json reasoningDataset/tls-120/train_namespace_oof_teacher_from_valid_consensus_split0_rawproj.json
+```
+
+Current remapping evidence:
+
+```text
+VPN remapped train-namespace teacher:
+  output: reasoningDataset/vpn-app/train_namespace_oof_teacher_from_valid_consensus_split0_rawproj.json
+  train coverage: 704/704 = 1.0000
+  teacher acc/F1 on covered train flows: 0.7131/0.7204
+  duplicate canonical keys averaged: 7
+  coverage audit recommendation with --gate_dataset train_seq: flow_id_distillation_safe
+
+TLS-120 remapped train-namespace teacher:
+  output: reasoningDataset/tls-120/train_namespace_oof_teacher_from_valid_consensus_split0_rawproj.json
+  train coverage: 5704/6910 = 0.8255
+  teacher acc/F1 on covered train flows: 0.8096/0.7843
+  duplicate canonical keys averaged: 0
+  coverage audit recommendation with --gate_dataset train_seq: flow_id_distillation_safe
+
+Current default Stage-8 flow-aware namespace teachers:
+  VPN target index:
+    reasoningDataset/vpn-app/train_embeddings_rawproj_flowaware_change_weight_split2_retrain/flow_embedding_index.jsonl
+    output: reasoningDataset/vpn-app/train_namespace_oof_teacher_from_valid_consensus_flowaware_split2_retrain.json
+    train coverage: 703/703 = 1.0000
+    teacher acc/F1 on covered train flows: 0.7326/0.7395
+    coverage audit recommendation with --gate_dataset train_seq: flow_id_distillation_safe
+  TLS-120 target index:
+    reasoningDataset/tls-120/train_embeddings_rawproj_flowaware_change_weight_fold2/flow_embedding_index.jsonl
+    output: reasoningDataset/tls-120/train_namespace_oof_teacher_from_valid_consensus_flowaware_fold2.json
+    train coverage: 4935/6910 = 0.7142
+    teacher acc/F1 on covered train flows: 0.8954/0.8683
+    coverage audit recommendation with --gate_dataset train_seq: flow_id_distillation_safe
+```
+
+One-epoch smoke with remapped flow-id KL:
+
+```text
+VPN seq remapped OOF distillation smoke:
+  checkpoint: /tmp/two_tower_runs/vpn_seq_remapped_oof_distill_smoke/best.pt
+  coverage log: 704/704 = 1.0000
+  valid acc/F1 after 1 epoch: 0.6080/0.6025
+  test flow acc/F1 after 1 epoch: 0.6202/0.5618
+  note: roughly tied with the prior-only coverage-gated smoke; not a headline result.
+
+TLS-120 seq remapped OOF distillation smoke:
+  checkpoint: /tmp/two_tower_runs/tls_seq_remapped_oof_distill_smoke/best.pt
+  coverage log: 5704/6910 = 0.8255
+  valid acc/F1 after 1 epoch: 0.4124/0.3616
+  test flow acc/F1 after 1 epoch: 0.4225/0.3594
+  note: confirms training path and teacher coverage; full-length fine-tuning is still required.
+```
 
 For final-student experiments, merge Tower-2 train+valid datasets without
 deduplicating windows:
@@ -1953,6 +2579,40 @@ conda run --no-capture-output -n llm-factory \
     --coherence_weight 0
 ```
 
+The Stage-8 automation now exposes the same distillation controls end to end.
+Use dataset-specific teacher paths in the suite/autonomous loop so VPN and
+TLS-120 can keep different OOF teacher files while sharing the same student
+training objective:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_recommended_suite.py \
+    --datasets vpn-app,tls-120 \
+    --run_tag consensus_distill_student \
+    --model_types graph,seq \
+    --tower2_epochs 30 \
+    --paired_view_weight 0.0 \
+    --paired_consistency_weight 0.0 \
+    --paired_alignment_weight 0.0 \
+    --paired_crossview_contrastive_weight 0.0 \
+    --paired_variance_weight 0.0 \
+    --view_domain_adversarial_weight 0.0 \
+    --distill_target vpn-app=reasoningDataset/vpn-app/train_namespace_oof_teacher_from_valid_consensus_flowaware_split2_retrain.json \
+    --distill_target tls-120=reasoningDataset/tls-120/train_namespace_oof_teacher_from_valid_consensus_flowaware_fold2.json \
+    --distill_weight 0.05 \
+    --distill_class_prior_weight 0.01 \
+    --distill_temperature 4.0 \
+    --distill_min_confidence 0.45 \
+    --distill_confidence_power 1.0 \
+    --distill_min_coverage 0.50 \
+    --distill_low_coverage_action disable_flow
+```
+
+For the full loop, pass the same `--distill_target` arguments to
+`run_autonomous_research_loop.py` with `--continue_after_targets`. The current
+evidence says this should be treated as a deployable-student ablation until it
+matches or beats the cross-fold consensus headline on the shared test set.
+
 Reproduce the cross-fold consensus main results:
 
 ```bash
@@ -2082,6 +2742,24 @@ conda run --no-capture-output -n llm-factory \
 
 Tower-1 now also supports flow-aware supervised contrastive learning. Use it when retraining packet embeddings: each packet batch samples multiple packets per flow, same-flow positives receive a stronger weight than same-label positives. `--flow_proto_weight` adds a packet-to-flow prototype contrastive objective: packet embeddings are pulled toward same-flow or same-class flow prototypes and pushed away from other-class prototypes. Keep it at `0` for reproducing the current best checkpoints; start with a small value such as `0.02` or `0.05` for new Tower-1 runs. Use `--init_checkpoint_dir` to continue from an existing Tower-1 adapter and packet heads.
 
+The optional `--flow_proto_context leave_one_out` mode removes the anchor
+packet from its own-flow prototype. It also disables replacement sampling for
+single-packet flows, so repeating the same packet cannot manufacture a false
+multi-instance positive. This is the current shared packet-to-flow research
+candidate: both packet- and flow-level runners expose the same option, while
+packet-level inference remains strictly one packet. It is not yet part of the
+`paper_unified` main profile; that profile keeps `--flow_proto_weight 0` until
+the leave-one-out objective passes the frozen VPN/TLS cross-fold validation
+protocol.
+
+The candidate has sufficient training coverage without changing the inference
+unit. In the current fold artifacts, every VPN flow-level training flow has at
+least 7 distinct packets and every TLS flow-level training flow has at least
+10. For packet-level VPN and TLS, multi-packet flows cover respectively
+`91.86%` and `93.80%` of training packets; singleton flows simply receive the
+existing packet CE/SupCon losses. The first controlled run therefore keeps
+`--packets_per_flow 2` and changes only prototype construction.
+
 ```bash
 conda run --no-capture-output -n llm-factory \
   python train_tower1_multitask.py \
@@ -2101,6 +2779,7 @@ conda run --no-capture-output -n llm-factory \
     --same_label_positive_weight 1.0 \
     --flow_proto_weight 0.05 \
     --flow_proto_positive same_class \
+    --flow_proto_context leave_one_out \
     --max_sft_length 1792 \
     --max_packet_length 1024 \
     --local_files_only
@@ -2126,6 +2805,66 @@ PY
 
 nvidia-smi -L
 ```
+
+Concurrent Qwen embedding jobs are resource guarded. By default,
+`extract_packet_embeddings_qwen.py` maps the logical CUDA index through
+`CUDA_VISIBLE_DEVICES`, acquires a file lock for that physical GPU under
+`/tmp/two_tower_embedding_gpu_locks`, and waits until at least 20 GiB is free
+before loading the model. This serializes packet-level and flow-level embedding
+loads that target the same A800 and prevents a newly launched shard from
+crashing a long-running training job. Waiting messages are expected scheduling
+output, not a stalled experiment. The threshold can be changed with
+`--min_cuda_free_gb`; `--disable_cuda_capacity_lock` is intended only for an
+externally isolated GPU allocation.
+
+Each extraction process also selects its explicit logical CUDA device before
+loading the base model and passes that exact `cuda:N` as PEFT's `torch_device`
+when loading the adapter. This matters for sharded jobs: PEFT's inferred,
+index-less `cuda` allocations must not temporarily land on logical GPU 0 or on
+a device last selected by the Transformers/Accelerate loading context.
+
+If Tower-1 has completed but factual/intervened embedding extraction or a later
+stage is interrupted, resume the unified path with the same experiment
+arguments and replace `--stage all` by `--stage post_tower1`. This stage reuses
+`<tower1_output_dir>/best`, resumes incomplete embedding shards, then performs
+the shared Tower-2 preprocessing, training, and evaluation. It deliberately
+does not preprocess or retrain Tower-1:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_stage8_flowaware_pipeline.py \
+    --dataset vpn-app \
+    --fold 0 \
+    --stage post_tower1 \
+    --framework_profile paper_unified \
+    --tower1_output_dir checkpoints/<completed_tower1_run> \
+    --embedding_num_shards 8 \
+    --embedding_cuda_devices 0,1,2,3,4,5,6,7 \
+    --paper_unified_stages model \
+    --require_cuda
+```
+
+All naming and method arguments other than `--stage` must match the original
+run so that shard counts, paired semantic views, checkpoints, and manifests
+remain in one provenance namespace.
+
+Summarize Tower-1 checkpoint dynamics with the same held-out macro-F1 protocol
+for every dataset, fold, and task:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python analyze_tower1_validation_history.py \
+    --input fold0 checkpoints/<fold0>/packet_validation_history.jsonl \
+    --input fold1 checkpoints/<fold1>/packet_validation_history.jsonl \
+    --input fold2 checkpoints/<fold2>/packet_validation_history.jsonl \
+    --output_json reasoningDataset/<dataset>/tower1_validation_dynamics.json
+```
+
+The report selects each run by held-out packet macro-F1, records any validation
+regression after the best checkpoint, and identifies persistently weak or
+recovered classes. Use this shared diagnostic before changing the schedule: one
+fold peaking early is not evidence that every dataset/task should receive a
+shorter, manually specialized training recipe.
 
 The runner now has dataset defaults for:
 
@@ -2520,7 +3259,44 @@ best + paired seq constrained residual fusion:
   test flow macro-F1 = 0.7534
 ```
 
-Interpretation: the paired-view idea is still useful as a paper module, but the old embeddings are not view-aligned enough for Tower-2-only regularization to help. Treat these results as negative ablations. The next real run should regenerate paired `rawproj_flowaware_*` embeddings from the Stage-8 Tower-1 checkpoint on the real A800 environment, then rerun the same `--run_tag paired_ipport` training/eval/fusion path.
+The fresh Stage-8 A800 paired-view run has now been executed with
+`rawproj_flowaware_change_weight_split2_retrain` as the clean view and
+`rawproj_flowaware_ipport_rand_change_weight_split2_retrain` as the IP/port
+randomized paired view. Two settings were tested:
+
+```text
+strong cross-view invariance:
+  run_tag: stage8_crossview_ci_iter01
+  paired_view / consistency / alignment / contrastive / variance / adversarial:
+    0.20 / 0.10 / 0.03 / 0.01 / 0.01 / 0.01
+  safe prior residual:
+    test flow accuracy = 0.5353
+    test flow macro-F1 = 0.5123
+
+gentle counterfactual consistency:
+  run_tag: stage8_gentle_ci_iter02
+  paired_view / consistency / alignment / contrastive / variance / adversarial:
+    0.05 / 0.03 / 0.005 / 0.00 / 0.00 / 0.00
+  safe prior residual:
+    test flow accuracy = 0.5520
+    test flow macro-F1 = 0.5358
+```
+
+Both fresh paired-view variants are substantially below the paper-safe VPN
+cross-fold consensus result (`0.7512` accuracy / `0.7522` macro-F1). Treat
+Tower-2-only full-header/randomized-IP-port consistency as a negative ablation:
+it is useful evidence that naive shortcut intervention can remove
+task-relevant protocol/session signal. It should not be promoted as the CCF-A
+headline method unless paired Tower-1 representation learning or a stronger
+content-grouped validation protocol reverses this degradation.
+
+The automated stacker/gate/selector stages now explicitly skip probability
+experts that are test-only or whose validation flow IDs are incompatible with
+the selected candidate group. In the two fresh VPN paired runs, the final
+selector records the test-only cross-fold consensus and the split-incompatible
+paired branch as skipped rather than training a selector across mismatched
+validation folds. This is important paper-safety evidence: candidate promotion
+requires compatible validation support, not only a shared-test probability file.
 
 The runner's `prior` stage now implements the paper-safe residual calibration path by default:
 
@@ -2910,7 +3686,7 @@ conda run --no-capture-output -n llm-factory \
   python evaluate_content_unique_predictions.py \
     --prediction_json reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json \
     --flow_embedding_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
-    --output_json reasoningDataset/vpn-app/test_crossfold_consensus_content_unique_summary.json \
+    --output_json reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence_content_unique.json \
     --bootstrap_samples 2000 \
     --summary_only
 ```
@@ -2930,7 +3706,9 @@ TLS-120: 11542 paths -> 11542 unique PCAP contents
 
 Thus the shared-test headline is not inflated by exact-content duplicates. The
 large duplicate counts remain important for training/validation effective sample
-size and must still be disclosed.
+size and must still be disclosed. `make_paper_evidence_pack.py` now reads these
+`*_content_unique.json` files and emits the `Content-Unique Robustness` table
+alongside the main claim and bootstrap evidence.
 
 Training the same Stage-8 Tower-2 settings on the content-clean merged set gives a more honest but weaker ablation:
 
@@ -3268,6 +4046,109 @@ VPN weak-fold trainable flow-statistics expert:
   as a standalone Tower-2 head; the gate must be evaluated cross-fold rather than
   trusted from one validation split.
 
+Flow-statistics provenance correction (2026-07-21): when a native structural
+embedding is attached, Tower-2's trailing structural block contains the learned
+native latent followed by the explicit packet-local metadata. Older flow-stat
+experiments summarized that entire block (for the current unified setup, 128
+native dimensions plus 13 explicit fields), included padded rows in the seq
+path, counted packets in overlapping windows repeatedly, and used duplicate
+count features. The implementation now summarizes only the shared explicit
+packet-local fields (`meta_feature_dim - native_structural_dim`), removes padded
+rows, reconstructs unique packet positions from each window's `(start,end)`
+coordinates, and records separate unique-packet and window counts. Consequently, the historical
+flow-stat numbers above remain diagnostic results but are not clean evidence for
+the corrected structural-statistics expert. The `paper_unified` main profile
+still keeps this expert disabled; any promotion requires a new cross-fold VPN
+and TLS ablation using the corrected implementation and validation-only model
+selection.
+
+The first corrected screening run is pre-registered on VPN fold1 with
+`flow_stat_expert_weight=0.10`, `flow_stat_aux_weight=0.02`, and every other
+Tower2 setting copied from the semantic-anchor baseline. Its acceptance
+threshold is validation flow Macro-F1 `>=0.653643`, i.e. the frozen fold1
+baseline `0.648643 + 0.005`. The queued runner evaluates the shared test only
+after that threshold passes. A passing fold1 result is still insufficient for
+promotion: the same fixed configuration must then be checked on the remaining
+VPN folds and TLS-120, with no dataset-specific gate cap or loss weight.
+
+The corrected fold1 screening run was rejected on validation: its best
+Macro-F1 was `0.652364`, an absolute gain of only `0.003721`, below the frozen
+`0.005` acceptance margin. The shared test was therefore not evaluated. This
+branch remains an ablation and is not added to `paper_unified`; the result is
+recorded in
+`reasoningDataset/vpn-app/ablation_paper_unified_anchor_clean_flowstat_w010_aux002_fold1_valid_probs.json`.
+
+An intervention-router screening tested a factual identity path with at most a
+25% learned intervened residual, leaving every other fold1 setting unchanged.
+It was also rejected before test evaluation: validation accuracy/Macro-F1 were
+`0.630682/0.630720`, versus the frozen symmetric-view baseline Macro-F1
+`0.648643`. Its learned effective intervention contribution collapsed to only
+`0.000460`. This shows that an unconstrained router learns to shut the
+counterfactual view off and recover factual shortcuts; the symmetric
+intervention base remains the `paper_unified` default. The optional
+`--intervention_view_base_mode factual_anchor` path is retained solely to
+reproduce this negative ablation.
+
+An inference-only view-duplication diagnostic further checks the fixed
+two-view checkpoints without retraining or changing their learned weights.
+`test_tower2.py --ablate_intervention_view factual_only` feeds the factual
+representation into both view slots, while `intervened_only` duplicates the
+header-randomized representation. On held-out VPN fold0/fold1 validation, the
+unaltered two-view models obtained Macro-F1 `0.661801/0.648643`, compared with
+`0.609529/0.630554` for factual-only duplication. On the shared test set, the
+corresponding values were `0.546932/0.563093` versus
+`0.527837/0.552015`. Fixed fold01 factual-only `log_mean` gave accuracy/Macro-F1
+`0.585526/0.563133`; the unaltered fixed two-view consensus gave
+`0.616029/0.580074`. Intervened-only duplication collapsed to Macro-F1
+`0.040376/0.051507` on validation and `0.051951/0.044441` on test after the
+IP/port shortcut fields were removed. This consistent degradation
+supports the view that the symmetric pair acts as a shortcut-resistance
+constraint rather than a freely selectable expert. Because duplication changes
+the input distribution of a model trained jointly on two views, these numbers
+are a mechanism diagnostic, not a substitute for the separately trained
+single-view baseline or a causal effect estimate.
+
+An end-to-end one-epoch contract smoke test on the real VPN fold1 unified data
+completed before the screened run. Training and independent checkpoint reload
+both produced validation flow accuracy `0.5625` and Macro-F1 `0.5521`; the
+checkpoint records `meta_feature_dim=141`, `native_structural_dim=128`, and
+`flow_stat_meta_dim=13`, and the learned statistics gate was reported for all
+352 validation flows (mean `0.4751`). These smoke metrics establish only that
+padding removal, overlap de-duplication, checkpoint persistence, and evaluation
+use the same feature contract. They are not an accuracy result and were not
+evaluated on the shared test split.
+
+The current semantic-anchor fold0/fold1 error audit also identifies a protocol-
+level label-shift problem rather than only encoder variance. Tower2 train has
+approximately 42--44 flows per class and validation has exactly 22 per class,
+while the shared VPN test ranges from 13 to 413 flows per class. The fixed
+fold01 consensus over-predicts `aim` (13 true versus 41 predicted), `icq`
+(13 versus 46), and `spotify` (42 versus 101), while under-predicting `skype`
+(413 versus 261). Its two-model oracle accuracy is only `0.6938`, so adding
+folds alone cannot provide a large gain over SWEET.
+
+A label-free shift diagnostic is therefore pre-registered using the existing
+shared calibrator, not a VPN-specific threshold: target prior is the fixed
+50/50 blend of confusion-corrected hard BBSE and EM soft-prior estimates;
+candidate strengths are selected by `soft_prior_under_hard_cap` with
+`hard_prior_kl_cap=0.005`. Fold1 held-out probabilities supply source
+confusion/evidence, and fold01 fixed consensus probabilities are the unlabeled
+target. Target labels are excluded from strength selection and used only for
+the final diagnostic report. A positive VPN result cannot enter the main method
+unless this exact rule is subsequently frozen for fold012 and TLS-120; otherwise
+it remains an analysis-only indication of label shift.
+
+The first fold01 run found no candidate satisfying that pre-registered cap:
+hard-prior KL ranged from `0.1017` at identity to `0.0366` at strength `0.5`,
+all above `0.005`. The calibrator now enforces strict feasibility and records
+`selection_constraint_satisfied=false` plus
+`selection_fallback_reason=identity_no_feasible_candidate`; it therefore
+selects identity (`accuracy=0.6160`, Macro-F1 `0.5801`). The apparent
+strength-0.5 test result (`0.6471`/`0.6284`) is retained only as a diagnostic
+trend and is not an accepted result because it violates the frozen constraint.
+For this selection scope, strength zero must be present so that an explicit
+identity fallback always exists.
+
 Softened target-prior safety ablation:
   `calibrate_prior_ensemble.py` now supports `--input_temperatures` and valid
   metric floors (`--min_valid_metric`, `--min_valid_gain_over_identity`). This
@@ -3299,6 +4180,260 @@ Paired semantic alignment and target-prototype adaptation negative ablations:
   These results reject simple view alignment and transductive prototypes as the
   main solution to the validation/test shift.
 
+Counterfactual header-intervention screening (same Tower-1 encoder):
+  The clean and IP/port-randomized packet embeddings were re-extracted with the
+  same fold1 `t1paired_s80` Tower-1 adapter. The randomized test index also uses
+  the clean metadata index through `preprocess_tower2.py` with
+  `--metadata_reference_index`, so the intervention changes the Qwen packet
+  representation but does not accidentally delete Tower-2 structural fields.
+  This removes both the earlier encoder-mismatch and metadata-shape confounds.
+
+  A frozen Stage-8 classifier obtains clean test acc/F1=0.6675/0.6380, but only
+  0.1232/0.0389 on the aligned randomized view. On validation, only 2 of 352
+  flows are corrected exclusively by the randomized view, while 273 are
+  correct exclusively in the clean view. Identity-initialized bounded residual
+  fusion therefore gives no significant gain: the best residual setting gives
+  test acc/F1=0.6657/0.6329, and a larger residual significantly lowers
+  macro-F1 under paired bootstrap. A supervised router selects its identity
+  path on validation.
+
+  `train_intervention_transport.py` provides a label-free low-rank
+  randomized-to-clean packet representation transport control. Rank 64 and 128
+  both overfit packet pairs after one epoch. With the original Stage-8
+  classifier frozen, transported test acc/F1 are 0.0987/0.0592 and
+  0.1124/0.0797. Tower-2 training-time intervention consistency is also
+  rejected: weak paired CE+KL is selected by clean validation but lowers clean
+  shared-test acc/F1 to 0.6579/0.6273; stronger CE+KL and semantic alignment
+  fall back to the epoch-0 checkpoint.
+
+  Research interpretation: replacing IP/port tokens inside the Tower-1 text
+  prompt is not a semantics-preserving augmentation in the current encoder
+  space. Do not enable counterfactual fusion, representation transport, or
+  paired-view losses in the best default. Keep them as compute-matched negative
+  ablations showing that invariance cannot be recovered by a shallow Tower-2
+  correction after the packet representation has already moved out of
+  distribution.
+
+```
+
+### Paper candidate: reliability-gated semantic-structural interaction
+
+The current paper-facing Tower-2 candidate is Reliability-Gated
+Semantic-Structural Interaction (RGSSI). Unlike post-hoc probability fusion,
+RGSSI changes the packet interaction representation itself while preserving a
+strict compute-matched identity control:
+
+1. Split each packet feature into the 3840-dimensional Qwen raw/projected
+   semantic embedding and the trailing 14-dimensional structural metadata.
+2. Convert a trained concat projection exactly as
+   `W x + b = W_sem x_sem + W_meta x_meta + b`. The converted checkpoint has
+   exactly the same epoch-0 embeddings and logits as the original Stage-8
+   model.
+3. Encode complementary evidence from semantic features, structural features,
+   and their element-wise interaction. A packet-conditioned reliability gate
+   adds at most 25% bounded residual evidence.
+4. Zero-initialize the final interaction layer. With
+   `--dual_channel_train_scope interaction`, freeze the legacy packet
+   Transformer and flow head and train only 364,290 interaction/gate
+   parameters. This prevents the new module from obtaining gains through a
+   hidden full-model fine-tune.
+
+Core options:
+
+```text
+--dual_channel_mode residual
+--dual_channel_train_scope interaction
+--dual_channel_gate_mode adaptive
+--dual_channel_max_weight 0.25
+--dual_channel_init 0.1
+--init_checkpoint <existing-stage8-best.pt>
+--select_init_checkpoint
+```
+
+Reproduce TLS-120 fold1 RGSSI from the repository root:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n llm-factory \
+  python train_tower2.py \
+    --model_type seq \
+    --dataset reasoningDataset/tls-120/train_tower2_rawproj_flowaware_change_weight_fold1/seq_dataset.pt \
+    --valid_dataset reasoningDataset/tls-120/valid_tower2_rawproj_flowaware_change_weight_fold1/seq_dataset.pt \
+    --output_dir checkpoints/tower2_seq_flow_tls120_rgssi_fold1 \
+    --init_checkpoint checkpoints/tower2_seq_flow_tls_120_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv/best.pt \
+    --select_init_checkpoint \
+    --num_classes 120 \
+    --epochs 10 \
+    --batch_size 32 \
+    --lr 0.001 \
+    --weight_decay 0.01 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --num_heads 4 \
+    --dropout 0.2 \
+    --train_level flow \
+    --flow_pooling multi_view \
+    --flow_transformer_layers 1 \
+    --flow_transformer_heads 4 \
+    --multi_view_gate_entropy_weight 0.01 \
+    --window_loss_weight 0.3 \
+    --class_weighting effective \
+    --class_weight_beta 0.9999 \
+    --class_weight_strength 0.6 \
+    --balanced_flow_batches \
+    --samples_per_class 2 \
+    --hierarchical_mode logit \
+    --hierarchical_weight 0.2 \
+    --hierarchical_logit_weight 0.5 \
+    --coarse_groups none \
+    --contrastive_mode confusion \
+    --confusion_groups none \
+    --flow_contrastive_weight 0.03 \
+    --flow_temperature 0.07 \
+    --label_smoothing 0.05 \
+    --confidence_penalty_weight 0.02 \
+    --aux_weight 0 \
+    --coherence_weight 0 \
+    --select_metric flow_macro_f1 \
+    --early_stop_patience 5 \
+    --dual_channel_mode residual \
+    --dual_channel_train_scope interaction \
+    --dual_channel_gate_mode adaptive \
+    --dual_channel_max_weight 0.25 \
+    --dual_channel_init 0.1 \
+    --device cuda
+
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n llm-factory \
+  python test_tower2.py \
+    --checkpoint checkpoints/tower2_seq_flow_tls120_rgssi_fold1/best.pt \
+    --dataset reasoningDataset/tls-120/test_tower2_rawproj_flowaware_change_weight_fold1/seq_dataset.pt \
+    --label_map reasoningDataset/tls-120/train_tower1_flowaware_change_weight_fold1/label_map.json \
+    --output_json reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold1.json \
+    --device cuda \
+    --no_report
+```
+
+Keep all other dataset/fold arguments identical to the source checkpoint. The
+epoch-0 checkpoint is included in validation selection, so RGSSI automatically
+falls back to the original model when the interaction is not useful.
+
+Strict TLS-120 shared-test results, with the same RGSSI settings on all three
+provided train/valid folds:
+
+| fold | Stage-8 seq acc/F1 | RGSSI seq acc/F1 | delta acc/F1 |
+|---|---:|---:|---:|
+| fold0 | 0.7558 / 0.7465 | **0.7790 / 0.7635** | +0.0231 / +0.0170 |
+| fold1 | 0.7105 / 0.6779 | **0.7513 / 0.7201** | +0.0407 / +0.0422 |
+| fold2 | 0.7111 / 0.6765 | **0.7531 / 0.7211** | +0.0420 / +0.0446 |
+
+All three single-fold gains are significant under 2,000 paired bootstrap
+resamples. Accuracy 95% gain intervals are `[0.0185, 0.0279]`,
+`[0.0347, 0.0464]`, and `[0.0364, 0.0479]`; the corresponding exact McNemar
+p-values are `1.86e-21`, `9.04e-43`, and `2.42e-46`. The three RGSSI models use
+the existing label-free `auto_confidence -> log_mean` consensus and reach
+acc/F1=0.8475/0.8304. This is slightly above the previous 0.8461/0.8292
+consensus, but its paired CI crosses zero; report the robust single-model gains
+as the primary evidence and the consensus change as statistically neutral.
+
+Saved artifacts:
+
+```text
+checkpoints/tower2_seq_flow_tls120_rgssi_fold{0,1,2}/best.pt
+reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold{0,1,2}.json
+reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold{0,1,2}_bootstrap.json
+reasoningDataset/tls-120/test_crossfold_consensus_rgssi_auto_confidence.json
+reasoningDataset/tls-120/test_crossfold_consensus_rgssi_bootstrap.json
+```
+
+VPN is an important negative/control result. On split1, RGSSI changes shared
+test acc/F1 from 0.6675/0.6380 to 0.6693/0.6321. On split2 it changes
+0.6340/0.6005 to 0.6388/0.5976. Both paired confidence intervals cross zero;
+therefore RGSSI is statistically neutral on VPN and must not replace its current
+best cross-fold path. This dataset contrast supports a testable claim: explicit
+structural correction is most useful when many fine-grained classes require
+protocol/temporal evidence that the high-level semantic encoder does not retain.
+
+Use `compare_prediction_bootstrap.py` for every promotion decision:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python compare_prediction_bootstrap.py \
+    --baseline <stage8-test-probabilities.json> \
+    --candidate <rgssi-test-probabilities.json> \
+    --output_json <paired-bootstrap-report.json> \
+    --samples 2000 \
+    --seed 42
+```
+
+Paper positioning: RGSSI currently gives a coherent, identity-preserving model
+contribution and stable TLS cross-split evidence, but it is not yet a complete
+CCF-A claim. The next required extension is native byte/field pre-training with
+masked protocol fields, packet relative position/direction, and flow
+contrastive objectives. RGSSI should then route between that structural encoder
+and the Qwen semantic encoder. Do not return to test-tuned probability modules
+as the main research direction.
+
+### Native protocol-structural pre-training pilot
+
+The first native pre-training implementation is now available through
+`pretrain_native_flow_encoder.py`, `extract_native_flow_embeddings.py`, and
+`models/native_flow_encoder.py`. It uses a byte-level packet encoder followed
+by a packet-level flow encoder. The self-supervised objectives cover masked
+protocol-control fields, packet relative order, direction, next-packet
+length/IAT bins, same-flow discrimination, flow contrast, and intervention
+consistency. Downstream class labels are never read by the pre-training loss.
+
+The leakage and shortcut controls are part of the method, not optional cleanup:
+
+```text
+1. Absolute packet position is added only after packet observation encoding;
+   the relative-order target cannot read an absolute-position embedding.
+2. IP addresses, ports, checksums, TCP sequence/acknowledgement numbers, and
+   other session identifiers can be non-reconstructively hidden.
+3. Encrypted payload bytes are dropped as an intervention but are never used as
+   masked-reconstruction targets; reconstruction is restricted to protocol
+   control fields.
+4. Two independently intervened views are aligned at corresponding packet
+   positions, encouraging endpoint-invariant packet-context representations.
+5. The native representation enters Tower-2 through a zero-initialized,
+   bounded residual adapter. Expanding an old Stage-5 checkpoint therefore
+   preserves its logits exactly before native-interaction training.
+```
+
+Current VPN-app pilot evidence uses only `704` unlabeled training flows, `352`
+validation flows, and the unchanged `1672`-flow shared test. The frozen probe is
+selected using validation macro-F1; test labels do not select PCA dimension or
+classifier configuration.
+
+```text
+random untrained architecture:             acc=0.4593, macro-F1=0.4562
+v3 all-field reconstruction, no position leak:
+                                           acc=0.5311, macro-F1=0.5060
+v4 control-only reconstruction + payload dropout:
+                                           acc=0.5221, macro-F1=0.5084
+v5 v4 + packet intervention consistency:   acc=0.5335, macro-F1=0.5159
+shallow protocol/statistics, no ports:      acc=0.6364, macro-F1=0.5996
+```
+
+The trained v3 representation is significantly better than the identical
+random architecture: paired deltas are `+0.0718` accuracy and `+0.0499`
+macro-F1, with 95% bootstrap intervals `[+0.0538,+0.0897]` and
+`[+0.0335,+0.0658]`. This establishes that self-supervision learns transferable
+information. The cleaner v5 objective has the best combined point result, but
+its gain over v3 is not significant: `+0.0024` accuracy and `+0.0099` macro-F1,
+with both 95% intervals crossing zero. It also remains below the strict shallow
+statistics baseline. Therefore this pilot is supporting evidence and an honest
+negative result, not yet a CCF-A-level representation-learning claim.
+
+When the bounded native adapter is added to the stable Stage-5 VPN model, shared
+test performance changes from `0.6274/0.5851` to `0.6310/0.5895` accuracy/F1.
+That change is also statistically neutral (`p=0.146`, both bootstrap intervals
+cross zero), so the native adapter is not promoted to the current best model.
+The next defensible experiment is larger, content-deduplicated unlabeled
+pre-training followed by the same frozen-probe, shallow-baseline, cross-split,
+and cross-dataset protocol. More downstream probability fusion is not evidence
+for a better representation.
+
+```text
 Source-environment risk/alignment negative ablation:
   `build_flow_environment_map.py` recovers the two source folds for a training
   split by exact PCAP SHA256, and `train_tower2.py` optionally applies
@@ -3329,6 +4464,15 @@ negative ablations:
   0.7446/0.7437, and 0.7464/0.7440. All remain below the unchanged
   vote-priority consensus at 0.7512/0.7522, so none is promoted.
 
+  `cross_fold_consensus.py --mode selective_anchor_vote` additionally learns a
+  high-precision anchor threshold from fold0 validation only, then lets the
+  anchor override majority vote above that threshold. With the preregistered
+  `--anchor_min_precision 0.9 --anchor_min_coverage 0.1`, validation selects a
+  0.9440 threshold and covers 1000/1672 test flows. Test acc/F1 is
+  0.7488/0.7516: below vote-priority accuracy and below the anchor model's
+  macro-F1. This rejects confidence-selective routing as another solution to
+  the validation/test shift; do not tune its threshold on shared-test labels.
+
 Cross-fold stability selector:
   `cross_fold_stability_selector.py` audits same-named candidates across multiple
   folds by comparing valid gain, shared-test gain, and target prediction shift
@@ -3341,7 +4485,7 @@ Cross-fold stability selector:
 
 Research conclusion: single-fold post-hoc probability fusion is no longer the main bottleneck for VPN split1/split2. The validation folds can reach very high scores while the shared test set remains low, and many weak-fold errors are complementary across the three ready-made train/valid partitions. The useful paper-facing direction is therefore cross-split-stable representation learning plus label-free target-prior stabilization, local confusion refinement, and a final same-dataset cross-fold consensus. Tower-1 paired full-header/randomized-IP-port consistency helps fold1 but hurts fold2; target-prior softcap ensembling helps both the fold1 paired seq branch and the fold2 statistics branch; pairwise/group refinement plus repeated prior passes pushes the VPN cross-fold macro-F1 minimum above the 0.65 target, but only the cross-fold consensus pushes every VPN fold above the 0.74 accuracy target. The current next model iteration should distill this consensus back into the unified trainable framework: endpoint-invariant training, paired full-header vs randomized-header consistency during Tower-1/Tower-2, target-prior softcap as a label-free candidate expert, pairwise/group confusion refinement as a local expert, and cross-fold consensus or consensus-distillation that penalizes validation/test prediction shift. Keep these as the same framework modules for VPN/TLS; let validation gates and learned branch weights down-weight unhelpful experts instead of hand-removing modules per dataset.
 
-The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, confusion-aware SupCon, confidence penalty, guarded stacker, safe prior, and guarded unified expert selection. Dataset-specific behavior should come from learned weights and validation gates, not from removing modules.
+The summary script emits commands with the same Stage-8 module family for every dataset/fold: Tower-1 preprocessing/training, raw+projected embeddings, graph/seq Tower-2, multi-view flow pooling, shared SupCon/dual-loss training, unified candidate expert slots, and guarded unified expert selection. Dataset-specific behavior should come from learned weights, identity fallback, and validation gates, not from removing modules. Confidence penalty, VPN-specific hierarchical heads, and VPN-specific confusion groups are retained as ablations rather than default paper modules.
 
 Use the metric dashboard to check the current target gates across datasets:
 
@@ -3439,9 +4583,33 @@ The framework consistency gate is enabled by default through `--require_framewor
 
 `recommend_next_experiment.py` reports both the raw highest-scoring `test*.json` and the paper-safe framework result. This is deliberate: for TLS-120 the direct unified-slot stacker probe reaches `0.7991/0.7897`, while the current paper-safe soft-gate calibrated selector reaches `0.7996/0.7869`. The raw stacker still has the higher macro-F1, while the accepted soft-gate selector has the higher accuracy and full validation-gated framework evidence. Recommendations and target status are tied to the paper-safe result, and raw-best probes should be treated as upper-bound or ablation evidence until the validation-gated selector accepts them. The recommendation JSON and evidence pack also record `raw_minus_paper_safe` accuracy/F1 deltas so this distinction is machine-checkable.
 
-The paper-safe result paths, VPN/TLS target gates, and required unified expert slots are centralized in `paper_framework_defaults.py`. Update that file first when changing the paper-facing main result; the recommendation, framework-report, autonomous-loop, and recommended-suite scripts import the shared defaults to avoid drift.
+The paper-safe result paths, VPN/TLS target gates, required unified expert slots,
+shared core modules, and default framework profile are centralized in
+`paper_framework_defaults.py`. In the current code, "paper-safe" is the
+backward-compatible name for the `paper_unified` profile, not a separate
+dataset-specific recipe. Update that file first when changing the paper-facing
+main result; the recommendation, framework-report, autonomous-loop, and
+recommended-suite scripts import the shared defaults to avoid drift.
 
-The autonomous loop runs the audit below automatically. Run it manually after changing paper-facing defaults or before updating paper tables. It checks that the configured paper-safe JSON files exist, meet their target gates where targets are defined, and expose the required unified expert slots directly or through identity-compatible legacy mapping:
+The `paper_unified` profile also fixes one Tower-1 checkpoint protocol for every
+dataset and both task levels. Training evaluates a deterministic
+flow-balanced validation subset (at most two non-repeated packets per flow),
+selects `best/` by held-out packet macro-F1, and extracts both the factual
+full-header view and the `mask_ip_port` intervention view from that same
+checkpoint. Test labels never select the Tower-1 epoch. This equal-flow
+validation rule prevents long flows from dominating checkpoint selection and
+keeps the packet encoder reusable inside the flow model. Legacy commands that
+do not opt into `paper_unified` continue to read the final Tower-1 directory for
+backward-compatible ablations; they are not evidence for the unified main
+result.
+
+The autonomous loop runs the audit below automatically. Run it manually after
+changing paper-facing defaults or before updating paper tables. It checks that
+the configured paper-safe JSON files exist, meet their target gates where
+targets are defined, expose the required unified expert slots directly or
+through identity-compatible legacy mapping, and still pass the unified-framework
+gate with at least one `paper_unified` flow manifest and one `paper_unified`
+packet manifest:
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -3450,7 +4618,7 @@ conda run --no-capture-output -n llm-factory \
     --output_md reasoningDataset/paper_framework_defaults_audit.md
 ```
 
-For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics, the unified-framework audit, and the centralized paper-safe defaults audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. With the current results, TLS-120 passes this strict gate, while VPN is still `point_pass_ci_mixed` because its bootstrap accuracy lower bound is below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early.
+For paper-grade stopping, add `--require_ci_targets`. The default loop stops when VPN/TLS point metrics, the unified-framework audit, and the centralized paper-safe defaults audit pass. The stricter CI mode additionally requires each goal dataset to have `ci_target_met=true` and, by default, `content_group_ci_target_met=true` in `reasoningDataset/paper_evidence_pack.json`. The loop refreshes the exact-PCAP content-unique and content-grouped bootstrap reports before rebuilding the evidence pack, so the stop gate uses the current paper-safe predictions rather than stale robustness evidence. With the current results, TLS-120 passes both CI gates, while VPN remains `point_pass_ci_mixed` because its standard and content-grouped bootstrap accuracy lower bounds are below `0.74`; strict mode therefore continues to the recommended suite instead of stopping early. Use `--no-require_content_group_ci_targets` only for a debugging run that intentionally ignores the content-grouped promotion gate.
 
 ```bash
 conda run --no-capture-output -n llm-factory \
@@ -3469,14 +4637,63 @@ conda run --no-capture-output -n llm-factory \
     --output_md reasoningDataset/next_experiment_plan.md
 ```
 
-The loop also audits whether a raw-best candidate is safe to promote into the paper-facing defaults. This is useful for TLS-120, where the raw unified-slot stacker is stronger than the guarded selector result but lacks direct selector safety guards and full paper-facing slot evidence:
+The loop also audits whether a raw-best candidate is safe to promote into the
+paper-facing defaults. This is useful for TLS-120, where the raw unified-slot
+stacker is stronger than the guarded selector result but lacks direct selector
+safety guards and full paper-facing slot evidence. Promotion now also requires
+raw-candidate-specific content-group CI evidence: if the raw-best path differs
+from the current paper-safe path, it cannot borrow the paper-safe
+content-grouped bootstrap result.
 
 ```bash
 conda run --no-capture-output -n llm-factory \
   python audit_paper_candidate_promotion.py \
+    --raw_content_group_index vpn-app=reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --raw_content_group_index tls-120=reasoningDataset/tls-120/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
     --output_json reasoningDataset/paper_candidate_promotion_audit.json \
     --output_md reasoningDataset/paper_candidate_promotion_audit.md
 ```
+
+Use `--min_raw_gain 0` only as a diagnostic to inspect tiny raw-best gains. In
+that mode, the current TLS raw-best candidate has enough computed content-group
+CI evidence, but it still remains a probe because it lacks required unified
+slot records and direct selector safety guards.
+
+To map existing candidates before spending A800 time, rank their exact-PCAP
+content-group robustness with the same target gate. This is a diagnostic search
+tool; it does not promote a result by itself:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python rank_content_group_candidates.py \
+    --dataset vpn-app \
+    --flow_embedding_index reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --target_accuracy 0.74 \
+    --target_macro_f1 0.65 \
+    --bootstrap_samples 200 \
+    --top_k 20 \
+    --output_json reasoningDataset/vpn-app/content_group_candidate_ranking.json \
+    --output_md reasoningDataset/vpn-app/content_group_candidate_ranking.md
+
+conda run --no-capture-output -n llm-factory \
+  python rank_content_group_candidates.py \
+    --dataset tls-120 \
+    --prediction_glob 'test_crossfold_consensus*.json' \
+    --flow_embedding_index reasoningDataset/tls-120/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+    --target_accuracy 0.78 \
+    --target_macro_f1 0.70 \
+    --bootstrap_samples 200 \
+    --top_k 20 \
+    --output_json reasoningDataset/tls-120/content_group_candidate_ranking_crossfold.json \
+    --output_md reasoningDataset/tls-120/content_group_candidate_ranking_crossfold.md
+```
+
+Current scan conclusion: among 411 VPN `test*.json` candidates, the best
+content-group lower bound is still the current cross-fold consensus
+(`0.7318` accuracy lower bound, below the `0.74` gate). Among TLS cross-fold
+candidates, `test_crossfold_consensus_rgssi_auto_confidence.json` ranks first
+and passes the content-group gate, but it still needs unified-slot and selector
+safety evidence before it can become a paper-facing default.
 
 To keep searching for higher accuracy in the real A800 environment even after the current VPN/TLS targets pass:
 
@@ -3493,7 +4710,7 @@ conda run --no-capture-output -n llm-factory \
     --output_json reasoningDataset/autonomous_loop/research_loop_ledger.json
 ```
 
-Use `--run_tag_template '{run_tag}_iter{iteration:02d}'` for multi-iteration searches so each loop writes a fresh Stage-8 run instead of reusing old `skip_existing` outputs. The default `--variant_schedule stage8_balanced` keeps iteration 1 at the current balanced Stage-8 setting, then cycles through stronger paired-view consistency, higher paired-view CE weight with trainable multi-view flow pooling, and stronger Tower-2 dropout plus confidence-penalty regularization; each variant also carries its own seed. The fourth Stage-8 variant also passes `--confidence_penalty_weight 0.02` into Tower-2 training, adding a KL-to-uniform penalty on classification logits to reduce overconfident split-specific decisions while keeping the same model architecture. The `multi_view` pooling computes mean/max/std/attention flow views for every dataset and learns a softmax gate over the four branches, so unhelpful branches can be down-weighted by training instead of being manually removed. The multi-view variant also uses a small `--multi_view_gate_entropy_weight` to encourage more decisive branch weights while keeping every branch in the shared framework. `test_tower2.py` writes the average learned branch weights, normalized entropy, and effective branch count to `metrics.eval_config.multi_view_gate`, which can be used as paper evidence that all datasets pass through the same branch family while training learns dataset-specific weights. New Tower-2, validation-selector, and slot-stacker outputs include calibration metrics under `metrics.*.calibration` (`ece`, `nll`, `brier`, average confidence, and sample count), so confidence-penalty, stacker, or selector changes can be judged by both accuracy/F1 and overconfidence with one metric definition from `probability_metrics.py`. The framework and evidence-pack reports surface these calibration fields whenever the evaluated JSON contains them; older result JSON files remain valid but will not show a calibration table until they are re-evaluated. This makes multi-iteration runs search real model/training variants and seed stability instead of only changing output directories. `--status_rank_metric target_margin` ranks ledger best-before/best-after results by the weaker target margin across accuracy and macro-F1, which is useful for paper-grade searches where both metrics matter; omit it to keep the historical accuracy-first ranking. The wrapper records the concrete per-iteration run tag and variant in the loop ledger. After each suite run, the loop ledger also embeds the suite `child_plans` summary, including every dataset's child plan JSON, paired-prior output, final-selector output, skipped stages, CUDA-required stages, and `experiment_config`. The raw `status_before/status_after` entries keep the highest-scoring test JSON for search visibility, while `paper_safe_status_before/paper_safe_status_after` mirror the evidence-pack framework claims and raw-minus-paper-safe deltas used for paper reporting. The ledger records both `raw_goals_met_*` and `paper_safe_goals_met_*`; stopping requires both, plus the framework, centralized defaults audit, and optional CI gates. The `next_experiment_plan` entry records the current priority gap type for each dataset, so a passing point estimate can still trigger a CI-strengthening experiment. The `candidate_promotion_audit` entry records why a higher raw-best probe can or cannot be promoted into the paper-safe defaults. The `best_delta` field compares each dataset's best test metric before and after the iteration, so new-best runs are visible without manually scanning all result JSON files.
+Use `--run_tag_template '{run_tag}_iter{iteration:02d}'` for multi-iteration searches so each loop writes a fresh Stage-8 run instead of reusing old `skip_existing` outputs. The default `--variant_schedule stage8_balanced` now starts with `gentle_intervention`, a low-weight paired-view setting intended to test shortcut resistance without immediately overwhelming the supervised flow objective, then cycles through the stronger balanced setting, stronger paired-view consistency, higher paired-view CE weight with trainable multi-view flow pooling, and stronger Tower-2 dropout plus confidence-penalty regularization; each variant also carries its own seed. The dropout-regularized Stage-8 variant also passes `--confidence_penalty_weight 0.02` into Tower-2 training, adding a KL-to-uniform penalty on classification logits to reduce overconfident split-specific decisions while keeping the same model architecture. The `multi_view` pooling computes mean/max/std/attention flow views for every dataset and learns a softmax gate over the four branches, so unhelpful branches can be down-weighted by training instead of being manually removed. The multi-view variant also uses a small `--multi_view_gate_entropy_weight` to encourage more decisive branch weights while keeping every branch in the shared framework. `test_tower2.py` writes the average learned branch weights, normalized entropy, and effective branch count to `metrics.eval_config.multi_view_gate`, which can be used as paper evidence that all datasets pass through the same branch family while training learns dataset-specific weights. New Tower-2, validation-selector, and slot-stacker outputs include calibration metrics under `metrics.*.calibration` (`ece`, `nll`, `brier`, average confidence, and sample count), so confidence-penalty, stacker, or selector changes can be judged by both accuracy/F1 and overconfidence with one metric definition from `probability_metrics.py`. The framework and evidence-pack reports surface these calibration fields whenever the evaluated JSON contains them; older result JSON files remain valid but will not show a calibration table until they are re-evaluated. This makes multi-iteration runs search real model/training variants and seed stability instead of only changing output directories. `--status_rank_metric target_margin` ranks ledger best-before/best-after results by the weaker target margin across accuracy and macro-F1, which is useful for paper-grade searches where both metrics matter; omit it to keep the historical accuracy-first ranking. The wrapper records the concrete per-iteration run tag and variant in the loop ledger. After each suite run, the loop ledger also embeds the suite `child_plans` summary, including every dataset's child plan JSON, paired-prior output, final-selector output, skipped stages, CUDA-required stages, and `experiment_config`. The raw `status_before/status_after` entries keep the highest-scoring test JSON for search visibility, while `paper_safe_status_before/paper_safe_status_after` mirror the evidence-pack framework claims and raw-minus-paper-safe deltas used for paper reporting. The ledger records both `raw_goals_met_*` and `paper_safe_goals_met_*`; stopping requires both, plus the framework, centralized defaults audit, and optional CI gates. The `next_experiment_plan` entry records the current priority gap type for each dataset, so a passing point estimate can still trigger a CI-strengthening experiment. The `candidate_promotion_audit` entry records why a higher raw-best probe can or cannot be promoted into the paper-safe defaults. The `best_delta` field compares each dataset's best test metric before and after the iteration, so new-best runs are visible without manually scanning all result JSON files.
 
 The wrapper runs `recommend_next_experiment.py`, builds the IP/port-randomized paired view, extracts paired embeddings, preprocesses Tower-2 datasets, trains graph/seq with the current iteration's run tag, evaluates, fuses, applies the safe prior residual, then compares the paired candidate against the current best with `validation_gated_selector.py`. With the run-tag template above, the final selector output for iteration 1 is:
 
@@ -3588,21 +4805,77 @@ conda run --no-capture-output -n llm-factory \
     --output_md reasoningDataset/paper_evidence_pack.md
 ```
 
-Current evidence-pack claim status:
+Generate the reviewer-facing method card. This converts the same audited
+evidence into a paper-method narrative: core problems, unified modules,
+contributions, flow/packet evidence, ablation positioning, and current CCF-A
+risk gates. It is meant to keep the paper story aligned with the unified
+framework instead of drifting back to dataset-specific tricks:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python make_paper_method_card.py \
+    --output_json reasoningDataset/paper_method_card.json \
+    --output_md reasoningDataset/paper_method_card.md
+```
+
+The method card treats the older `paper_unified` interface/protocol audit and
+the exact shared-core publication audit as different gates. It reports
+`strict_shared_core_v2_ready=true` only when the canonical VPN/TLS packet and
+flow results all contain complete `strict_shared_core_v2` publication
+provenance, use three-fold equal `log_mean`, and share one frozen configuration
+SHA-256. Historical high scores remain non-headline evidence until all four
+canonical results satisfy that rule.
+
+It also reports `exact_common_reference_v2_ready` and
+`unified_method_v2_ready` separately. The first requires one effective
+configuration hash; the second requires one method hash plus executed
+architecture/objective agreement and permits independently optimized numeric
+hyperparameters. Neither field replaces `strict_shared_core_v2_ready` for the
+initial headline promotion, but the distinction prevents later tuned results
+from being rejected as different algorithms or mislabeled as the no-tuning
+common-reference experiment.
+
+Historical pre-exact-v2 evidence-pack status:
 
 ```text
-vpn-app:  point_pass_ci_mixed  (point target passes; bootstrap acc lower bound is below 0.74)
+vpn-app:  point_pass_ci_mixed  (point target passes; bootstrap acc lower bound is below 0.75)
 tls-120:  strong               (point target and bootstrap lower bounds both pass)
 ```
 
-Paper positioning from the evidence pack:
+Do not interpret the project promotion targets as "beats every SWEET model".
+`compare_sweet_reference.py` encodes the protocol-matched values from SWEET
+Tables 3, 4, and 9 and reports two distinct comparisons. Pcap-Encoder with a
+frozen encoder is a representation-quality reference; because the current
+method uses downstream-supervised LoRA adaptation, the primary comparison is
+the SWEET unfrozen/end-to-end column.
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python compare_sweet_reference.py \
+    --output_json reasoningDataset/sweet_protocol_comparison.json \
+    --output_md reasoningDataset/sweet_protocol_comparison.md
+```
+
+For the historical canonical results, VPN packet, VPN flow, and TLS-120 packet
+exceed the corresponding SWEET end-to-end accuracy and macro-F1 pairs. TLS-120
+flow (`0.8461/0.8292`) exceeds frozen Pcap-Encoder (`0.713/0.681`) but not
+unfrozen netFound (`0.908/0.897`), with gaps of `-0.0619/-0.0678`. Therefore a
+paper may claim superiority over the frozen representation baseline for that
+task, but not blanket superiority over all SWEET results. The comparison JSON
+also records whether every input carries `strict_shared_core_v2` provenance;
+historical canonical scores do not satisfy that final unified-method gate.
+
+This historical evidence is useful as a performance reference and ablation
+source, but it is not the exact-v2 headline table because VPN used
+`vote_priority`, TLS-120 used `log_mean`, and the four task/dataset results do
+not yet carry one strict shared-core fingerprint. Current paper positioning is:
 
 ```text
-main claim: unified candidate-expert traffic classification framework with validation-gated safety controls
-strong performance claim: TLS-120
-qualified performance claim: VPN point estimate passes, but bootstrap lower bound is mixed
+main claim: candidate unified shortcut-resistant packet-to-flow framework under strict cross-task verification
+historical strong performance reference: TLS-120
+historical qualified performance reference: VPN point estimate passes, but bootstrap lower bound is mixed
 dataset scope: VPN and TLS-120 flow-level tasks only; Per-flow Split USTC packet-level artifacts are excluded from flow-level claims
-reviewer-risk control: report harmful experts as negative ablations and use bootstrap/target-shift guards
+reviewer-risk control: do not promote historical scores until exact-v2 three-fold, runtime, provenance, and cluster-bootstrap gates pass
 ```
 
 To audit whether existing experts still contain useful residual signal, run the validation-selected residual search:
@@ -3738,28 +5011,904 @@ Window-level Accuracy / Precision / Recall / F1
 Flow-level Accuracy / Precision / Recall / F1
 ```
 
+### Tower-1 sampler-aware class balance (pre-registered validation ablation)
+
+The unified Tower-1 uses `FlowBalancedPacketBatchSampler`: each epoch visits flows and samples a fixed number of packets per flow. Therefore the effective training class distribution is determined by the number of flows per class, not by the number of rows in `packet_auxiliary.jsonl`. This distinction matters because the Per-flow Split packet preprocessing currently balances raw packet rows exactly while leaving the number of flows naturally imbalanced.
+
+The following audit is label-only and does not inspect test predictions:
+
+```bash
+conda run -n llm-factory python analyze_tower1_sampling_balance.py \
+  reasoningDataset/packet-level/vpn-app/fold{0,1,2}/train/packet_auxiliary.jsonl \
+  reasoningDataset/packet-level/tls-120/fold{0,1,2}/train/packet_auxiliary.jsonl \
+  --method effective \
+  --strengths 0.5,1.0 \
+  --output_json /tmp/two_tower_runs/paper_unified_tower1_sampling_balance.json
+```
+
+Observed training-distribution imbalance:
+
+```text
+VPN folds:     packet-count ratio=1.00, flow-count ratio=13.40-16.69
+TLS-120 folds: packet-count ratio=1.00, flow-count ratio=29.50-34.25
+```
+
+`train_tower1_multitask.py` now supports `--class_weight_basis {packet,flow}` and `--class_weight_strength ALPHA`. For normalized class-balanced weight `w_c`, the applied weight is proportional to `w_c ** ALPHA` and is renormalized to mean one. `ALPHA=0` disables class reweighting and `ALPHA=1` applies full correction. Both the packet-level and flow-level runners expose the same mechanism, so this is a shared Tower-1 objective rather than a dataset-specific classifier trick.
+
+The running `paper_unified` baselines retain the historical `packet` basis and are not changed retroactively. The pre-registered next comparison is:
+
+```text
+baseline: basis=packet, strength=1.0 (all packet counts are equal, so weights are 1)
+candidate: basis=flow, strength=0.5 (square-root correction)
+selection: held-out packet macro-F1 only, with the same setting required for VPN and TLS-120
+test policy: evaluate the frozen selected setting once; do not select strength from test metrics
+```
+
+Full flow-count correction is not the first candidate because its maximum normalized weight is approximately `2.98` on VPN but `16.20` on TLS-120. The shared square-root correction limits the observed ranges to approximately `0.46-1.86` on VPN and `0.72-4.30` on TLS-120, reducing variance while correcting the sampler/loss mismatch.
+
+The next mechanism is pre-registered only after the sampler-aware comparison: train Tower-1 with the same full-header and `mask_ip_port` paired view already consumed by the shared downstream intervention router. Both task runners expose the same Tower-1 loss; the packet runner uses:
+
+```text
+--tower1_paired_consistency_weight 0.05
+--tower1_paired_cls_weight 0.2
+--tower1_paired_logit_kl_weight 0.5
+--tower1_paired_raw_consistency_weight 1.0
+```
+
+This adds cosine consistency for both components actually exposed by downstream `embedding_mode=concat` (the normalized raw last-token state and the projected state), symmetric logit KL, and supervised CE for the intervened view. Constraining only the projected state would leave a projection nullspace through which the raw component could retain header shortcuts. It is not enabled in the frozen baseline, and it must be evaluated after, not together with, the class-balance ablation. Candidate order:
+
+```text
+A: packet-count baseline
+B: A + flow-count square-root class balance
+C: validation-selected A/B + Tower-1 full/masked paired invariance
+```
+
+All three use the same Qwen-LoRA packet encoder, flow-balanced sampler, validation macro-F1 checkpoint rule, and shared downstream packet representation. A candidate is promoted only when the same configuration is supported on held-out VPN and TLS-120 validation; test labels are never used for promotion.
+
+### Validation-to-test domain-shift audit
+
+Use the same audit for every completed fold:
+
+```bash
+conda run -n llm-factory python analyze_prediction_domain_shift.py \
+  --valid VALID_PREDICTIONS.json \
+  --test TEST_PREDICTIONS.json \
+  --level flow \
+  --output_json /tmp/two_tower_runs/DATASET_FOLD_domain_shift.json
+```
+
+The audit reports per-class F1 change, class-normalized test confusions, true/predicted prior total variation and Jensen-Shannon divergence, and learned gate means. The first two completed VPN folds show:
+
+This is post-hoc error analysis after predictions are frozen. Quantities that use test labels, including true-prior distance and per-class test F1, are reporting evidence only and are never consumed by training, checkpoint selection, calibration, candidate promotion, or inference.
+
+```text
+fold0: validation->test accuracy -7.66 points, macro-F1 -11.49 points
+fold1: validation->test accuracy -5.08 points, macro-F1  -8.55 points
+both:  true-prior total variation 0.352 because validation is class-balanced while test keeps its natural flow distribution
+```
+
+The routing weights are stable within each fold: the effective intervention-view mixture changes by less than `0.002` percentage points from validation to test. The shared semantic channel remains dominant (`91.0-91.3%` in fold0 and `82.3-82.4%` in fold1). Therefore the observed drop is not explained by a gate collapse. Recurrent conditional errors include `facebook <-> hangout`, `youtube -> spotify/vimeo`, and F1 degradation for `gmail`, `spotify`, `facebook`, and `aim`. This supports sampler-aware Tower-1 balance for underexposed flow classes and full/masked paired invariance for endpoint/environment shift; it does not support adding another routing expert.
+
+### Paper-facing method boundary
+
+The strict unified method is a bounded specialization decomposition, not a claim that field masking, contrastive learning, Transformers, or multi-channel fusion are individually new. TrafficFormer already studies field augmentation, MIETT already studies flow contrastive learning and two-level packet/flow attention, DigTraffic already studies dual-channel graph interaction, and SWEET establishes the shortcut-learning failure under Per-flow Split.
+
+For factual packet representation `f`, intervened representation `i`, learned router `g in [0,1]`, and bound `rho_v`, the shared intervention router computes:
+
+```text
+z_view = (f + i) / 2 + rho_v * (2g - 1) * (f - i) / 2
+```
+
+Therefore each view retains at least `(1-rho_v)/2` effective mass and at most `(1+rho_v)/2`. With the paper setting `rho_v=0.25`, neither view can contribute less than `0.375` or more than `0.625`, even if the learned router saturates.
+
+For semantic anchor `s`, normalized packet channels `z_k`, learned simplex gate `a_k`, bounded interaction `h`, and `rho_c=0.25`, the shared packet fusion computes:
+
+```text
+z_packet = s + rho_c * (sum_k a_k z_k - s + tanh(h))
+```
+
+The routed non-semantic channel mass is consequently bounded by `rho_c`; the separate interaction correction is coordinate-wise bounded by `rho_c * tanh(h)`. It must not be interpreted as an additional channel-mixture probability. Packet- and flow-level tasks use the same module. All three inputs to that module are strict current-packet representations: Flow Tower1 preprocessing is forced to `--packet_context_policy single_packet`, so semantic prompts cannot contain previous-packet IAT or a whole-flow server-role inference. The shared structural channel may retain a direction cue inferred from the current packet's own ports, because the identical cue is available to Packet classification; it is not a whole-flow direction estimate. Packet classification applies a packet head to `z_packet`. Flow-only sequence position and window context enter after `packet_to_flow_proj`, through the sequence/window aggregator and flow head over the same per-packet representation.
+
+The shared fusion implementation is also the single source of truth for evaluation diagnostics. Both packet and flow result JSON files report effective routing means and `p05/p50/p95`, the configured theoretical bounds, and `bounds_satisfied`. With `rho_v=rho_c=0.25`, the executable contracts are:
+
+```text
+factual/intervened effective weights: each in [0.375, 0.625]
+semantic routed weight:               in [0.75, 1.00]
+content/structural routed weights:    each in [0.00, 0.25]
+sum of routed channel weights:        exactly 1
+```
+
+These fields certify architectural boundedness on the evaluated samples; they are diagnostics, not test-time calibration or model-selection signals. Unit tests additionally exercise the saturated router endpoints, so the bounds remain verified even when observed gates do not approach those endpoints.
+
+### Exact shared-core publication gate
+
+The current `paper_unified` runs establish shared implementation classes and representation-level fusion, but they are screening runs rather than final evidence for the stronger claim that only learned weights differ. The current packet content encoder defaults to three layers with dropout `0.15`, whereas the native flow-pretrained content encoder uses two layers with dropout `0.10`. Flow training also uses content-group `group_mean` risk while the current packet screening profile records content groups but uses ordinary CE. A paper must not describe these settings as an exactly identical core.
+
+`train_packet_byte_transformer.py` now supports strict initialization from the packet-content submodule of a `NativeFlowEncoder` checkpoint:
+
+```text
+--use_protocol_fields
+--protocol_content_checkpoint NATIVE_CHECKPOINT/best.pt
+--hidden_dim 128
+--num_layers 2
+--num_heads 4
+--dropout 0.1
+--content_group_loss_reduction group_mean
+```
+
+The load is strict: architecture or state-dict shape differences abort instead of silently loading a subset. The packet checkpoint records the pretraining protocol, source checkpoint, source-file SHA-256, exact architecture, and strict-load status. Native checkpoints without the required `native_flow_multitask_v1` provenance are rejected. The final audit recomputes the native checkpoint hash, so a different but shape-compatible checkpoint cannot satisfy the publication gate. `run_packet_level_pipeline.py` exposes the same settings as `--byte_hidden_dim`, `--byte_num_layers`, `--byte_num_heads`, and `--byte_dropout`.
+
+The runner can now create and consume that native checkpoint as one reproducible chain. Its packet-content architecture is inherited directly from the packet encoder arguments; the native model's flow encoder and self-supervised heads are used only during label-free pretraining:
+
+```bash
+conda run -n llm-factory python run_packet_level_pipeline.py \
+  --dataset vpn-app \
+  --fold 0 \
+  --stage paper_unified \
+  --pretrain_protocol_content \
+  --byte_max_bytes 128 \
+  --byte_hidden_dim 128 \
+  --byte_num_layers 2 \
+  --byte_num_heads 4 \
+  --byte_dropout 0.1 \
+  --byte_content_group_loss_reduction group_mean
+```
+
+This runs `pretrain_native_flow_encoder.py` before packet-head training and passes `CHECKPOINT_ROOT/vpn-app_fold0/shared_content_pretraining/best.pt` through `--protocol_content_checkpoint`. Use `--stage protocol_pretrain` to run only the label-free phase after preprocessing. Automatic pretraining and an explicitly supplied `--protocol_content_checkpoint` are mutually exclusive, so the initialization source cannot be silently ambiguous. These flags provide the exact-v2 execution path; they do not retroactively make existing `paper_unified` screening checkpoints exact-core results.
+
+Before freezing publication results, compare the completed packet checkpoint with the corresponding native flow checkpoint:
+
+```bash
+conda run -n llm-factory python audit_shared_packet_core.py \
+  --packet_checkpoint PACKET_CHECKPOINT/best.pt \
+  --native_checkpoint NATIVE_CHECKPOINT/best.pt \
+  --flow_checkpoint FLOW_SEQ_CHECKPOINT/best.pt \
+  --packet_result_json PACKET_VALIDATION_RESULT.json \
+  --flow_manifest_json FLOW_FRAMEWORK_MANIFEST.json \
+  --output_json /tmp/two_tower_runs/shared_packet_core_audit.json
+```
+
+The exact-core claim is permitted only when the audit returns `status=pass`, requiring all of the following:
+
+```text
+same max bytes, hidden dimension, layer count, head count, and dropout
+same normalized parameter names and tensor shapes
+same native_flow_multitask_v1 packet-content pretraining protocol
+same content-group empirical-risk reduction
+same semantic/content/13-dimensional structural packet module parameter schema
+flow-only packet_to_flow_proj boundary before sequence/window/flow aggregation
+```
+
+For each dataset/fold, run the cross-task auditor after both task manifests are
+complete. Checkpoint paths are resolved from the manifests, so the audit cannot
+silently inspect a different hand-picked model:
+
+```bash
+conda run -n llm-factory python audit_cross_task_shared_core.py \
+  --packet_manifest PACKET_ARTIFACT_ROOT/vpn-app/fold0/packet_framework_manifest.json \
+  --flow_manifest reasoningDataset/vpn-app/stage8_flowaware_manifest_STRICT_V2_SUFFIX.json \
+  --require_mechanism_evidence \
+  --output_json reasoningDataset/shared-core-audits/vpn-app/fold0/audit.json
+```
+
+The report passes only when dataset, fold, and frozen config SHA-256 match;
+packet and flow native encoders have the same `native_flow_multitask_v1`
+architecture/protocol and the same checkpoint-recorded pretraining contract
+(mask/dropout rates, every objective weight, optimizer, schedule, temperature,
+patience, and seed); the packet and flow `shared_packet_encoder.*` parameter
+schemas match exactly; and the flow-only `packet_to_flow_proj` boundary is
+present. The manifests also contain a canonical `tower1_training_contract`;
+the audit requires exact equality for the trainer, Qwen base, schedule, LoRA
+configuration, packet/contrastive/paired losses, class weighting, flow-balanced
+sampling, dtype, and seed. This prevents nominally shared Tower1 channels from
+quietly using different task recipes. With `--require_mechanism_evidence`, the auditor also resolves the
+fixed packet and sequence-flow test-result paths from the two manifests and
+requires both tasks to expose the same named router schemas:
+`factual/intervened` and `semantic/content/structural`. Their reported
+`effective_routing_mean` values must be finite, normalized, and inside the
+pre-registered residual bounds for every fold. These values describe the
+bounded routing mixture; they deliberately do not claim to decompose the
+separate nonlinear interaction correction into per-channel causal
+contributions. Sample-wise gate variation is reported as mechanism evidence
+but is not an arbitrary pass threshold. Independent trained parameter values
+may differ, but architecture, pretraining protocol, empirical-risk contract,
+and router semantics may not.
+
+The semantic input policy is verified from executed artifacts rather than only
+runner arguments. The Packet manifest reads factual/intervened cache manifests
+for train, valid, and test and requires `full/mask_ip_port` headers with
+`single_packet` context in all six cases. The Flow manifest performs the same
+check against factual/intervened embedding configurations. The cross-task audit
+fails if either evidence block is missing or unverified, even when both
+framework manifests claim `single_packet` in their configuration notes.
+
+Every Packet `paper_unified` factual/intervened extraction and every Flow
+Stage-8 extraction also runs `audit_flow_embeddings.py` before cache building
+or Tower2 preprocessing. The audit requires exact input/output flow coverage,
+unique `(flow_id, packet_id)` keys, preserved packet order and labels, existing
+two-dimensional NPY arrays whose row count and declared dimension match, and
+finite values throughout. It records SHA-256 fingerprints for the packet
+index, flow-embedding index, and embedding configuration in
+`embedding_audit.json`; a failed audit stops the downstream stage. This check
+is identical for VPN/TLS, Packet/Flow, all folds, and both header views.
+Manifest consumption independently re-hashes the current packet index,
+flow-embedding index, and embedding configuration and requires all three values
+to match the audit report; merely storing syntactically valid SHA-256 strings
+is insufficient. The executed embedding mode, scheduler version, model
+micro-batch, and cross-flow packet buffer must also match the frozen Packet/Flow
+contract on every split and view.
+
+The strict audit also follows the native-content provenance through feature
+extraction. `extract_native_flow_embeddings.py` records the encoder checkpoint
+SHA-256 in each split manifest; train, valid, and test must all match the
+audited flow-native checkpoint, use the frozen session-field mask probability,
+contain non-empty flow sets, and attest `flow_id_and_packet_id` alignment. A
+matching checkpoint on disk is therefore insufficient if Tower2's actual
+native embedding files came from another run.
+
+`audit_unified_framework.py` reports two deliberately separate gates over all
+12 executed manifests (VPN/TLS x packet/flow x three folds) and all six
+cross-task checkpoint reports under
+`reasoningDataset/shared-core-audits/<dataset>/fold<k>/audit.json`:
+
+- `exact_shared_core_v2` requires one effective configuration fingerprint and
+  is the no-tuning-budget-confound common-reference experiment.
+- `unified_method_v2` requires one method fingerprint and matching executed
+  architecture/objective signatures, while allowing explicitly recorded
+  effective configuration hashes to differ because of numeric optimization.
+
+Configuration provenance alone is insufficient for either gate: every
+cross-task checkpoint/runtime report must pass. The initial publication
+promotion remains tied to `exact_shared_core_v2`; independently optimized
+results are reported alongside it under `unified_method_v2`, not mislabeled as
+the exact numerical baseline.
+
+After those six reports pass, publication uses one predeclared aggregation
+rule for every dataset and task: equal-weight three-fold `log_mean`. Run:
+
+```bash
+conda run -n llm-factory python publish_strict_shared_core_results.py \
+  --dataset vpn-app \
+  --audit_root reasoningDataset/shared-core-audits \
+  --packet_manifest_root /tmp/two_tower_runs/strict_shared_core_v2/packet_artifacts \
+  --packet_candidate /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_packet_logmean.json \
+  --flow_candidate /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_flow_logmean.json \
+  --packet_bootstrap /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_packet_cluster_bootstrap.json \
+  --flow_bootstrap /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_flow_cluster_bootstrap.json \
+  --packet_session_novelty /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_packet_session_novelty.json \
+  --flow_session_novelty /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_flow_session_novelty.json \
+  --output_json /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_publication.json
+```
+
+The publisher rejects non-single-head packet inputs, non-sequence flow inputs,
+anything other than three fixed `log_mean` folds, failed/missing checkpoint
+audits, audits without passing runtime mechanism evidence, or mixed frozen
+fingerprints. Packet fold manifests are copied into
+their canonical paper locations only after these checks. Packet and flow are
+promoted independently only when they meet their predeclared targets: VPN
+packet `0.90/0.76`, TLS packet `0.85/0.78`, VPN flow `0.75/0.65`, and TLS flow
+`0.78/0.70` for accuracy/macro-F1. A target-gap candidate is retained for
+analysis while the previous canonical file and its manifests remain untouched.
+Every promoted canonical JSON receives a `strict_shared_core_v2` provenance
+block containing the frozen SHA, three fold-audit paths, mechanism-evidence
+and native-extraction provenance requirements, and fixed-consensus declaration. Result binding refuses VPN/TLS
+files without this block, so a stale historical result cannot be relabeled as
+the strict unified method. No fusion rule or fold weight is selected from test
+performance.
+
+Strict publication additionally requires uncertainty reports generated after
+the three-fold rule is frozen. Packet NPZ files retain the recovered
+`flow_ids`; `fuse_packet_crossfold.py` verifies that those IDs align across
+folds and preserves them in the fused archive. Both tasks then use the same
+class-stratified flow-cluster bootstrap (`5000` draws, seed `42`): packets from
+one flow are resampled together, while each flow-level example is already one
+cluster. The publisher verifies that bootstrap point estimates equal the fixed
+candidate metrics and records both 95% confidence intervals. This avoids the
+overly narrow packet confidence intervals produced by treating correlated
+packets as independent observations.
+
+```bash
+conda run -n llm-factory python bootstrap_classification_metrics.py \
+  --input STRICT_PACKET_LOGMEAN.npz --task packet \
+  --samples 5000 --seed 42 --output_json STRICT_PACKET_BOOTSTRAP.json
+
+conda run -n llm-factory python bootstrap_classification_metrics.py \
+  --input STRICT_FLOW_LOGMEAN.json --task flow \
+  --samples 5000 --seed 42 --output_json STRICT_FLOW_BOOTSTRAP.json
+```
+
+The field-intervention claim is additionally evaluated by one reporting-only
+session-novelty audit after predictions are frozen. Training packet indices
+define direction-invariant endpoint, port, and complete session signature sets;
+test labels do not define the groups. For a three-fold consensus, pass all
+three training indices, so `novel` means unseen in their union (unseen to every
+member model):
+
+```bash
+conda run -n llm-factory python evaluate_session_novelty.py \
+  --task flow \
+  --train_packet_index FOLD0_TRAIN_PACKET_INDEX.jsonl \
+  --train_packet_index FOLD1_TRAIN_PACKET_INDEX.jsonl \
+  --train_packet_index FOLD2_TRAIN_PACKET_INDEX.jsonl \
+  --test_packet_index TEST_PACKET_INDEX.jsonl \
+  --predictions STRICT_FLOW_LOGMEAN.json \
+  --label_map LABEL_MAP.json \
+  --output_json STRICT_FLOW_SESSION_NOVELTY.json
+```
+
+Use `--task packet` with the fixed Packet consensus NPZ for the corresponding
+Packet report. Every group includes Accuracy, fixed-all-class Macro-F1, and
+present-class Macro-F1. The audit is never consumed by training, checkpoint
+selection, fusion, or promotion. A historical VPN Flow smoke model showed
+`79.20%/73.33%` Accuracy/Macro-F1 on endpoint-seen flows versus
+`53.31%/34.73%` on endpoint-novel flows; this large conditional gap motivates
+the test but is neither a strict-v2 result nor causal evidence that endpoints
+alone caused each error.
+
+Parameter values may differ after separate dataset/task training. The frozen exact-v2 main model uses the sequence flow aggregator; graph is retained as a structural aggregation ablation until it can consume the same aligned intervention views. Flow classification adds `packet_to_flow_proj`, packet-sequence aggregation, and the flow head only after the audited shared packet representation. Current long-running screening experiments are not interrupted or retroactively relabeled, and the final strict-core rerun starts only after the sampler-aware and paired-invariance validation screens select one cross-dataset configuration.
+
+After both screens finish, freeze their common VPN/TLS decision before any strict-v2 test evaluation:
+
+```bash
+conda run -n llm-factory python freeze_shared_core_v2_config.py \
+  --balance_selection /tmp/two_tower_runs/paper_unified_tower1_paired_screen/balance_selection.json \
+  --paired_selection /tmp/two_tower_runs/paper_unified_tower1_paired_screen/paired_selection_vs_validation_selected_base.json \
+  --output_json /tmp/two_tower_runs/shared_core_v2/frozen_config.json
+```
+
+The freezer accepts exactly the VPN and TLS-120 reports, requires the same candidate to pass both datasets under held-out validation macro-F1, and records SHA-256 hashes of both reports plus a canonical config fingerprint. Each selection report must prove that baseline and candidate training both produced a final Tower1 checkpoint and exactly eight validation-history entries for each dataset; an intermediate `best_packet_validation_metrics.json` is rejected even if its score is high, while an appended history from a reused output directory is rejected as contaminated. It fixes one packet-core architecture, native pretraining protocol, content-group risk, and Tower1 weighting/invariance choice for both tasks. Dataset-specific manual switches and test-label selection are explicitly prohibited in the frozen contract.
+
+The selector also parses every history row and requires the recorded best step
+and Macro-F1 to equal the maximum in `packet_validation_history.jsonl`. A stale
+or hand-copied best-metrics file therefore cannot pass merely because the final
+checkpoint and an eight-line history happen to coexist in the same directory.
+The selection JSON additionally retains best-to-final regression, matched-step
+win/loss, mean and median deltas, fixed early/late phase means, late-phase
+win/loss counts, and first-to-latest relative-gain change for every dataset.
+These curve fields are marked `selection_role=descriptive_only`: they expose
+early gains and late instability but do not alter the completed-run
+best-Macro-F1 promotion threshold.
+
+Current Tower1 runs write `tower1_training_contract.json` before loading the
+model. It binds the full training configuration, input-file SHA-256 values,
+command line, and trainer-source SHA-256 at launch. Normal completion writes an
+explicit `final/` snapshot and updates the same contract with final-head and
+validation-history hashes while preserving the launch-time source identity.
+Strict-v2 additionally freezes
+`packet_batch_scheduler=epoch_resampled_dataloader_v1`. The trainer restarts
+the DataLoader iterator at every exhaustion, which advances the deterministic
+flow-balanced sampler from `seed + epoch` to `seed + epoch + 1` and resamples
+packet identities within each flow. Older runs used `itertools.cycle` around
+the DataLoader; that cached the first collated epoch and replayed identical
+batches in later epochs. Those scores remain historical performance references
+but their checkpoints are excluded from exact-v2 selection and publication.
+
+Audit the deterministic schedule without running the model or reading test
+labels:
+
+```bash
+conda run -n llm-factory python audit_tower1_epoch_sampling.py \
+  --packet_aux_jsonl /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/vpn-app/fold0/train/packet_auxiliary.jsonl \
+  --batch_size 16 --packets_per_flow 2 --seed 42 --epochs 8 \
+  --output_json /tmp/two_tower_runs/shared_core_v2_validation_resampled/vpn-app_fold0_sampling_audit.json
+
+conda run -n llm-factory python audit_tower1_epoch_sampling.py \
+  --packet_aux_jsonl /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/tls-120/fold0/train/packet_auxiliary.jsonl \
+  --batch_size 16 --packets_per_flow 2 --seed 42 --epochs 8 \
+  --output_json /tmp/two_tower_runs/shared_core_v2_validation_resampled/tls-120_fold0_sampling_audit.json
+```
+
+The fold-0 schedule audit reports unique batch hashes for all eight epochs.
+VPN cumulative unique-packet exposure rises from `6733/33088=20.35%` after one
+epoch to `14833/33088=44.83%` after eight, with `26.46%-27.16%` of flows
+changing their selected packet identities between adjacent epochs. TLS-120
+rises from `36298/98640=36.80%` to `74889/98640=75.92%`, with
+`41.52%-41.98%` adjacent-epoch flow selection changes. This is mechanism and
+coverage evidence only; accuracy impact is determined by the completed
+validation screen and strict three-fold test, not inferred from the audit.
+
+The frozen Tower1 file provides one reproducible common-reference optimization
+configuration: `max_steps=0`, eight complete epochs, no early stopping,
+gradient checkpointing, projection dimension `256`, weight decay `0.01`,
+effective-number beta `0.9999`, and base-model-only initialization. Only the
+projection dimension and initialization policy are method/architecture
+invariants. Epoch budget, optimizer values, batch size, temperature,
+regularization, and nonzero loss magnitudes may be set independently for each
+dataset/task and are recorded as execution hyperparameters. The flow-prototype
+objective is explicitly removed from the main method with
+`flow_proto_weight=0`; enabling it is an ablation/method change, while changing
+the magnitude of an already-enabled objective is ordinary tuning. This keeps
+the main packet objective to class-balanced CE plus flow-aware SupCon instead
+of retaining an unverified extra loss.
+
+Packet and Flow manifests contain both `tower1_training_contract` (the runner
+declaration) and `tower1_execution_evidence` (the completed trainer contract).
+The latter re-hashes `final/tower1_heads.pt`, the validation history, and the
+contract file; requires the trainer source hash to remain unchanged from launch
+through completion; and normalizes the actual optimizer, loss, sampling,
+initialization, and scheduler fields back to the declared method contract.
+`audit_cross_task_shared_core.py` passes only when both task-local executions
+are verified, both declarations match their actual executions, the normalized
+Packet/Flow **shared method signatures** and trainer source hashes are
+identical, and every numeric hyperparameter difference is explicitly reported.
+The full optimization dictionaries need not be numerically identical.
+Comparing two runner declarations alone is no longer sufficient.
+
+The selector requires this completed contract and recomputes the hashes. Two
+long-running validation screens that started before this contract existed are
+handled only by `materialize_legacy_tower1_final.py`: it accepts exactly eight
+history rows, verifies the best row, copies the terminal root checkpoint to
+`final/`, and emits a separately hashed legacy-materialization manifest. This
+compatibility path is for those already-running screens, not the strict-v2 main
+experiments.
+
+Both task runners consume that exact file. Do not repeat or tune shared-core flags in the publication commands:
+
+```bash
+# Packet task: native pretraining -> shared packet core -> packet head
+conda run -n llm-factory python run_packet_level_pipeline.py \
+  --dataset vpn-app --fold 0 --stage paper_unified \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json
+
+# Flow task: same native packet core -> sequence/window aggregation -> flow head
+conda run -n llm-factory python run_stage8_flowaware_pipeline.py \
+  --dataset vpn-app --fold 0 --stage all \
+  --framework_profile paper_unified \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+  --num_classes 16
+```
+
+For an independently optimized run, explicitly name only the parsed training
+arguments that should survive the common-reference defaults. For example:
+
+```bash
+# Packet example: same method, independently selected optimization values.
+conda run -n llm-factory python run_packet_level_pipeline.py \
+  --dataset vpn-app --fold 0 --stage paper_unified \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+  --epochs 12 --lr 2e-5 \
+  --training_hyperparameter_overrides epochs,lr
+
+# Flow example: corresponding task-local argument names.
+conda run -n llm-factory python run_stage8_flowaware_pipeline.py \
+  --dataset vpn-app --fold 0 --stage all \
+  --framework_profile paper_unified \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+  --tower1_epochs 12 --tower1_lr 2e-5 \
+  --training_hyperparameter_overrides tower1_epochs,tower1_lr \
+  --num_classes 16
+```
+
+The allowlist rejects architecture/module switches such as `lora_r`. Loss and
+intervention magnitudes are allowed only when their zero/nonzero activation
+status matches the frozen shared method, so the option cannot silently disable
+SupCon, paired invariance, class balancing, or a native pretraining objective.
+
+### Reporting-only flow-length diagnostic
+
+MIETT motivates packet-instance interaction, while TrafficFormer's input-length
+ablation warns that adding packets is not automatically useful. Before adding
+another aggregation branch, test whether the current errors actually grow with
+flow length:
+
+```bash
+conda run -n llm-factory python analyze_flow_length_performance.py \
+  --predictions reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json \
+  --embedding_index reasoningDataset/tls-120/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl \
+  --output_json /tmp/two_tower_runs/tls120_historical_flow_length_performance.json
+```
+
+The script is reporting-only and records fixed packet-count bins, quartiles,
+confidence, overall length/correctness rank correlation, and per-class
+correlations. On the historical TLS result, the longest quartile has lower
+Accuracy (`0.8159`) than the middle quartiles, but this apparent effect largely
+vanishes after conditioning on class: 112 eligible classes have mean/median
+length-correctness Spearman values of `-0.0167/-0.0060`, with `50.9%` negative.
+VPN shows the opposite within-class tendency (`+0.1304/+0.1155`, only `25%`
+negative). Therefore a fixed early-packet or short-flow bias is not promoted to
+the unified model. Any future multi-scale aggregator requires validation-only
+gains on both datasets and a matched ablation; these descriptive test strata
+cannot select it.
+
+### Reporting-only cross-fold disagreement diagnostic
+
+Before adding another expert, measure whether the three independently trained
+fold models make complementary errors. The diagnostic aligns predictions by
+the exact `flow_id` set, verifies every aligned true label, and reports each
+fold, pairwise error overlap, the number of correct folds per flow, unanimous
+errors, a non-deployable any-fold oracle, and class-conditional headroom:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python analyze_crossfold_disagreement.py \
+    --input fold0=reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json \
+    --input fold1=reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_accuracy.json \
+    --input fold2=reasoningDataset/tls-120/test_selector_base_prior_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_accuracy.json \
+    --consensus consensus=reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json \
+    --output_json /tmp/two_tower_runs/tls120_historical_crossfold_disagreement.json
+```
+
+Historical results show genuine split instability rather than three copies of
+the same error pattern, but the historical folds also use different terminal
+selectors. The table therefore measures total cross-fold candidate diversity,
+not a clean estimate of split variance under one fixed method:
+
+```text
+| Dataset | Mean fold Acc | Best fold Acc | Any-fold oracle Acc | Oracle headroom | Disagreement | All folds wrong |
+|---|---:|---:|---:|---:|---:|---:|
+| vpn-app | 0.7165 | 0.7488 | 0.8140 | +0.0652 | 0.3307 | 0.1860 |
+| tls-120 | 0.7745 | 0.7996 | 0.9121 | +0.1125 | 0.3587 | 0.0879 |
+```
+
+The historical consensus reaches `0.7512/0.7522` Accuracy/Macro-F1 on VPN and
+`0.8461/0.8292` on TLS-120. It recovers substantially more single-fold errors
+than it harms, especially on TLS-120. This supports a future unified
+cross-training-stability objective; it does **not** authorize selecting a
+teacher, fusion rule, class, or hyperparameter from these test diagnostics.
+Every output carries `selection_role=none`,
+`label_usage=test_labels_diagnostic_only`, and an explicit prohibition on test
+adaptation.
+
+This historical diagnosis is only a hypothesis gate. The disagreement analysis
+must be repeated on the strict-v2 three-fold outputs, where architecture,
+objective topology, and fixed `log_mean` consensus are identical. Only that
+matched result may attribute complementarity to training split/seed
+instability or justify promoting a stability objective into the unified method.
+
+Paper-safe distillation must use only task-local training data and OOF teacher
+predictions. Concatenating disjoint validation folds with
+`build_consensus_distill_targets.py --align union` improves coverage, but each
+flow ordinarily has only one model that excluded it from training; this is an
+OOF prediction union, not an OOF multi-teacher consensus. A promoted consensus
+student therefore requires an inner-fold protocol with multiple independently
+initialized/view-perturbed teachers that all exclude the target inner fold,
+complete flow-ID coverage, and the same teacher/student algorithm for VPN/TLS
+and Packet/Flow. Until that protocol is implemented and ablated, historical
+consensus distillation remains supporting negative evidence rather than a core
+module.
+
+The strict-v2 frozen file is a deliberately stronger **common-reference
+hyperparameter experiment**: its values override command-line defaults in both
+runners and are recorded with one config fingerprint. It fixes architecture,
+objective choices, and numeric hyperparameters so the first controlled matrix
+has no tuning-budget confound. This is not the general definition of framework
+unity. The general cross-task audit compares the shared architecture/algorithm
+signature and separately reports allowed differences in learning rate, epoch
+budget, batch size, weight decay, temperature, seed, and nonzero objective
+coefficients. Later optimized runs may use different recorded numeric values for
+VPN/TLS and Packet/Flow while keeping the same signature. Turning an objective
+on/off, changing packet context, replacing the sampler, changing LoRA rank or
+projection structure, or adding a dataset-specific branch remains a method
+change. `audit_unified_framework.py` still requires the initial strict-v2
+common-reference runs to carry one identical fingerprint because that matrix is
+the controlled baseline, not because separately tuned hyperparameters are
+forbidden by the unified method.
+
+For an independently tuned run, list only the numeric runner fields that must
+survive application of `paper_unified` and the frozen method defaults:
+
+```bash
+# Packet example: architecture and objective topology remain frozen.
+python run_packet_level_pipeline.py ... \
+  --framework_profile paper_unified \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+  --epochs 12 \
+  --lr 2e-5 \
+  --packet_batch_size 32 \
+  --training_hyperparameter_overrides epochs,lr,packet_batch_size
+
+# Flow example: this task learns all weights from its own Flow training packets.
+python run_stage8_flowaware_pipeline.py ... \
+  --framework_profile paper_unified \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+  --tower1_epochs 12 \
+  --tower1_lr 2e-5 \
+  --training_hyperparameter_overrides tower1_epochs,tower1_lr
+```
+
+The allowlist contains optimization budget, compute, regularization, and
+loss-magnitude fields only. Architecture and categorical algorithm fields such
+as `lora_r`, packet context, embedding mode, sampler type, aggregation family,
+and intervention policy cannot be restored this way. A magnitude override also
+cannot cross zero when that would enable or disable a shared objective. Both
+the requested values and the executed trainer contract are stored in the run
+manifest; `audit_cross_task_shared_core.py` compares method signatures and
+reports numeric differences separately.
+
+Manifests distinguish two hashes. `shared_core_method_sha256` identifies the
+frozen module/algorithm contract and must agree across Packet/Flow. The
+`shared_core_config_sha256` is the effective execution hash: it equals the
+method hash for the untouched common-reference run, but changes when explicit
+numeric overrides are present. Consequently an independently tuned run can
+pass the unified-method audit without being mislabeled as the exact same
+strict-v2 numerical baseline.
+
+Module reuse means reuse of the architecture and representation contract, not
+reuse of supervised weights across tasks. Packet-level training learns its
+Packet module from the packet task's training split. Flow-level training
+re-trains the same Packet module from packets belonging to the flow task's own
+training split, then adds `packet_to_flow_proj`, window/flow aggregation, and a
+flow head. It must not initialize that module from a Packet-level task
+checkpoint. Both framework manifests record `packet_module_training_source`
+and `cross_task_trained_weights_reused=false`; the cross-task audit requires
+`packet_task_train_split_packets` for Packet and
+`flow_task_train_split_packets` for Flow.
+
+One validation-only v3 candidate addresses the observed Packet-to-Flow evidence
+loss without adding a dataset-specific expert. `SharedPacketClassifierHead` is
+the same fused-packet linear head class used by Packet classification. During
+Flow training, a fresh instance is trained only from the Flow train split; its
+per-packet logits are pooled inside each window and combined with the window
+classifier by a learned convex gate bounded by
+`--packet_evidence_max_weight`. The existing learned `late_fusion` flow head
+then aggregates window evidence. A value of `0` is the exact-v2 default and
+does not instantiate the extra head; a positive value automatically selects
+`late_fusion` and is recorded in the manifest. This candidate is not a paper
+main module unless the same bound improves held-out macro-F1 on both VPN and
+TLS-120 under the same frozen shared-core configuration.
+
+```bash
+# Run only after the strict-v2 fold-0 Flow manifests exist. Both commands use
+# the same bound and reuse only their own Flow-task factual/intervention data.
+conda run --no-capture-output -n llm-factory \
+  python run_packet_evidence_validation.py \
+    --baseline_manifest reasoningDataset/vpn-app/stage8_flowaware_manifest_rawproj_strict_shared_core_v2_fold0_native_shared_content_strict_shared_core_v2_fold0_stage8_flowaware_strict_shared_core_v2_fold0.json \
+    --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+    --packet_evidence_max_weight 0.4 \
+    --summary_json /tmp/two_tower_runs/shared_packet_evidence/vpn_fold0.json
+
+conda run --no-capture-output -n llm-factory \
+  python run_packet_evidence_validation.py \
+    --baseline_manifest reasoningDataset/tls-120/stage8_flowaware_manifest_rawproj_strict_shared_core_v2_fold0_native_shared_content_strict_shared_core_v2_fold0_stage8_flowaware_strict_shared_core_v2_fold0.json \
+    --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+    --packet_evidence_max_weight 0.4 \
+    --summary_json /tmp/two_tower_runs/shared_packet_evidence/tls120_fold0.json
+```
+
+`run_packet_evidence_validation.py` launches only `tower2_train` and a
+validation-only `eval`; it rejects manifests that reuse supervised Packet-task
+weights. For each dataset it trains two matched arms: `late_fusion` with the
+evidence head disabled, and the same `late_fusion` model with the evidence head
+enabled. Use the two summary files to obtain the exact strict-v2 reference,
+control, and candidate paths, then register both datasets in one selection
+report:
+
+```bash
+conda run -n llm-factory python select_packet_evidence_candidate.py \
+  --record vpn-app <VPN_STRICT_V2_VALID> <VPN_CONTROL_VALID> <VPN_CANDIDATE_VALID> <VPN_CONTROL_MANIFEST> <VPN_CANDIDATE_MANIFEST> \
+  --record tls-120 <TLS_STRICT_V2_VALID> <TLS_CONTROL_VALID> <TLS_CANDIDATE_VALID> <TLS_CONTROL_MANIFEST> <TLS_CANDIDATE_MANIFEST> \
+  --min_macro_f1_gain 0.005 \
+  --max_accuracy_drop 0.01 \
+  --max_reference_macro_f1_drop 0.01 \
+  --output_json /tmp/two_tower_runs/shared_packet_evidence/selection.json
+```
+
+The selector checks aligned flow IDs/labels, one frozen-core fingerprint, one
+candidate bound, task-local Flow training provenance, and the absence of test
+outputs. The candidate is promoted only when both datasets gain at least 0.5
+macro-F1 points over the matched `late_fusion` control, lose no more than one
+accuracy point against that control, and remain within one macro-F1/accuracy
+point of the strict-v2 `mean` reference. Otherwise the strict-v2 baseline
+remains the paper method. This three-arm design prevents a pooling change from
+being misreported as a packet-evidence gain.
+
+This candidate is not claimed as a standalone novelty. MIETT already models
+packet/flow hierarchy with two-level attention, while SWEET's Pcap-Encoder uses
+simple voting over early packet predictions. The paper-facing distinction is
+the complete contract: one counterfactually trained semantic/content/structure
+Packet module is reused by architecture across both tasks, all supervised
+weights are re-trained from each task's own split, and Flow may learn a bounded
+residual from weak packet evidence to contextual window evidence. The matched
+ablation must therefore separate the shared core, intervention, bounded router,
+and packet-evidence residual; reporting only the final combined model would not
+support the method claim.
+
+The related-work collision analysis, defensible hypothesis, required evidence,
+and stop rules are tracked in
+`reasoningDataset/paper_method_novelty_audit.md`. Treat that audit as a research
+constraint: a higher validation score does not justify a module when it breaks
+the unified contract or lacks a matched control.
+
+A possible anchor-excluded cross-scale distillation follow-up is pre-registered
+in `reasoningDataset/counterfactual_cross_scale_distillation_preregistration.md`.
+It is deliberately inactive: implementation is permitted only after the full
+strict-v2 matrix demonstrates the specified validation-only Packet-to-Flow
+evidence gap. The frozen controls are no-KD, plain anchor-excluded KD,
+intervention-stability KD, and stability-plus-learnability-gated KD; failure on
+either VPN or TLS keeps the candidate out of the unified main method.
+
+The Tower-1 paired loss covers the exact downstream concat representation:
+
+```text
+L_pair = (1-cos(raw_f, raw_i))
+       + (1-cos(proj_f, proj_i))
+       + eta * symmetric_KL(logits_f, logits_i)
+
+L_cls = CE(logits_f, y) + kappa * CE(logits_i, y)
+```
+
+Finally, sampler-aware class risk derives class counts from the unit actually
+visited by the sampler. When each flow contributes a fixed number of packets,
+flow counts, rather than pre-balanced raw packet-row counts, define the
+effective training distribution. If class `c` contains `n_c` flows and the
+sampler visits every flow once per epoch, its expected weighted classification
+mass is
+
+```text
+M_c = n_c * normalize(EffectiveNumberWeight(n_c) ** alpha).
+```
+
+The same `alpha=0.5` candidate is screened on VPN and TLS-120. It is a tempered
+sampler/objective correction, not full inverse-frequency balancing. Across the
+three available VPN folds it reduces the expected objective-exposure ratio
+from `13.40-16.69` to `3.71-4.17`; across TLS-120 it reduces the ratio from
+`29.50-34.25` to `5.47-5.89`. In contrast, `alpha=1.0` reduces every ratio to
+approximately `1.01-1.04`, which can give a class represented by only a few
+flows disproportionate gradient leverage. These values are computed directly
+from the sampler contract and training rows by
+`analyze_tower1_sampling_balance.py`; they are not test-set measurements. The
+same rule is used for VPN/TLS and packet/flow tasks, while each task and dataset
+learns its own model parameters.
+
+The exposure hypothesis is checked on held-out validation only, with an explicitly non-causal rank-association audit:
+
+```bash
+conda run -n llm-factory python analyze_tower1_exposure_outcomes.py \
+  --sampling_report /tmp/two_tower_runs/paper_unified_tower1_sampling_balance.json \
+  --report_index 0 \
+  --validation_history /tmp/two_tower_runs/paper_unified_packet_repro_v2/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+  --output_json /tmp/two_tower_runs/paper_unified_vpn_fold0_tower1_exposure_outcomes.json
+```
+
+When a sampler-aware candidate and its baseline are still training, compare
+only checkpoints reached by both runs. This avoids attributing ordinary
+training-time improvement to the sampler:
+
+```bash
+conda run -n llm-factory python analyze_tower1_validation_history.py \
+  --input baseline /tmp/two_tower_runs/paper_unified_packet_repro_v2/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+  --input flow_weight /tmp/two_tower_runs/paper_unified_tower1_flowweight_sqrt/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+  --compare baseline flow_weight \
+  --output_json /tmp/two_tower_runs/vpn_tower1_flowweight_matched_validation_live.json
+```
+
+The matched report includes per-class F1/recall deltas and the Spearman
+association between held-out class support and F1 gain. Its
+`matched_curve_summary` also reports candidate wins/losses and mean/median
+Accuracy and Macro-F1 deltas across every common checkpoint, so an isolated
+best or final point cannot be presented as the whole learning dynamic. It is
+mechanism evidence only: it reads no test labels and does not select or promote a model.
+The cross-dataset, completed-history promotion rule below remains authoritative.
+
+To determine whether a weighting gain/loss follows class exposure or
+single-packet identifiability, first audit the original `packet_index.jsonl`
+files and then align their per-class signature conflicts with the matched
+validation deltas:
+
+```bash
+conda run -n llm-factory python audit_packet_identifiability.py \
+  --train_index /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/vpn-app/fold0/train/packet_index.jsonl \
+  --test_index /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/vpn-app/fold0/valid/packet_index.jsonl \
+  --output_json /tmp/two_tower_runs/vpn_fold0_validation_packet_identifiability_per_class.json
+
+conda run -n llm-factory python analyze_tower1_weight_identifiability.py \
+  --matched_report /tmp/two_tower_runs/vpn_tower1_flowweight_matched_validation_live.json \
+  --identifiability_report /tmp/two_tower_runs/vpn_fold0_validation_packet_identifiability_per_class.json \
+  --sampling_report /tmp/two_tower_runs/paper_unified_tower1_sampling_balance.json \
+  --report_index 0 \
+  --label_map /tmp/two_tower_runs/paper_unified_packet_repro_v2/artifacts/vpn-app/fold0/train/label_map.json \
+  --signature_level session \
+  --weight_strength 0.5 \
+  --output_json /tmp/two_tower_runs/vpn_tower1_flowweight_identifiability_live.json
+```
+
+Use `packet_index.jsonl`, not `packet_auxiliary.jsonl`, for this audit. The
+auxiliary rows intentionally omit `l3_hex_prefix`; treating them as byte inputs
+collapses signatures and can produce a meaningless 100% train-seen rate. This
+association is validation-only, descriptive evidence and cannot select or
+promote a candidate.
+
+At VPN fold0 epoch 1, `log1p(training flow count)` has Spearman `rho=0.506` with held-out class F1 (`p=0.045`) and `rho=0.642` with held-out recall (`p=0.0074`). This is provisional mechanism evidence, not a causal result: classes such as `torrent` are counterexamples to a count-only explanation. The history-mode audit reports the association at every validation checkpoint and marks the trajectory descriptive-only, so a transient early correlation cannot be presented as the complete mechanism. Sampler-aware weighting is promoted only if its best held-out macro-F1 improves by at least `0.005` on both VPN and TLS-120 under the same eight-epoch budget, while held-out accuracy on neither dataset drops by more than `0.005`. `select_unified_tower1_candidate.py` rejects single-dataset promotion attempts, requires identical baseline/candidate dataset sets with at least two datasets, and records machine-readable final-checkpoint/history completion evidence before comparing scores. Strict selection additionally requires `epoch_resampled_dataloader_v1`, proves that each run used one unchanged trainer source from launch through completion, and requires the same trainer source SHA across every VPN/TLS baseline and candidate; legacy or mixed-implementation histories cannot enter the selection. The exposure association will be recomputed for all folds after histories are frozen; the test split is never used by this audit or promotion gate.
+
 ---
 
 ## 9. Suggested ablations for the paper
 
-1. Tower1-QA only: `L_QA`
-2. Tower1-QA + packet classification: `L_QA + alpha L_packet_cls`
-3. Tower1-QA + SupCon: `L_QA + beta L_supcon`
-4. Full Tower1: `L_QA + alpha L_packet_cls + beta L_supcon`
-5. Tower2 sequence Transformer vs Graph Transformer
-6. Raw last-token embedding vs projection-head embedding vs raw+projected concatenation
-7. Window-level Tower-2 training vs flow/window dual-loss Tower-2 training
-8. Class-balanced CE off vs on
-9. Balanced SupCon off vs on
-10. Flow pooling: mean vs attention vs late_fusion
-11. Best checkpoint by flow accuracy vs flow macro-F1
-12. Flat 16-class classifier vs hierarchical coarse-to-fine classifier
-13. Standard SupCon vs confusion-aware SupCon
-14. Tower-2 logits only vs flow-statistics branch vs stats+Tower-2 fusion
-15. Target-prior single calibration vs candidate-pool prior ensemble
-16. Full-view Tower-2 vs paired full/randomized-view consistency
-17. Tower-1 label-only SupCon vs flow-aware SupCon
-18. Tower-1 packet-packet SupCon vs packet-to-flow prototype contrastive loss
-19. Tower-2 flow-only SupCon vs window-to-flow prototype contrastive loss
+The paper ablation matrix is intentionally small. Every shared-core ablation is
+run on VPN/TLS and Packet/Flow with the same toggle; learned parameters are
+still trained independently for each dataset/task/fold.
 
-These ablations directly support the claim that Tower 1 learns protocol-aware packet semantics while Tower 2 learns flow-level packet interaction patterns.
+1. **Full exact shared core**: semantic + label-free protocol content + strict
+   packet-local structure, factual/intervened view fusion, bounded router, and
+   content-group empirical risk.
+2. **No endpoint intervention**: train and evaluate with the factual semantic
+   view only. This tests shortcut resistance, not a different dataset recipe.
+3. **No protocol-content channel**: retain semantic and structural channels but
+   remove the label-free current-packet content representation.
+4. **No structural channel**: retain semantic and protocol-content channels but
+   remove the 13-dimensional packet-local behavior representation.
+5. **Fixed fusion instead of learned bounded routing**: retain all three
+   channels and use one fixed symmetric fusion rule. This isolates adaptive
+   reliability learning from the evidence encoders themselves.
+6. **Row risk instead of content-group risk**: keep the model fixed but replace
+   group-mean empirical risk with ordinary sample-mean risk.
+7. **Flow contextualization (pre-registered, not yet implemented)**: for Flow
+   only, compare the existing sequence/window/flow aggregator with a matched
+   packet-evidence-only bag model under the same two datasets and folds. The
+   current bounded packet-evidence residual is not this control because it is
+   still combined with contextual window evidence.
+8. **Packet-evidence residual**: strict-v2 mean reference versus matched
+   `late_fusion` control (`packet_evidence=0`) versus identical candidate with
+   bounded packet evidence. Promotion requires a gain on both VPN and TLS.
+
+For the already trained full model, `test_packet_byte_transformer.py` and
+`test_tower2.py` support `--ablate_input_channel
+semantic|content|structural` and `--ablate_intervention_view
+factual_only|intervened_only`. These are cheap inference-only mechanism
+sensitivity diagnostics. Their JSON explicitly records
+`inference_only_not_retrained_ablation`; they cannot replace the retrained
+ablations above. Run them first to verify that each learned channel is actually
+used, then spend the full three-fold budget only on the pre-registered retrained
+matrix.
+
+The training programs now expose the matching persistent toggles
+`--train_ablate_input_channel semantic|content|structural` and
+`--train_ablate_intervention_view factual_only|intervened_only`. Unlike the
+cheap diagnostic flags, these values are stored in `best.pt`, automatically
+applied during training, validation, and ordinary test inference, and reported
+as `retrained_ablation` by both test programs. They require the exact shared
+packet representation; intervention-view ablations additionally require the
+aligned factual/masked-IP-port views. The same toggle name and semantics are
+used by `run_packet_level_pipeline.py` and
+`run_stage8_flowaware_pipeline.py`, while every dataset/task still learns its
+own parameters from its own training split.
+
+The same matched path also supports `--train_fixed_channel_fusion` and
+`--train_row_risk_ablation`. The former persists an exact equal-channel mean in
+the checkpoint; the latter changes both pipeline runners to ordinary row risk
+only after the frozen main profile has been applied. Thus neither control can
+silently alter dataset-specific architecture, header policy, or task-local
+training provenance.
+
+Run one Packet/Flow fold pair with the same diagnostics:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python run_shared_core_sensitivity.py \
+    --packet_manifest <STRICT_PACKET_FOLD_MANIFEST> \
+    --flow_manifest <STRICT_FLOW_FOLD_MANIFEST> \
+    --split test \
+    --output_dir /tmp/two_tower_runs/strict_shared_core_v2/shared_core_sensitivity \
+    --device cuda
+```
+
+After all six VPN/TLS fold pairs are complete, pass their summary files to
+`make_shared_core_sensitivity_report.py`. The report refuses incomplete fold,
+dataset, task, or fingerprint coverage and never authorizes automatic module
+removal; a weak inference sensitivity only schedules the corresponding
+retrained ablation.
+
+Run a matched retrained toggle for one completed strict Packet/Flow fold pair:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n llm-factory \
+  python run_retrained_shared_core_ablation.py \
+    --packet_manifest <STRICT_PACKET_FOLD_MANIFEST> \
+    --flow_manifest <STRICT_FLOW_FOLD_MANIFEST> \
+    --diagnostic no_content \
+    --output_root /tmp/two_tower_runs/strict_shared_core_v2/retrained_ablations \
+    --device cuda
+```
+
+Valid diagnostics are `no_semantic`, `no_content`, `no_structural`,
+`factual_only`, `intervened_only`, `fixed_fusion`, and `row_risk`. The fixed-fusion
+ablation uses the exact arithmetic mean of the three normalized channels and
+bypasses both learned gate and interaction correction during all phases. The
+`row_risk` control changes both tasks from content-group mean empirical risk to
+ordinary row/sample mean risk while leaving the architecture fixed. The
+runner verifies the shared frozen
+fingerprint and task-local training sources, reuses only the reference model's
+label-free content initialization, trains separate Packet/Flow supervised
+weights, selects each checkpoint on validation, and evaluates test only after
+training. Packet inputs/caches remain read-only; ablation checkpoints, results,
+and manifests are written under `--output_root`.

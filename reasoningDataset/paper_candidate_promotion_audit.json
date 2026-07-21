@@ -1,0 +1,27 @@
+{
+  "source": {
+    "evidence_pack": "reasoningDataset/paper_evidence_pack.json"
+  },
+  "min_raw_gain": 0.003,
+  "require_content_group_ci": true,
+  "raw_content_group_indices": {
+    "vpn-app": "reasoningDataset/vpn-app/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl",
+    "tls-120": "reasoningDataset/tls-120/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl"
+  },
+  "content_group_bootstrap_samples": 300,
+  "content_group_bootstrap_seed": 42,
+  "required_unified_expert_slots": [
+    "base",
+    "graph",
+    "seq",
+    "prior_base",
+    "emb_lr",
+    "emb_et",
+    "proto_emb",
+    "paired",
+    "slot_stacker",
+    "soft_gate"
+  ],
+  "candidates": [],
+  "num_direct_promotable": 0
+}

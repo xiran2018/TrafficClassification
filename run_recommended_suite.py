@@ -39,6 +39,24 @@ def dataset_num_classes(dataset: str) -> int:
     return int(preset["num_classes"])
 
 
+def parse_dataset_path_items(raw_items: List[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for raw in raw_items:
+        if "=" in raw:
+            dataset, path = raw.split("=", 1)
+        else:
+            dataset, path = raw.split(":", 1)
+        dataset = dataset.strip()
+        path = path.strip()
+        if dataset and path:
+            out[dataset] = path
+    return out
+
+
+def distill_target_for_dataset(args, dataset: str) -> str:
+    return parse_dataset_path_items(args.distill_target).get(dataset, "")
+
+
 def dataset_cmd(args, dataset: str) -> List[str]:
     cmd = [
         "python",
@@ -51,6 +69,8 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         args.run_tag,
         "--model_types",
         args.model_types,
+        "--framework_profile",
+        getattr(args, "framework_profile", "paper_unified"),
         "--tower2_epochs",
         str(args.tower2_epochs),
         "--tower2_early_stop_patience",
@@ -59,6 +79,20 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         str(args.paired_view_weight),
         "--paired_consistency_weight",
         str(args.paired_consistency_weight),
+        "--paired_alignment_weight",
+        str(args.paired_alignment_weight),
+        "--paired_crossview_contrastive_weight",
+        str(args.paired_crossview_contrastive_weight),
+        "--paired_crossview_temperature",
+        str(args.paired_crossview_temperature),
+        "--paired_variance_weight",
+        str(args.paired_variance_weight),
+        "--paired_variance_target",
+        str(args.paired_variance_target),
+        "--paired_covariance_weight",
+        str(args.paired_covariance_weight),
+        "--view_domain_adversarial_weight",
+        str(args.view_domain_adversarial_weight),
         "--consistency_weight",
         str(args.consistency_weight),
         "--meta_dropout_prob",
@@ -82,6 +116,28 @@ def dataset_cmd(args, dataset: str) -> List[str]:
         "--plan_json",
         str(Path("reasoningDataset") / dataset / f"recommended_experiment_plan_{args.run_tag}.json"),
     ]
+    distill_path = distill_target_for_dataset(args, dataset)
+    if distill_path:
+        cmd += [
+            "--distill_targets_json",
+            distill_path,
+            "--distill_weight",
+            str(args.distill_weight),
+            "--distill_class_prior_weight",
+            str(args.distill_class_prior_weight),
+            "--distill_temperature",
+            str(args.distill_temperature),
+            "--distill_min_confidence",
+            str(args.distill_min_confidence),
+            "--distill_max_confidence",
+            str(args.distill_max_confidence),
+            "--distill_confidence_power",
+            str(args.distill_confidence_power),
+            "--distill_min_coverage",
+            str(args.distill_min_coverage),
+            "--distill_low_coverage_action",
+            args.distill_low_coverage_action,
+        ]
     if not args.enable_slot_stacker:
         cmd.append("--no-enable_slot_stacker")
     if not args.enable_soft_expert_gate:
@@ -122,6 +178,8 @@ def child_plan_summary(dataset: str, cmd: List[str]) -> Dict[str, Any]:
         "run_tag",
         "embedding_suffix",
         "paired_embedding_suffix",
+        "paired_output_suffix",
+        "tower1_output_dir",
         "base_selector_input",
         "paired_prior_output",
         "slot_stacker_output",
@@ -171,6 +229,13 @@ def write_suite_plan(
         "experiment_config": {
             "paired_view_weight": args.paired_view_weight,
             "paired_consistency_weight": args.paired_consistency_weight,
+            "paired_alignment_weight": args.paired_alignment_weight,
+            "paired_crossview_contrastive_weight": args.paired_crossview_contrastive_weight,
+            "paired_crossview_temperature": args.paired_crossview_temperature,
+            "paired_variance_weight": args.paired_variance_weight,
+            "paired_variance_target": args.paired_variance_target,
+            "paired_covariance_weight": args.paired_covariance_weight,
+            "view_domain_adversarial_weight": args.view_domain_adversarial_weight,
             "consistency_weight": args.consistency_weight,
             "meta_dropout_prob": args.meta_dropout_prob,
             "embedding_dropout_prob": args.embedding_dropout_prob,
@@ -180,12 +245,22 @@ def write_suite_plan(
             "tower2_epochs": args.tower2_epochs,
             "tower2_early_stop_patience": args.tower2_early_stop_patience,
             "model_types": args.model_types,
+            "framework_profile": getattr(args, "framework_profile", "paper_unified"),
             "seed": args.seed,
             "flow_pooling": args.flow_pooling,
             "multi_view_gate_entropy_weight": args.multi_view_gate_entropy_weight,
             "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
             "enable_slot_stacker": args.enable_slot_stacker,
             "enable_soft_expert_gate": args.enable_soft_expert_gate,
+            "distill_targets": parse_dataset_path_items(args.distill_target),
+            "distill_weight": args.distill_weight,
+            "distill_class_prior_weight": args.distill_class_prior_weight,
+            "distill_temperature": args.distill_temperature,
+            "distill_min_confidence": args.distill_min_confidence,
+            "distill_max_confidence": args.distill_max_confidence,
+            "distill_confidence_power": args.distill_confidence_power,
+            "distill_min_coverage": args.distill_min_coverage,
+            "distill_low_coverage_action": args.distill_low_coverage_action,
         },
         "cuda": cuda,
         "dataset_status": [dataset_status(dataset) for dataset in datasets],
@@ -212,16 +287,38 @@ def main() -> None:
     ap.add_argument("--datasets", default="vpn-app,tls-120")
     ap.add_argument("--run_tag", default="paired_ipport")
     ap.add_argument("--model_types", default="graph,seq")
+    ap.add_argument(
+        "--framework_profile",
+        choices=["legacy", "paper_unified"],
+        default="paper_unified",
+        help="Shared framework profile passed to every dataset child plan; paper_unified is the paper-facing default.",
+    )
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
     ap.add_argument("--paired_view_weight", type=float, default=0.2)
     ap.add_argument("--paired_consistency_weight", type=float, default=0.1)
+    ap.add_argument("--paired_alignment_weight", type=float, default=0.0)
+    ap.add_argument("--paired_crossview_contrastive_weight", type=float, default=0.0)
+    ap.add_argument("--paired_crossview_temperature", type=float, default=0.07)
+    ap.add_argument("--paired_variance_weight", type=float, default=0.0)
+    ap.add_argument("--paired_variance_target", type=float, default=0.04)
+    ap.add_argument("--paired_covariance_weight", type=float, default=0.0)
+    ap.add_argument("--view_domain_adversarial_weight", type=float, default=0.0)
     ap.add_argument("--consistency_weight", type=float, default=0.05)
     ap.add_argument("--meta_dropout_prob", type=float, default=0.1)
     ap.add_argument("--embedding_dropout_prob", type=float, default=0.05)
     ap.add_argument("--window_dropout_prob", type=float, default=0.1)
     ap.add_argument("--edge_attr_dropout_prob", type=float, default=0.1)
     ap.add_argument("--confidence_penalty_weight", type=float, default=0.0)
+    ap.add_argument("--distill_target", action="append", default=[], help="Dataset-specific distillation teacher as DATASET=JSON or DATASET:JSON.")
+    ap.add_argument("--distill_weight", type=float, default=0.0)
+    ap.add_argument("--distill_class_prior_weight", type=float, default=0.0)
+    ap.add_argument("--distill_temperature", type=float, default=2.0)
+    ap.add_argument("--distill_min_confidence", type=float, default=0.0)
+    ap.add_argument("--distill_max_confidence", type=float, default=0.0)
+    ap.add_argument("--distill_confidence_power", type=float, default=0.0)
+    ap.add_argument("--distill_min_coverage", type=float, default=0.0)
+    ap.add_argument("--distill_low_coverage_action", choices=["warn", "disable_flow", "fail"], default="warn")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--flow_pooling", choices=["mean", "attention", "late_fusion", "transformer", "multi_view"], default="mean")
     ap.add_argument("--multi_view_gate_entropy_weight", type=float, default=0.0)

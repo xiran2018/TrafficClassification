@@ -127,6 +127,29 @@ def _counter_summary(index: dict[str, Counter]) -> dict:
     }
 
 
+def _per_class_conflict_summary(
+    rows: list[dict],
+    level: str,
+    index: dict[str, Counter],
+) -> dict[str, dict[str, float | int]]:
+    support: Counter = Counter()
+    conflicting: Counter = Counter()
+    for row in rows:
+        label = int(row["label_id"])
+        support[label] += 1
+        counts = index[packet_signature(row, level)]
+        if len(counts) > 1:
+            conflicting[label] += 1
+    return {
+        str(label): {
+            "support": int(count),
+            "samples_in_conflicting_signatures": int(conflicting[label]),
+            "conflicting_sample_rate": float(conflicting[label] / count),
+        }
+        for label, count in sorted(support.items())
+    }
+
+
 def audit_level(
     train_rows: list[dict],
     test_rows: list[dict],
@@ -147,9 +170,17 @@ def audit_level(
         train_lookup_correct += int(prediction == int(row["label_id"]))
         train_lookup_count += 1
     oracle_correct = sum(max(counts.values()) for counts in test_index.values())
+    train_summary = _counter_summary(train_index)
+    train_summary["per_class"] = _per_class_conflict_summary(
+        train_rows, level, train_index
+    )
+    test_summary = _counter_summary(test_index)
+    test_summary["per_class"] = _per_class_conflict_summary(
+        test_rows, level, test_index
+    )
     return {
-        "train": _counter_summary(train_index),
-        "test": _counter_summary(test_index),
+        "train": train_summary,
+        "test": test_summary,
         "test_seen_in_train": seen,
         "test_seen_rate": seen / len(test_rows) if test_rows else 0.0,
         "test_seen_with_conflicting_train_labels": ambiguous,
@@ -221,6 +252,15 @@ def build_report(
     test_rows: list[dict],
     probabilities: np.ndarray | None = None,
 ) -> dict:
+    for split_name, rows in (("train", train_rows), ("test", test_rows)):
+        missing = sum(
+            "l3_hex_prefix" not in (row.get("meta") or {}) for row in rows
+        )
+        if missing:
+            raise ValueError(
+                f"{split_name} rows missing meta.l3_hex_prefix: {missing}/{len(rows)}; "
+                "use packet_index.jsonl rather than packet_auxiliary.jsonl"
+            )
     levels = ("raw", "endpoint", "session", "semantic")
     train_indexes = {level: signature_index(train_rows, level) for level in levels}
     report = {

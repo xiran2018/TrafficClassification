@@ -1,0 +1,710 @@
+{
+  "framework_consistency": {
+    "consistent": true,
+    "framework_profile": "paper_unified",
+    "framework_profile_description": "CCF-A paper profile: both tasks use field-aware shortcut intervention, current-packet byte/payload and structural channels, semantic channel availability, validation-only selection, and label-free/validation-only calibration guards.",
+    "shared_core_modules": [
+      "per_flow_split_guard",
+      "field_aware_header_policy",
+      "current_packet_structural_encoder",
+      "current_packet_byte_payload_encoder",
+      "semantic_tower1_channel",
+      "semantic_structural_gate",
+      "cross_fold_stability",
+      "validation_only_selection",
+      "label_free_calibration_guard"
+    ],
+    "required_selector_slots": [
+      "base",
+      "graph",
+      "seq",
+      "prior_base",
+      "emb_lr",
+      "emb_et",
+      "proto_emb",
+      "paired",
+      "slot_stacker",
+      "soft_gate"
+    ],
+    "required_active_modules": [
+      "packet_embedding_backbone",
+      "flow_base_expert",
+      "validation_gated_selector"
+    ],
+    "required_safety_modules": [
+      "bootstrap_guard",
+      "target_shift_guard"
+    ],
+    "candidate_modules": [
+      "expert_switch_or_fusion",
+      "cross_fold_consensus",
+      "class_bias_calibration_candidate",
+      "trainable_multiview_gate",
+      "selector_expert_slots"
+    ],
+    "selector_slot_uniform": true,
+    "selector_slots": [
+      "base",
+      "graph",
+      "seq",
+      "prior_base",
+      "emb_lr",
+      "emb_et",
+      "proto_emb",
+      "paired",
+      "slot_stacker",
+      "soft_gate"
+    ],
+    "dataset_checks": [
+      {
+        "dataset": "vpn-app",
+        "consistent": true,
+        "failures": [],
+        "expert_state": "active:cross_fold_consensus:vote_priority",
+        "selector_slot_summary": {
+          "mode": "crossfold_consensus_identity_compatible",
+          "slots": [
+            "base",
+            "graph",
+            "seq",
+            "prior_base",
+            "emb_lr",
+            "emb_et",
+            "proto_emb",
+            "paired",
+            "slot_stacker",
+            "soft_gate"
+          ],
+          "matches_required": true,
+          "provided": [],
+          "identity_from_base": [
+            "base",
+            "graph",
+            "seq",
+            "prior_base",
+            "emb_lr",
+            "emb_et",
+            "proto_emb",
+            "paired",
+            "slot_stacker",
+            "soft_gate"
+          ],
+          "extra_provided": [],
+          "consensus_members": [
+            "fold0",
+            "fold1",
+            "fold2"
+          ],
+          "num_slots": 10,
+          "num_provided": 0,
+          "num_identity": 10,
+          "num_extra": 0,
+          "num_consensus_members": 3
+        }
+      },
+      {
+        "dataset": "tls-120",
+        "consistent": true,
+        "failures": [],
+        "expert_state": "active:cross_fold_consensus:log_mean",
+        "selector_slot_summary": {
+          "mode": "crossfold_consensus_identity_compatible",
+          "slots": [
+            "base",
+            "graph",
+            "seq",
+            "prior_base",
+            "emb_lr",
+            "emb_et",
+            "proto_emb",
+            "paired",
+            "slot_stacker",
+            "soft_gate"
+          ],
+          "matches_required": true,
+          "provided": [],
+          "identity_from_base": [
+            "base",
+            "graph",
+            "seq",
+            "prior_base",
+            "emb_lr",
+            "emb_et",
+            "proto_emb",
+            "paired",
+            "slot_stacker",
+            "soft_gate"
+          ],
+          "extra_provided": [],
+          "consensus_members": [
+            "fold0",
+            "fold1",
+            "fold2"
+          ],
+          "num_slots": 10,
+          "num_provided": 0,
+          "num_identity": 10,
+          "num_extra": 0,
+          "num_consensus_members": 3
+        }
+      }
+    ],
+    "interpretation": "The paper-facing profile is `paper_unified`. All datasets pass through the same shared packet-to-flow core modules, backbone, base expert, validation-gated selector, bootstrap guard, target-shift guard, cross-fold consensus option, and candidate expert/calibration family. For consensus results, per-fold safety guards are inherited from the selected fold candidates and the consensus itself is label-free on the shared test set. When unified expert slots are configured, missing dataset-specific experts are routed as identity candidates. Dataset-specific validation may activate, gate off, or leave candidate experts as identity. When multi-view pooling is evaluated, learned branch-gate weights are reported as trainable module evidence."
+  },
+  "paper_audit_gates": {
+    "unified_framework_status": "pass",
+    "paper_defaults_ok": true,
+    "shared_core_match": true,
+    "paper_unified_flow_manifest_passes": 4,
+    "paper_unified_packet_manifest_passes": 24,
+    "flow_scope": [
+      "vpn-app",
+      "tls-120"
+    ],
+    "packet_scope": [
+      "vpn-app",
+      "tls-120",
+      "vpn-service",
+      "vpn-binary",
+      "ustc-app",
+      "ustc-binary"
+    ],
+    "flow_default_count": 2,
+    "packet_default_count": 6,
+    "flow_defaults_pass": true,
+    "packet_defaults_pass": true
+  },
+  "claims": [
+    {
+      "dataset": "vpn-app",
+      "accuracy": 0.7511961722488039,
+      "macro_f1": 0.7522269064093092,
+      "target_accuracy": 0.74,
+      "target_macro_f1": 0.65,
+      "point_target_met": true,
+      "ci_target_met": false,
+      "claim_strength": "point_pass_ci_mixed",
+      "accuracy_ci95": [
+        0.7287230861244018,
+        0.771561004784689
+      ],
+      "macro_f1_ci95": [
+        0.7181101362200663,
+        0.7830008844045173
+      ],
+      "calibration": null,
+      "module_usage": {
+        "packet_embedding_backbone": "active",
+        "flow_base_expert": "active",
+        "validation_gated_selector": "active",
+        "bootstrap_guard": "inherited",
+        "target_shift_guard": "inherited",
+        "cross_fold_consensus": "active",
+        "expert_switch_or_fusion": "active:cross_fold_consensus:vote_priority",
+        "class_bias_calibration_candidate": "evaluated",
+        "trainable_multiview_gate": "not_observed",
+        "selector_expert_slots": "crossfold_consensus_identity_compatible:10;provided:0;identity:10;extra:0"
+      },
+      "selector_slot_summary": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "extra_provided": [],
+        "consensus_members": [
+          "fold0",
+          "fold1",
+          "fold2"
+        ],
+        "num_slots": 10,
+        "num_provided": 0,
+        "num_identity": 10,
+        "num_extra": 0,
+        "num_consensus_members": 3
+      },
+      "multi_view_gate": null,
+      "selector": "cross_fold_consensus auto_confidence->vote_priority, inputs=3, mean_conf=0.9345",
+      "num_flows": 1672,
+      "content_unique_accuracy": 0.7531914893617021,
+      "content_unique_macro_f1": 0.756951406206018,
+      "content_group_accuracy_ci95": [
+        0.7297779002253988,
+        0.7729199371775571
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7171382334799626,
+        0.7821503767788687
+      ],
+      "content_group_count": 1645,
+      "content_group_rows": 1672,
+      "content_group_ci_target_met": false
+    },
+    {
+      "dataset": "tls-120",
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "point_target_met": true,
+      "ci_target_met": true,
+      "claim_strength": "strong",
+      "accuracy_ci95": [
+        0.8391050077976088,
+        0.8526251949402184
+      ],
+      "macro_f1_ci95": [
+        0.8195869151877188,
+        0.8353929952448997
+      ],
+      "calibration": null,
+      "module_usage": {
+        "packet_embedding_backbone": "active",
+        "flow_base_expert": "active",
+        "validation_gated_selector": "active",
+        "bootstrap_guard": "inherited",
+        "target_shift_guard": "inherited",
+        "cross_fold_consensus": "active",
+        "expert_switch_or_fusion": "active:cross_fold_consensus:log_mean",
+        "class_bias_calibration_candidate": "evaluated",
+        "trainable_multiview_gate": "not_observed",
+        "selector_expert_slots": "crossfold_consensus_identity_compatible:10;provided:0;identity:10;extra:0"
+      },
+      "selector_slot_summary": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "extra_provided": [],
+        "consensus_members": [
+          "fold0",
+          "fold1",
+          "fold2"
+        ],
+        "num_slots": 10,
+        "num_provided": 0,
+        "num_identity": 10,
+        "num_extra": 0,
+        "num_consensus_members": 3
+      },
+      "multi_view_gate": null,
+      "selector": "cross_fold_consensus auto_confidence->log_mean, inputs=3, mean_conf=0.7305",
+      "num_flows": 11542,
+      "content_unique_accuracy": 0.8461271876624502,
+      "content_unique_macro_f1": 0.8291911492056544,
+      "content_group_accuracy_ci95": [
+        0.8397158204817189,
+        0.8524540807485704
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196920868528031,
+        0.8358509929822964
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "content_group_ci_target_met": true
+    }
+  ],
+  "ablations": [
+    {
+      "dataset": "vpn-app",
+      "stage": "base constrained ensemble",
+      "delta_accuracy": 0.0,
+      "delta_macro_f1": 0.0,
+      "delta_accuracy_ci95": [
+        0.0,
+        0.0
+      ],
+      "delta_macro_f1_ci95": [
+        0.0,
+        0.0
+      ],
+      "effect": "uncertain_or_neutral",
+      "note": "strong base",
+      "selector": "best=0.91, emb_et=0.09"
+    },
+    {
+      "dataset": "vpn-app",
+      "stage": "unsafe reliability fusion",
+      "delta_accuracy": -0.053229665071770293,
+      "delta_macro_f1": -0.09244758582697532,
+      "delta_accuracy_ci95": [
+        -0.06758373205741625,
+        -0.03947368421052633
+      ],
+      "delta_macro_f1_ci95": [
+        -0.11253970552817236,
+        -0.07353683683990542
+      ],
+      "effect": "harmful",
+      "note": "validation gain, target shift",
+      "selector": "reliability_fusion"
+    },
+    {
+      "dataset": "vpn-app",
+      "stage": "calibration-enabled selector",
+      "delta_accuracy": -0.014952153110047828,
+      "delta_macro_f1": -0.03168676805350812,
+      "delta_accuracy_ci95": [
+        -0.02064892344497605,
+        -0.008971291866028741
+      ],
+      "delta_macro_f1_ci95": [
+        -0.044889428690870765,
+        -0.01815992687953454
+      ],
+      "effect": "harmful",
+      "note": "extra candidate, still unsafe",
+      "selector": "threshold_switch:emb_lr"
+    },
+    {
+      "dataset": "vpn-app",
+      "stage": "safe selector",
+      "delta_accuracy": 0.0,
+      "delta_macro_f1": 0.0,
+      "delta_accuracy_ci95": [
+        0.0,
+        0.0
+      ],
+      "delta_macro_f1_ci95": [
+        0.0,
+        0.0
+      ],
+      "effect": "uncertain_or_neutral",
+      "note": "target-shift fallback",
+      "selector": "fallback; reject reliability_fusion"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "graph/seq base",
+      "delta_accuracy": 0.0,
+      "delta_macro_f1": 0.0,
+      "delta_accuracy_ci95": [
+        0.0,
+        0.0
+      ],
+      "delta_macro_f1_ci95": [
+        0.0,
+        0.0
+      ],
+      "effect": "uncertain_or_neutral",
+      "note": "strong base",
+      "selector": "graph=0.65, seq=0.35"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "strict safe selector",
+      "delta_accuracy": 0.0,
+      "delta_macro_f1": 0.0,
+      "delta_accuracy_ci95": [
+        0.0,
+        0.0
+      ],
+      "delta_macro_f1_ci95": [
+        0.0,
+        0.0
+      ],
+      "effect": "uncertain_or_neutral",
+      "note": "strict bootstrap fallback",
+      "selector": "fallback; reject threshold_switch"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "tolerant safe selector",
+      "delta_accuracy": 0.0,
+      "delta_macro_f1": 0.00025031937805997106,
+      "delta_accuracy_ci95": [
+        -0.0010851672153872087,
+        0.0010396811644428627
+      ],
+      "delta_macro_f1_ci95": [
+        -0.0009934667776488686,
+        0.0012030803732003986
+      ],
+      "effect": "uncertain_or_neutral",
+      "note": "low-shift seq switch",
+      "selector": "threshold_switch:seq"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "unified-slot stacker",
+      "delta_accuracy": 0.008230809218506274,
+      "delta_macro_f1": 0.012763436507321368,
+      "delta_accuracy_ci95": [
+        0.0035890660197539365,
+        0.012389533876277947
+      ],
+      "delta_macro_f1_ci95": [
+        0.007389965197312873,
+        0.017358947582208656
+      ],
+      "effect": "helpful",
+      "note": "trainable slot stacker upper/probe",
+      "selector": "-"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "guarded slot-stacker selector",
+      "delta_accuracy": 0.0036388840755501306,
+      "delta_macro_f1": 0.0037956549132758255,
+      "delta_accuracy_ci95": [
+        0.0017328019407382156,
+        0.005631606307399065
+      ],
+      "delta_macro_f1_ci95": [
+        0.0018301038827947093,
+        0.005830570600141319
+      ],
+      "effect": "helpful",
+      "note": "low-shift stacker switch",
+      "selector": "threshold_switch:slot_stacker"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "soft expert gate",
+      "delta_accuracy": 0.00649800727776817,
+      "delta_macro_f1": 0.007348387904340781,
+      "delta_accuracy_ci95": [
+        0.003985444463697804,
+        0.009056056142782879
+      ],
+      "delta_macro_f1_ci95": [
+        0.004805857488986371,
+        0.009846202329855377
+      ],
+      "effect": "helpful",
+      "note": "trainable expert weighting",
+      "selector": "soft_expert_gate"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "soft-gate calibrated selector",
+      "delta_accuracy": 0.008750649800727817,
+      "delta_macro_f1": 0.00996310933613298,
+      "delta_accuracy_ci95": [
+        0.006019320741639242,
+        0.011746231155778889
+      ],
+      "delta_macro_f1_ci95": [
+        0.007067507606603716,
+        0.01340238919650288
+      ],
+      "effect": "helpful",
+      "note": "class-bias calibrated soft gate",
+      "selector": "class_bias_calibration"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "coverage-audited distill student fusion",
+      "delta_accuracy": -0.04721885288511529,
+      "delta_macro_f1": -0.06683659519162932,
+      "delta_accuracy_ci95": [
+        -0.05614278287991681,
+        -0.03898371166175706
+      ],
+      "delta_macro_f1_ci95": [
+        -0.07820154970553542,
+        -0.057628274187722
+      ],
+      "effect": "harmful",
+      "note": "single-student graph/seq distillation; lower than consensus teacher",
+      "selector": "graph=0.55, seq=0.45"
+    },
+    {
+      "dataset": "tls-120",
+      "stage": "coverage-audited distill student selector",
+      "delta_accuracy": 0.006324727083694359,
+      "delta_macro_f1": 0.010678572607279557,
+      "delta_accuracy_ci95": [
+        0.0020793623288858365,
+        0.010269017501299604
+      ],
+      "delta_macro_f1_ci95": [
+        0.006330064418286835,
+        0.015362380191224344
+      ],
+      "effect": "helpful",
+      "note": "student candidate admitted through unified expert slots",
+      "selector": "class_bias_calibration"
+    }
+  ],
+  "content_unique": [
+    {
+      "dataset": "vpn-app",
+      "path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence_content_unique.json",
+      "original_accuracy": 0.7511961722488039,
+      "original_macro_f1": 0.7522269064093092,
+      "content_unique_accuracy": 0.7531914893617021,
+      "content_unique_macro_f1": 0.756951406206018,
+      "delta_accuracy": 0.0019953171128982428,
+      "delta_macro_f1": 0.004724499796708748,
+      "input_flows": 1672,
+      "unique_content_flows": 1645,
+      "duplicate_content_groups": 27,
+      "duplicate_rows_removed": 27,
+      "accuracy_ci95": [
+        0.7325227963525835,
+        0.774468085106383
+      ],
+      "macro_f1_ci95": [
+        0.7246220395051479,
+        0.7835969367701403
+      ],
+      "bootstrap_samples": 2000,
+      "content_group_accuracy_ci95": [
+        0.7297779002253988,
+        0.7729199371775571
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7171382334799626,
+        0.7821503767788687
+      ],
+      "content_group_bootstrap_samples": 2000,
+      "content_group_count": 1645,
+      "content_group_rows": 1672
+    },
+    {
+      "dataset": "tls-120",
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence_content_unique.json",
+      "original_accuracy": 0.8461271876624502,
+      "original_macro_f1": 0.8291911492056544,
+      "content_unique_accuracy": 0.8461271876624502,
+      "content_unique_macro_f1": 0.8291911492056544,
+      "delta_accuracy": 0.0,
+      "delta_macro_f1": 0.0,
+      "input_flows": 11542,
+      "unique_content_flows": 11542,
+      "duplicate_content_groups": 0,
+      "duplicate_rows_removed": 0,
+      "accuracy_ci95": [
+        0.8397158204817189,
+        0.8524540807485704
+      ],
+      "macro_f1_ci95": [
+        0.8196920868528031,
+        0.8358509929822964
+      ],
+      "bootstrap_samples": 2000,
+      "content_group_accuracy_ci95": [
+        0.8397158204817189,
+        0.8524540807485704
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196920868528031,
+        0.8358509929822964
+      ],
+      "content_group_bootstrap_samples": 2000,
+      "content_group_count": 11542,
+      "content_group_rows": 11542
+    }
+  ],
+  "recommendations": [
+    {
+      "dataset": "vpn-app",
+      "target_met": true,
+      "raw_best_accuracy": 0.7511961722488039,
+      "raw_best_macro_f1": 0.7522269064093092,
+      "raw_best_path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+      "paper_safe_accuracy": 0.7511961722488039,
+      "paper_safe_macro_f1": 0.7522269064093092,
+      "paper_safe_path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+      "raw_minus_paper_safe_accuracy": 0.0,
+      "raw_minus_paper_safe_macro_f1": 0.0,
+      "raw_and_paper_safe_same_path": true,
+      "recommendation": "Fresh flow-aware paired-view probes are also negative. Do not increase Tower-2 paired IP/port-randomization weight. Content-grouped robustness evidence is now the promotion gate; next prioritize coverage-audited consensus distillation into trainable graph/seq models. Keep native structural pretraining as a negative ablation unless its objective or gate is redesigned."
+    },
+    {
+      "dataset": "tls-120",
+      "target_met": true,
+      "raw_best_accuracy": 0.8475134292150407,
+      "raw_best_macro_f1": 0.8304026568985646,
+      "raw_best_path": "reasoningDataset/tls-120/test_crossfold_consensus_rgssi_auto_confidence.json",
+      "paper_safe_accuracy": 0.8461271876624502,
+      "paper_safe_macro_f1": 0.8291911492056544,
+      "paper_safe_path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json",
+      "raw_minus_paper_safe_accuracy": 0.0013862415525904836,
+      "raw_minus_paper_safe_macro_f1": 0.0012115076929102297,
+      "raw_and_paper_safe_same_path": false,
+      "recommendation": "Paper-safe target is met; keep raw-best probes as ablations unless validation-gated selection and target-shift guards accept them into the framework result."
+    }
+  ],
+  "paper_positioning": {
+    "strong_claim_datasets": [
+      "tls-120"
+    ],
+    "point_pass_ci_mixed_datasets": [
+      "vpn-app"
+    ],
+    "content_group_ci_mixed_datasets": [
+      "vpn-app"
+    ],
+    "evidence_only_datasets": [],
+    "harmful_ablation_count": 3,
+    "neutral_or_uncertain_ablation_count": 5,
+    "recommended_claims": [
+      "The method should be framed as a unified candidate-expert traffic classification framework with validation-gated safety controls.",
+      "The strongest performance claim is supported on datasets whose point estimates and bootstrap lower bounds both pass target gates.",
+      "Dataset-specific behavior should be described as automatic expert activation, gating, or identity fallback inside the same module family."
+    ],
+    "risk_controls": [
+      "Use bootstrap and target-shift guards to prevent validation-favorable but target-unstable experts from overriding the base model.",
+      "Report harmful expert candidates as negative ablations instead of hiding them; they motivate the gated-selector design.",
+      "Separate strong performance claims from exploratory evidence when confidence intervals are wide."
+    ],
+    "reviewer_risks": [
+      "Some datasets pass point targets but not bootstrap lower-bound targets; avoid overclaiming statistical dominance.",
+      "Some datasets pass point targets but not content-grouped bootstrap lower-bound targets; present them as point-estimate gains until group-level stability improves."
+    ],
+    "next_experiments": [
+      "Do not increase Tower-2 paired IP/port-randomization weight; fresh flow-aware paired-view probes are negative.",
+      "Use content-grouped bootstrap lower bounds as the VPN promotion gate, and prioritize coverage-audited consensus distillation for group-level stability.",
+      "Distill the cross-fold consensus back into trainable graph/seq models; keep native structural pretraining as a negative ablation until its objective or gate is redesigned.",
+      "Keep per-packet-split datasets outside the flow-level main table unless a leakage-free per-flow split is released."
+    ]
+  }
+}

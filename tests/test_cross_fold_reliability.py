@@ -7,6 +7,8 @@ from cross_fold_consensus import (
     fuse_probs,
     validation_class_reliability,
     validation_confusion_likelihood,
+    selective_anchor_vote,
+    validation_selective_threshold,
 )
 
 
@@ -51,6 +53,31 @@ class CrossFoldReliabilityTest(unittest.TestCase):
         np.testing.assert_allclose(posterior.sum(axis=1), 1.0)
         np.testing.assert_allclose(prior.sum(), 1.0)
         self.assertGreater(iterations, 0)
+
+    def test_selective_anchor_threshold_uses_validation_only(self):
+        payload = {
+            "valid_y_true": [0, 1, 1, 0],
+            "valid_prob": [
+                [0.99, 0.01],
+                [0.02, 0.98],
+                [0.80, 0.20],
+                [0.55, 0.45],
+            ],
+        }
+        threshold, report = validation_selective_threshold(
+            payload, min_precision=1.0, min_coverage=0.25
+        )
+        self.assertAlmostEqual(threshold, 0.98)
+        self.assertEqual(report["selected_count"], 2)
+        self.assertAlmostEqual(report["validation_precision"], 1.0)
+
+    def test_selective_anchor_overrides_vote_only_above_threshold(self):
+        anchor = np.asarray([[0.95, 0.05], [0.55, 0.45]])
+        weak_a = np.asarray([[0.1, 0.9], [0.1, 0.9]])
+        weak_b = np.asarray([[0.2, 0.8], [0.2, 0.8]])
+        fused, count = selective_anchor_vote([anchor, weak_a, weak_b], 0.9)
+        self.assertEqual(count, 1)
+        self.assertEqual(fused.argmax(axis=1).tolist(), [0, 1])
 
 
 if __name__ == "__main__":

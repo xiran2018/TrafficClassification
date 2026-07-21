@@ -24,6 +24,14 @@ DEFAULT_PROBES = {
             "best + paired seq constrained residual",
             "reasoningDataset/vpn-app/test_fusion_best_paired_seqprobe_minbase90_valid_acc.json",
         ),
+        (
+            "fresh flow-aware paired strong invariance",
+            "reasoningDataset/vpn-app/test_fusion_graph_seq_rawproj_flowaware_change_weight_split2_retrain_stage8_flowaware_stage8_crossview_ci_iter01_safe_prior_residual.json",
+        ),
+        (
+            "fresh flow-aware paired gentle intervention",
+            "reasoningDataset/vpn-app/test_fusion_graph_seq_rawproj_flowaware_change_weight_split2_retrain_stage8_flowaware_stage8_gentle_ci_iter02_safe_prior_residual.json",
+        ),
     ],
 }
 
@@ -121,6 +129,13 @@ def decide_recommendation(
         and row.get("delta_f1_vs_best", 0.0) < -0.005
     ]
     if dataset == "vpn-app" and harmful_probes:
+        fresh_harmful = [row for row in harmful_probes if str(row.get("name", "")).startswith("fresh flow-aware paired")]
+        if fresh_harmful:
+            return (
+                "Fresh flow-aware paired-view probes are also negative. Do not increase Tower-2 paired IP/port-randomization weight. "
+                "Content-grouped robustness evidence is now the promotion gate; next prioritize coverage-audited consensus distillation into trainable graph/seq models. "
+                "Keep native structural pretraining as a negative ablation unless its objective or gate is redesigned."
+            )
         if cuda.get("available"):
             return (
                 "Current paired-view probes are negative on old embeddings. Run the full Stage-8 A800 path next: "

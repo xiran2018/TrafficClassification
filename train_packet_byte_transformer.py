@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -15,14 +16,100 @@ from tqdm import tqdm
 
 from audit_packet_identifiability import packet_signature
 from models.packet_byte_transformer import PacketByteTransformer
+from models.native_flow_encoder import NATIVE_PACKET_PRETRAINING_PROTOCOL
 from models.qwen_packet_multitask import flow_aware_contrastive_loss
 from packet_eval_utils import packet_classification_metrics
-from train_packet_feature_expert import packet_features
 from train_tower1_multitask import FlowBalancedPacketBatchSampler, load_label_names, stable_flow_id
+from native_flow_data import protocol_field_ids
+from traffic_utils import current_packet_meta_feature_vector
 
 
 PAD_TOKEN = 256
 MASK_TOKEN = 257
+
+
+def sha256_file(path: str, cache: dict[str, str]) -> str:
+    key = str(Path(path).expanduser().resolve())
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    h = hashlib.sha256()
+    with open(key, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    cache[key] = digest
+    return digest
+
+
+def packet_content_group_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    content_group_ids: np.ndarray | None,
+    num_classes: int,
+    label_names: list[str],
+) -> dict:
+    if content_group_ids is None or len(content_group_ids) != len(y_true):
+        return {}
+    buckets: dict[int, list[int]] = {}
+    for idx, group_id in enumerate(content_group_ids.tolist()):
+        buckets.setdefault(int(group_id), []).append(idx)
+    if not buckets:
+        return {}
+    group_true, group_pred = [], []
+    for group_id, indices in buckets.items():
+        labels = {int(y_true[index]) for index in indices}
+        if len(labels) != 1:
+            raise ValueError(
+                f"content_group_id={group_id} has conflicting labels: {sorted(labels)}"
+            )
+        votes = np.bincount([int(y_pred[index]) for index in indices], minlength=num_classes)
+        group_true.append(next(iter(labels)))
+        group_pred.append(int(votes.argmax()))
+    metrics = packet_classification_metrics(
+        np.asarray(group_true, dtype=np.int64),
+        np.asarray(group_pred, dtype=np.int64),
+        num_classes,
+        label_names,
+    )
+    return {
+        "content_group_accuracy": metrics["accuracy"],
+        "content_group_macro_f1": metrics["macro_f1"],
+        "content_group_count": len(group_true),
+        "content_group_rows": int(len(y_true)),
+    }
+
+
+def packet_content_group_mean_loss(
+    per_sample_loss: torch.Tensor,
+    content_group_ids: torch.Tensor | None,
+) -> torch.Tensor:
+    if content_group_ids is None:
+        raise ValueError(
+            "--content_group_loss_reduction group_mean requires pcap_path-derived "
+            "content_group_id metadata in packet_index.jsonl"
+        )
+    if int(content_group_ids.numel()) != int(per_sample_loss.numel()):
+        raise ValueError("content_group_ids length must match packet losses")
+    buckets: dict[int, list[int]] = {}
+    for idx, group_id in enumerate(content_group_ids.detach().cpu().tolist()):
+        buckets.setdefault(int(group_id), []).append(idx)
+    if not buckets:
+        raise ValueError("--content_group_loss_reduction group_mean found no content groups")
+    return torch.stack([per_sample_loss[indices].mean() for indices in buckets.values()]).mean()
+
+
+def packet_ce_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    class_weights: torch.Tensor,
+    content_group_ids: torch.Tensor | None,
+    reduction: str,
+) -> torch.Tensor:
+    losses = F.cross_entropy(logits, labels, weight=class_weights, reduction="none")
+    if reduction == "group_mean":
+        return packet_content_group_mean_loss(losses, content_group_ids)
+    return losses.mean()
 
 
 def extract_packet_payload(raw: bytes, meta: dict) -> bytes:
@@ -93,12 +180,25 @@ class PacketByteDataset(Dataset):
         max_payload_bytes: int = 0,
         build_ambiguity_targets: bool = False,
         num_classes: int | None = None,
+        semantic_embedding_cache: str = "",
+        semantic_embedding_manifest: str = "",
+        required_header_policy: str = "",
+        required_packet_context_policy: str = "",
+        intervened_semantic_embedding_cache: str = "",
+        intervened_semantic_embedding_manifest: str = "",
+        required_intervened_header_policy: str = "",
     ) -> None:
         self.rows: list[dict] = []
-        tokens, masked_tokens, lengths = [], [], []
+        self.semantic_embeddings = None
+        self.intervened_semantic_embeddings = None
+        self.semantic_dim = 0
+        tokens, masked_tokens, field_rows, lengths = [], [], [], []
         payload_tokens, payload_lengths = [], []
         metas, masked_metas, labels, flow_ids = [], [], [], []
+        content_hashes, content_group_ids = [], []
         invariant_signatures = []
+        content_cache: dict[str, str] = {}
+        hash_to_group_id: dict[str, int] = {}
         payload_width = max(1, int(max_payload_bytes))
         with open(index_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -111,6 +211,7 @@ class PacketByteDataset(Dataset):
                 if raw:
                     item[:len(raw)] = np.frombuffer(raw, dtype=np.uint8).astype(np.int64)
                 tokens.append(item)
+                field_rows.append(protocol_field_ids(full_raw, max_bytes))
                 if include_augmented:
                     masked_tokens.append(mask_session_tokens(item, len(raw)))
                 lengths.append(len(raw))
@@ -120,15 +221,137 @@ class PacketByteDataset(Dataset):
                     payload_item[:len(payload)] = np.frombuffer(payload, dtype=np.uint8).astype(np.int64)
                 payload_tokens.append(payload_item)
                 payload_lengths.append(len(payload))
-                metas.append(packet_features(row, 0, False, False, False))
+                class Meta:
+                    pass
+                meta_obj = Meta()
+                for key, value in {
+                    "direction": "",
+                    "l4": "",
+                    "tcp_flags": "",
+                    "packet_len": 0,
+                    "payload_len": 0,
+                    "iat": 0.0,
+                    "payload_entropy": 0.0,
+                    "tcp_window": -1,
+                    "full_l3_captured": False,
+                }.items():
+                    setattr(meta_obj, key, value)
+                for key, value in row["meta"].items():
+                    setattr(meta_obj, key, value)
+                metas.append(current_packet_meta_feature_vector(meta_obj))
                 if include_augmented:
-                    masked_metas.append(packet_features(row, 0, False, False, True))
+                    masked_metas.append(current_packet_meta_feature_vector(meta_obj))
                 labels.append(int(row["label_id"]))
                 flow_ids.append(stable_flow_id(str(row.get("flow_id", len(labels) - 1))))
+                pcap_path = str(row.get("pcap_path", ""))
+                if pcap_path:
+                    digest = sha256_file(pcap_path, content_cache)
+                else:
+                    digest = stable_flow_id(str(row.get("flow_id", len(labels) - 1)))
+                if digest not in hash_to_group_id:
+                    hash_to_group_id[digest] = len(hash_to_group_id)
+                content_hashes.append(digest)
+                content_group_ids.append(hash_to_group_id[digest])
                 if build_ambiguity_targets:
                     invariant_signatures.append(packet_signature(row, "session"))
-                self.rows.append({"flow_id": str(row.get("flow_id", len(labels) - 1))})
+                self.rows.append({
+                    "flow_id": str(row.get("flow_id", len(labels) - 1)),
+                    "content_group_id": hash_to_group_id[digest],
+                })
+        if semantic_embedding_cache:
+            if not semantic_embedding_manifest:
+                raise ValueError("semantic embedding cache requires its manifest")
+            with open(semantic_embedding_manifest, "r", encoding="utf-8") as handle:
+                semantic_manifest = json.load(handle)
+            if semantic_manifest.get("scope") != "strict_current_packet_row_aligned_semantic_embedding":
+                raise ValueError("semantic embedding cache has an unsupported scope")
+            if str(semantic_manifest.get("packet_index_sha256")) != sha256_file(index_path, {}):
+                raise ValueError("semantic embedding cache packet-index SHA256 mismatch")
+            if required_header_policy and str(semantic_manifest.get("header_policy")) != required_header_policy:
+                raise ValueError(
+                    "semantic embedding cache header policy mismatch: "
+                    f"observed={semantic_manifest.get('header_policy')!r} "
+                    f"required={required_header_policy!r}"
+                )
+            if (
+                required_packet_context_policy
+                and str(semantic_manifest.get("packet_context_policy"))
+                != required_packet_context_policy
+            ):
+                raise ValueError(
+                    "semantic embedding cache packet context policy mismatch: "
+                    f"observed={semantic_manifest.get('packet_context_policy')!r} "
+                    f"required={required_packet_context_policy!r}"
+                )
+            semantic_values = np.load(semantic_embedding_cache, mmap_mode="r")
+            if semantic_values.ndim != 2 or len(semantic_values) != len(labels):
+                raise ValueError(
+                    "semantic embedding cache shape mismatch: "
+                    f"observed={semantic_values.shape} packets={len(labels)}"
+                )
+            if int(semantic_manifest.get("num_packets", -1)) != len(labels):
+                raise ValueError("semantic embedding manifest packet count mismatch")
+            if int(semantic_manifest.get("embedding_dim", -1)) != semantic_values.shape[1]:
+                raise ValueError("semantic embedding manifest dimension mismatch")
+            self.semantic_embeddings = semantic_values
+            self.semantic_dim = int(semantic_values.shape[1])
+        if intervened_semantic_embedding_cache:
+            if self.semantic_embeddings is None:
+                raise ValueError("intervened semantic cache requires a factual semantic cache")
+            if not intervened_semantic_embedding_manifest:
+                raise ValueError("intervened semantic embedding cache requires its manifest")
+            with open(intervened_semantic_embedding_manifest, "r", encoding="utf-8") as handle:
+                intervened_manifest = json.load(handle)
+            if intervened_manifest.get("scope") != "strict_current_packet_row_aligned_semantic_embedding":
+                raise ValueError("intervened semantic embedding cache has an unsupported scope")
+            if str(intervened_manifest.get("packet_index_sha256")) != sha256_file(index_path, {}):
+                raise ValueError("intervened semantic embedding packet-index SHA256 mismatch")
+            if (
+                required_intervened_header_policy
+                and str(intervened_manifest.get("header_policy"))
+                != required_intervened_header_policy
+            ):
+                raise ValueError(
+                    "intervened semantic embedding header policy mismatch: "
+                    f"observed={intervened_manifest.get('header_policy')!r} "
+                    f"required={required_intervened_header_policy!r}"
+                )
+            if str(intervened_manifest.get("header_policy")) == str(
+                semantic_manifest.get("header_policy")
+            ):
+                raise ValueError("factual and intervened semantic caches use the same header policy")
+            if (
+                required_packet_context_policy
+                and str(intervened_manifest.get("packet_context_policy"))
+                != required_packet_context_policy
+            ):
+                raise ValueError(
+                    "intervened semantic embedding packet context policy mismatch: "
+                    f"observed={intervened_manifest.get('packet_context_policy')!r} "
+                    f"required={required_packet_context_policy!r}"
+                )
+            if str(intervened_manifest.get("packet_context_policy")) != str(
+                semantic_manifest.get("packet_context_policy")
+            ):
+                raise ValueError(
+                    "factual and intervened semantic caches use different packet context policies"
+                )
+            intervened_values = np.load(
+                intervened_semantic_embedding_cache, mmap_mode="r"
+            )
+            expected_shape = (len(labels), self.semantic_dim)
+            if intervened_values.ndim != 2 or tuple(intervened_values.shape) != expected_shape:
+                raise ValueError(
+                    "intervened semantic embedding cache shape mismatch: "
+                    f"observed={intervened_values.shape} expected={expected_shape}"
+                )
+            if int(intervened_manifest.get("num_packets", -1)) != len(labels):
+                raise ValueError("intervened semantic manifest packet count mismatch")
+            if int(intervened_manifest.get("embedding_dim", -1)) != self.semantic_dim:
+                raise ValueError("intervened semantic manifest dimension mismatch")
+            self.intervened_semantic_embeddings = intervened_values
         self.tokens = torch.from_numpy(np.stack(tokens))
+        self.field_ids = torch.from_numpy(np.stack(field_rows))
         self.masked_tokens = torch.from_numpy(np.stack(masked_tokens)) if include_augmented else self.tokens
         self.lengths = torch.tensor(lengths, dtype=torch.long)
         self.payload_tokens = torch.from_numpy(np.stack(payload_tokens))
@@ -137,6 +360,19 @@ class PacketByteDataset(Dataset):
         self.masked_metas = torch.from_numpy(np.stack(masked_metas)).float() if include_augmented else self.metas
         self.labels = torch.tensor(labels, dtype=torch.long)
         self.flow_ids = torch.tensor(flow_ids, dtype=torch.long)
+        self.content_group_ids = torch.tensor(content_group_ids, dtype=torch.long)
+        self.content_hashes = content_hashes
+        group_packet_counts: dict[int, int] = {}
+        for group_id in content_group_ids:
+            group_packet_counts[int(group_id)] = group_packet_counts.get(int(group_id), 0) + 1
+        self.content_group_manifest = {
+            "version": 1,
+            "method": "exact_pcap_sha256_content_groups",
+            "source_index": index_path,
+            "num_packets": len(labels),
+            "num_content_groups": len(hash_to_group_id),
+            "duplicate_content_groups": sum(1 for count in group_packet_counts.values() if count > 1),
+        }
         self.build_ambiguity_targets = bool(build_ambiguity_targets)
         if self.build_ambiguity_targets:
             target_classes = int(num_classes or (max(labels, default=-1) + 1))
@@ -169,6 +405,7 @@ class PacketByteDataset(Dataset):
         item = {
             "tokens": self.tokens[index],
             "masked_tokens": self.masked_tokens[index],
+            "field_ids": self.field_ids[index],
             "length": self.lengths[index],
             "payload_tokens": self.payload_tokens[index],
             "payload_length": self.payload_lengths[index],
@@ -176,12 +413,21 @@ class PacketByteDataset(Dataset):
             "masked_meta": self.masked_metas[index],
             "label": self.labels[index],
             "flow_id": self.flow_ids[index],
+            "content_group_id": self.content_group_ids[index],
         }
         if self.build_ambiguity_targets:
             item.update(
                 ambiguity_target=self.ambiguity_targets[index],
                 invariant_reliability=self.invariant_reliability[index],
                 signature_support=self.signature_support[index],
+            )
+        if self.semantic_embeddings is not None:
+            item["semantic_embedding"] = torch.tensor(
+                np.asarray(self.semantic_embeddings[index]), dtype=torch.float32
+            )
+        if self.intervened_semantic_embeddings is not None:
+            item["intervened_semantic_embedding"] = torch.tensor(
+                np.asarray(self.intervened_semantic_embeddings[index]), dtype=torch.float32
             )
         return item
 
@@ -194,21 +440,53 @@ def effective_class_weights(labels: torch.Tensor, num_classes: int, beta: float)
 
 @torch.no_grad()
 def predict_packet_views(
-    model, loader, device, include_masked=False, include_identifiability=False
+    model,
+    loader,
+    device,
+    include_masked=False,
+    include_identifiability=False,
+    return_gate_diagnostics=False,
+    ablate_channel="none",
+    ablate_intervention_view="none",
 ):
     model.eval()
     ys, raw_probabilities, masked_probabilities, identifiability = [], [], [], []
+    content_group_ids = []
+    channel_gates, intervention_gates = [], []
     for batch in tqdm(loader, desc="eval byte transformer", leave=False):
         payload_tokens = batch["payload_tokens"].to(device) if model.use_payload_channel else None
         payload_lengths = batch["payload_length"].to(device) if model.use_payload_channel else None
-        raw_logits, _, _ = model(
+        field_ids = batch["field_ids"].to(device) if model.use_protocol_fields else None
+        semantic_features = batch["semantic_embedding"].to(device) if model.semantic_dim > 0 else None
+        intervened_semantic_features = (
+            batch["intervened_semantic_embedding"].to(device)
+            if model.use_intervention_views else None
+        )
+        model_inputs = (
             batch["tokens"].to(device),
             batch["length"].to(device),
             batch["meta"].to(device),
             payload_tokens,
             payload_lengths,
+            field_ids,
+            semantic_features,
+            intervened_semantic_features,
         )
+        if return_gate_diagnostics:
+            raw_logits, _, channel_gate, intervention_gate = (
+                model.forward_with_gate_diagnostics(
+                    *model_inputs,
+                    ablate_channel=ablate_channel,
+                    ablate_intervention_view=ablate_intervention_view,
+                )
+            )
+            channel_gates.append(channel_gate.detach().float().cpu())
+            if intervention_gate is not None:
+                intervention_gates.append(intervention_gate.detach().float().cpu())
+        else:
+            raw_logits, _, _ = model(*model_inputs)
         ys.extend(batch["label"].tolist())
+        content_group_ids.extend(batch["content_group_id"].tolist())
         raw_probabilities.append(torch.softmax(raw_logits.float(), dim=-1).cpu().numpy())
         if include_masked:
             if include_identifiability:
@@ -218,6 +496,9 @@ def predict_packet_views(
                     batch["masked_meta"].to(device),
                     payload_tokens,
                     payload_lengths,
+                    field_ids,
+                    semantic_features,
+                    intervened_semantic_features,
                 )
                 identifiability.append(torch.sigmoid(reliability_logit.float()).cpu().numpy())
             else:
@@ -227,6 +508,9 @@ def predict_packet_views(
                     batch["masked_meta"].to(device),
                     payload_tokens,
                     payload_lengths,
+                    field_ids,
+                    semantic_features,
+                    intervened_semantic_features,
                 )
             masked_probabilities.append(
                 torch.softmax(masked_logits.float(), dim=-1).cpu().numpy()
@@ -235,7 +519,112 @@ def predict_packet_views(
     raw = np.concatenate(raw_probabilities)
     masked = np.concatenate(masked_probabilities) if masked_probabilities else None
     reliability = np.concatenate(identifiability) if identifiability else None
-    return y_true, raw, masked, reliability
+    groups = np.asarray(content_group_ids, dtype=np.int64)
+    if not return_gate_diagnostics:
+        return y_true, raw, masked, reliability, groups
+    gate_diagnostics = summarize_packet_gate_diagnostics(
+        model, channel_gates, intervention_gates
+    )
+    return y_true, raw, masked, reliability, groups, gate_diagnostics
+
+
+def summarize_packet_gate_diagnostics(model, channel_chunks, intervention_chunks):
+    diagnostics = {}
+
+    def summarize(values: torch.Tensor) -> dict:
+        return {
+            "num_samples": int(values.shape[0]),
+            "mean": values.mean(dim=0).tolist(),
+            "std": values.std(dim=0, unbiased=False).tolist(),
+            "p05": torch.quantile(values, 0.05, dim=0).tolist(),
+            "p50": torch.quantile(values, 0.50, dim=0).tolist(),
+            "p95": torch.quantile(values, 0.95, dim=0).tolist(),
+        }
+
+    if channel_chunks:
+        values = torch.cat(channel_chunks, dim=0)
+        summary = summarize(values)
+        fusion = model.shared_packet_fusion
+        summary["channel_names"] = list(fusion.channel_names)
+        summary["base_mode"] = fusion.base_mode
+        summary["weight_semantics"] = (
+            "bounded_effective_routing_weights_excluding_interaction_correction"
+        )
+        residual = float(fusion.interaction_max_weight)
+        summary["max_residual_weight"] = residual
+        if getattr(model, "train_fixed_channel_fusion", False):
+            effective = values
+            fixed_weight = 1.0 / len(fusion.channel_names)
+            summary["weight_semantics"] = "fixed_equal_normalized_channel_mean"
+            summary["max_residual_weight"] = 0.0
+            summary["effective_routing_mean"] = effective.mean(dim=0).tolist()
+            summary["effective_routing_p05"] = torch.quantile(effective, 0.05, dim=0).tolist()
+            summary["effective_routing_p50"] = torch.quantile(effective, 0.50, dim=0).tolist()
+            summary["effective_routing_p95"] = torch.quantile(effective, 0.95, dim=0).tolist()
+            summary["theoretical_bounds"] = {
+                name: [fixed_weight, fixed_weight] for name in fusion.channel_names
+            }
+            summary["bounds_satisfied"] = bool(
+                torch.allclose(effective, torch.full_like(effective, fixed_weight))
+            )
+        elif fusion.base_mode == "semantic_anchor":
+            effective = fusion.effective_weights(values)
+            bounds = fusion.effective_weight_bounds()
+            summary["effective_routing_mean"] = effective.mean(dim=0).tolist()
+            summary["effective_routing_p05"] = torch.quantile(effective, 0.05, dim=0).tolist()
+            summary["effective_routing_p50"] = torch.quantile(effective, 0.50, dim=0).tolist()
+            summary["effective_routing_p95"] = torch.quantile(effective, 0.95, dim=0).tolist()
+            summary["theoretical_bounds"] = {
+                name: list(bounds[name]) for name in fusion.channel_names
+            }
+            lower = torch.tensor(
+                [bounds[name][0] for name in fusion.channel_names], dtype=effective.dtype
+            )
+            upper = torch.tensor(
+                [bounds[name][1] for name in fusion.channel_names], dtype=effective.dtype
+            )
+            summary["bounds_satisfied"] = bool(
+                torch.all(effective >= lower - 1e-6)
+                and torch.all(effective <= upper + 1e-6)
+            )
+        diagnostics["packet_channel_gate"] = summary
+    if intervention_chunks:
+        values = torch.cat(intervention_chunks, dim=0)
+        summary = summarize(values)
+        fusion = getattr(model, "intervention_view_fusion", None)
+        if fusion is None and hasattr(model, "shared_packet_encoder"):
+            fusion = model.shared_packet_encoder.intervention_view_fusion
+        if fusion is None:
+            raise ValueError("intervention gate was emitted without its fusion module")
+        summary["base_mode"] = fusion.base_mode
+        summary["view_names"] = ["factual", "intervened"]
+        summary["weight_semantics"] = (
+            "bounded_effective_routing_weights_before_channel_fusion"
+        )
+        residual = float(fusion.max_residual_weight)
+        summary["max_residual_weight"] = residual
+        effective = fusion.effective_weights(values)
+        bounds = fusion.effective_weight_bounds()
+        view_names = ("factual", "intervened")
+        lower = torch.tensor(
+            [bounds[name][0] for name in view_names], dtype=effective.dtype
+        )
+        upper = torch.tensor(
+            [bounds[name][1] for name in view_names], dtype=effective.dtype
+        )
+        summary["effective_routing_mean"] = effective.mean(dim=0).tolist()
+        summary["effective_routing_p05"] = torch.quantile(effective, 0.05, dim=0).tolist()
+        summary["effective_routing_p50"] = torch.quantile(effective, 0.50, dim=0).tolist()
+        summary["effective_routing_p95"] = torch.quantile(effective, 0.95, dim=0).tolist()
+        summary["theoretical_bounds"] = {
+            name: list(bounds[name]) for name in view_names
+        }
+        summary["bounds_satisfied"] = bool(
+            torch.all(effective >= lower - 1e-6)
+            and torch.all(effective <= upper + 1e-6)
+        )
+        diagnostics["intervention_view_gate"] = summary
+    return diagnostics
 
 
 def select_invariant_blend(
@@ -312,17 +701,33 @@ def evaluate(
     raw_weight: float = 1.0,
 ):
     use_masked = raw_weight < 1.0
-    y_true, raw, masked, _ = predict_packet_views(
+    y_true, raw, masked, _, content_group_ids = predict_packet_views(
         model, loader, device, include_masked=use_masked
     )
     probabilities = raw if masked is None else raw_weight * raw + (1.0 - raw_weight) * masked
     metrics = packet_classification_metrics(
         y_true, probabilities.argmax(axis=1), num_classes, label_names
     )
+    metrics.update(
+        packet_content_group_metrics(
+            y_true,
+            probabilities.argmax(axis=1),
+            content_group_ids,
+            num_classes,
+            label_names,
+        )
+    )
     return metrics, probabilities if return_probabilities else None, y_true
 
 
-def save_checkpoint(path: Path, model, config, metrics, inference_config=None) -> None:
+def save_checkpoint(
+    path: Path,
+    model,
+    config,
+    metrics,
+    inference_config=None,
+    initialization=None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -330,9 +735,70 @@ def save_checkpoint(path: Path, model, config, metrics, inference_config=None) -
             "config": config,
             "validation_metrics": metrics,
             "inference_config": inference_config or {"raw_weight": 1.0},
+            "initialization": initialization or {},
         },
         path,
     )
+
+
+def initialize_protocol_content_encoder(
+    model: PacketByteTransformer,
+    packet_config: dict,
+    checkpoint_path: str,
+) -> dict:
+    if not model.use_protocol_fields:
+        raise ValueError("native packet-content initialization requires --use_protocol_fields")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    observed_protocol = checkpoint.get("pretraining_protocol")
+    if observed_protocol != NATIVE_PACKET_PRETRAINING_PROTOCOL:
+        raise ValueError(
+            "native checkpoint pretraining protocol mismatch: "
+            f"expected={NATIVE_PACKET_PRETRAINING_PROTOCOL!r} "
+            f"observed={observed_protocol!r}"
+        )
+    native_config = checkpoint.get("model_config") or {}
+    expected = {
+        "max_bytes": int(packet_config["max_bytes"]),
+        "hidden_dim": int(packet_config["hidden_dim"]),
+        "byte_layers": int(packet_config["num_layers"]),
+        "num_heads": int(packet_config["num_heads"]),
+        "dropout": float(packet_config["dropout"]),
+        "num_field_types": 9,
+    }
+    observed = {
+        key: (float(native_config[key]) if key == "dropout" else int(native_config[key]))
+        for key in expected
+    }
+    differences = {
+        key: {"packet": expected[key], "native": observed[key]}
+        for key in expected
+        if expected[key] != observed[key]
+    }
+    if differences:
+        raise ValueError(
+            "native packet-content architecture mismatch: "
+            + json.dumps(differences, sort_keys=True)
+        )
+    prefix = "packet_content_encoder."
+    source_state = {
+        key[len(prefix) :]: value
+        for key, value in checkpoint["state_dict"].items()
+        if key.startswith(prefix)
+    }
+    if not source_state:
+        raise ValueError("native checkpoint has no packet_content_encoder parameters")
+    model.protocol_content_encoder.load_state_dict(source_state, strict=True)
+    source_hash = hashlib.sha256()
+    with open(checkpoint_path, "rb") as source_file:
+        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+            source_hash.update(chunk)
+    return {
+        "protocol_content_pretraining": NATIVE_PACKET_PRETRAINING_PROTOCOL,
+        "protocol_content_checkpoint": str(Path(checkpoint_path)),
+        "protocol_content_checkpoint_sha256": source_hash.hexdigest(),
+        "protocol_content_architecture": expected,
+        "strict_state_dict_load": True,
+    }
 
 
 def weighted_soft_cross_entropy(
@@ -366,6 +832,87 @@ def interpolate_identifiability_reliability(
     return 1.0 - float(strength) + float(strength) * reliability
 
 
+def assign_main_protected_gradients(
+    main_loss: torch.Tensor,
+    auxiliary_loss: torch.Tensor,
+    parameters: list[torch.nn.Parameter],
+    projection_scope: str = "layerwise",
+    eps: float = 1e-12,
+) -> dict[str, float | bool]:
+    main_grads = torch.autograd.grad(
+        main_loss, parameters, retain_graph=True, allow_unused=True
+    )
+    auxiliary_grads = torch.autograd.grad(
+        auxiliary_loss, parameters, allow_unused=True
+    )
+    if projection_scope not in {"global", "layerwise"}:
+        raise ValueError(f"unsupported gradient projection scope: {projection_scope}")
+    paired_indices = [
+        index
+        for index, (main_grad, auxiliary_grad) in enumerate(zip(main_grads, auxiliary_grads))
+        if main_grad is not None and auxiliary_grad is not None
+    ]
+    projections: dict[int, torch.Tensor] = {}
+    cosines = []
+    conflicts = []
+    if projection_scope == "global" and paired_indices:
+        dot = torch.stack(
+            [(main_grads[i] * auxiliary_grads[i]).sum() for i in paired_indices]
+        ).sum()
+        main_norm_sq = torch.stack(
+            [(main_grads[i] * main_grads[i]).sum() for i in paired_indices]
+        ).sum()
+        auxiliary_norm_sq = torch.stack(
+            [(auxiliary_grads[i] * auxiliary_grads[i]).sum() for i in paired_indices]
+        ).sum()
+        cosine = dot / (main_norm_sq.sqrt() * auxiliary_norm_sq.sqrt()).clamp_min(eps)
+        conflict = bool(dot.detach() < 0)
+        projection = dot / main_norm_sq.clamp_min(eps) if conflict else dot.new_zeros(())
+        for index in paired_indices:
+            projections[index] = projection
+        cosines.append(cosine)
+        conflicts.append(conflict)
+    elif projection_scope == "layerwise":
+        for index in paired_indices:
+            main_grad = main_grads[index]
+            auxiliary_grad = auxiliary_grads[index]
+            dot = (main_grad * auxiliary_grad).sum()
+            main_norm_sq = (main_grad * main_grad).sum()
+            auxiliary_norm_sq = (auxiliary_grad * auxiliary_grad).sum()
+            cosine = dot / (main_norm_sq.sqrt() * auxiliary_norm_sq.sqrt()).clamp_min(eps)
+            conflict = bool(dot.detach() < 0)
+            projections[index] = (
+                dot / main_norm_sq.clamp_min(eps) if conflict else dot.new_zeros(())
+            )
+            cosines.append(cosine)
+            conflicts.append(conflict)
+
+    for index, (parameter, main_grad, auxiliary_grad) in enumerate(
+        zip(parameters, main_grads, auxiliary_grads)
+    ):
+        if main_grad is None and auxiliary_grad is None:
+            parameter.grad = None
+            continue
+        protected_auxiliary = auxiliary_grad
+        if index in projections and bool(projections[index].detach() < 0):
+            protected_auxiliary = auxiliary_grad - projections[index] * main_grad
+        if main_grad is None:
+            parameter.grad = protected_auxiliary
+        elif protected_auxiliary is None:
+            parameter.grad = main_grad
+        else:
+            parameter.grad = main_grad + protected_auxiliary
+    conflict_rate = float(np.mean(conflicts)) if conflicts else 0.0
+    cosine_mean = (
+        float(torch.stack(cosines).mean().detach().cpu()) if cosines else 0.0
+    )
+    return {
+        "conflict": conflict_rate > 0.0,
+        "conflict_rate": conflict_rate,
+        "cosine": cosine_mean,
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_index", required=True)
@@ -377,6 +924,62 @@ def main() -> None:
     ap.add_argument("--output_npz", default="")
     ap.add_argument("--max_bytes", type=int, default=256)
     ap.add_argument("--use_payload_channel", action="store_true")
+    ap.add_argument("--use_protocol_fields", action="store_true")
+    ap.add_argument("--exact_shared_representation", action="store_true")
+    ap.add_argument("--mask_protocol_session_fields", action="store_true")
+    ap.add_argument(
+        "--train_ablate_input_channel",
+        choices=["none", "semantic", "content", "structural"],
+        default="none",
+        help="Retrained shared-core ablation applied consistently in train/valid/test.",
+    )
+    ap.add_argument(
+        "--train_ablate_intervention_view",
+        choices=["none", "factual_only", "intervened_only"],
+        default="none",
+        help="Retrained intervention-view ablation applied consistently in train/valid/test.",
+    )
+    ap.add_argument(
+        "--train_fixed_channel_fusion",
+        action="store_true",
+        help="Retrain with a fixed equal three-channel mean instead of the bounded router.",
+    )
+    ap.add_argument("--semantic_embedding_cache", default="")
+    ap.add_argument("--semantic_embedding_manifest", default="")
+    ap.add_argument("--valid_semantic_embedding_cache", default="")
+    ap.add_argument("--valid_semantic_embedding_manifest", default="")
+    ap.add_argument("--test_semantic_embedding_cache", default="")
+    ap.add_argument("--test_semantic_embedding_manifest", default="")
+    ap.add_argument("--required_semantic_header_policy", default="")
+    ap.add_argument("--required_semantic_packet_context_policy", default="")
+    ap.add_argument("--intervened_semantic_embedding_cache", default="")
+    ap.add_argument("--intervened_semantic_embedding_manifest", default="")
+    ap.add_argument("--valid_intervened_semantic_embedding_cache", default="")
+    ap.add_argument("--valid_intervened_semantic_embedding_manifest", default="")
+    ap.add_argument("--test_intervened_semantic_embedding_cache", default="")
+    ap.add_argument("--test_intervened_semantic_embedding_manifest", default="")
+    ap.add_argument("--required_intervened_semantic_header_policy", default="")
+    ap.add_argument(
+        "--protocol_content_checkpoint",
+        default="",
+        help=(
+            "Optional NativeFlowEncoder checkpoint used to strictly initialize the "
+            "shared current-packet protocol content encoder."
+        ),
+    )
+    ap.add_argument("--intervention_max_residual_weight", type=float, default=0.25)
+    ap.add_argument(
+        "--intervention_view_base_mode",
+        choices=["symmetric_mean", "factual_anchor"],
+        default="symmetric_mean",
+    )
+    ap.add_argument("--channel_fusion_base_mode", choices=["legacy", "semantic_anchor"], default="legacy")
+    ap.add_argument(
+        "--channel_fusion_max_weight",
+        type=float,
+        default=0.25,
+        help="Hard multiplier on the shared packet-fusion residual path.",
+    )
     ap.add_argument("--max_payload_bytes", type=int, default=128)
     ap.add_argument("--hidden_dim", type=int, default=128)
     ap.add_argument("--num_layers", type=int, default=3)
@@ -389,6 +992,12 @@ def main() -> None:
     ap.add_argument("--learning_rate", type=float, default=3e-4)
     ap.add_argument("--weight_decay", type=float, default=1e-2)
     ap.add_argument("--class_weight_beta", type=float, default=0.9999)
+    ap.add_argument(
+        "--content_group_loss_reduction",
+        choices=["none", "group_mean"],
+        default="none",
+        help="Average the main clean CE inside each pcap_path-derived content group before averaging across groups.",
+    )
     ap.add_argument("--mask_probability", type=float, default=0.5)
     ap.add_argument("--masked_ce_weight", type=float, default=0.3)
     ap.add_argument("--consistency_weight", type=float, default=0.1)
@@ -426,6 +1035,12 @@ def main() -> None:
     )
     ap.add_argument("--learned_identifiability_router", action="store_true")
     ap.add_argument("--identifiability_loss_weight", type=float, default=0.1)
+    ap.add_argument("--protect_main_gradient", action="store_true")
+    ap.add_argument(
+        "--gradient_projection_scope",
+        choices=["global", "layerwise"],
+        default="layerwise",
+    )
     ap.add_argument("--contrastive_weight", type=float, default=0.05)
     ap.add_argument("--temperature", type=float, default=0.1)
     ap.add_argument("--packets_per_flow", type=int, default=2)
@@ -437,6 +1052,12 @@ def main() -> None:
         ap.error("--ambiguity_gate_strength must be in [0, 1]")
     if args.learned_identifiability_router and not args.ambiguity_aware_targets:
         ap.error("--learned_identifiability_router requires --ambiguity_aware_targets")
+    if args.train_ablate_input_channel != "none" and not args.exact_shared_representation:
+        ap.error("--train_ablate_input_channel requires --exact_shared_representation")
+    if args.train_ablate_intervention_view != "none" and not args.exact_shared_representation:
+        ap.error("--train_ablate_intervention_view requires --exact_shared_representation")
+    if args.train_fixed_channel_fusion and not args.exact_shared_representation:
+        ap.error("--train_fixed_channel_fusion requires --exact_shared_representation")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -457,6 +1078,13 @@ def main() -> None:
         max_payload_bytes=payload_width,
         build_ambiguity_targets=args.ambiguity_aware_targets,
         num_classes=num_classes,
+        semantic_embedding_cache=args.semantic_embedding_cache,
+        semantic_embedding_manifest=args.semantic_embedding_manifest,
+        required_header_policy=args.required_semantic_header_policy,
+        required_packet_context_policy=args.required_semantic_packet_context_policy,
+        intervened_semantic_embedding_cache=args.intervened_semantic_embedding_cache,
+        intervened_semantic_embedding_manifest=args.intervened_semantic_embedding_manifest,
+        required_intervened_header_policy=args.required_intervened_semantic_header_policy,
     )
     valid_dataset = PacketByteDataset(
         args.valid_index,
@@ -464,7 +1092,18 @@ def main() -> None:
         include_augmented=args.select_invariant_blend or args.learned_identifiability_router,
         max_payload_bytes=payload_width,
         num_classes=num_classes,
+        semantic_embedding_cache=args.valid_semantic_embedding_cache,
+        semantic_embedding_manifest=args.valid_semantic_embedding_manifest,
+        required_header_policy=args.required_semantic_header_policy,
+        required_packet_context_policy=args.required_semantic_packet_context_policy,
+        intervened_semantic_embedding_cache=args.valid_intervened_semantic_embedding_cache,
+        intervened_semantic_embedding_manifest=args.valid_intervened_semantic_embedding_manifest,
+        required_intervened_header_policy=args.required_intervened_semantic_header_policy,
     )
+    if bool(train_dataset.intervened_semantic_embeddings is None) != bool(
+        valid_dataset.intervened_semantic_embeddings is None
+    ):
+        raise ValueError("train and validation must both provide intervention semantic views")
     sampler = FlowBalancedPacketBatchSampler(
         train_dataset.rows, args.batch_size, args.packets_per_flow, seed=args.seed
     )
@@ -492,8 +1131,27 @@ def main() -> None:
         "use_payload_channel": args.use_payload_channel,
         "max_payload_bytes": args.max_payload_bytes,
         "use_identifiability_head": args.learned_identifiability_router,
+        "use_protocol_fields": args.use_protocol_fields,
+        "exact_shared_representation": args.exact_shared_representation,
+        "mask_protocol_session_fields": args.mask_protocol_session_fields,
+        "train_ablate_input_channel": args.train_ablate_input_channel,
+        "train_ablate_intervention_view": args.train_ablate_intervention_view,
+        "train_fixed_channel_fusion": args.train_fixed_channel_fusion,
+        "semantic_dim": train_dataset.semantic_dim,
+        "use_intervention_views": train_dataset.intervened_semantic_embeddings is not None,
+        "intervention_max_residual_weight": args.intervention_max_residual_weight,
+        "intervention_view_base_mode": args.intervention_view_base_mode,
+        "channel_fusion_base_mode": args.channel_fusion_base_mode,
+        "channel_fusion_max_weight": float(
+            max(0.0, min(1.0, args.channel_fusion_max_weight))
+        ),
     }
     model = PacketByteTransformer(**config).to(device)
+    initialization = (
+        initialize_protocol_content_encoder(model, config, args.protocol_content_checkpoint)
+        if args.protocol_content_checkpoint
+        else {}
+    )
     class_weights = effective_class_weights(train_dataset.labels, num_classes, args.class_weight_beta).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     total_steps = max(1, args.epochs * len(train_loader))
@@ -506,12 +1164,21 @@ def main() -> None:
     for epoch in range(1, args.epochs + 1):
         model.train()
         losses = []
+        gradient_conflicts = []
+        gradient_cosines = []
         for batch in tqdm(train_loader, desc=f"byte transformer epoch {epoch}"):
             clean_tokens = batch["tokens"].to(device)
             lengths = batch["length"].to(device)
             clean_meta = batch["meta"].to(device)
             labels = batch["label"].to(device)
             flow_ids = batch["flow_id"].to(device)
+            content_group_ids = batch["content_group_id"].to(device)
+            field_ids = batch["field_ids"].to(device) if model.use_protocol_fields else None
+            semantic_features = batch["semantic_embedding"].to(device) if model.semantic_dim > 0 else None
+            intervened_semantic_features = (
+                batch["intervened_semantic_embedding"].to(device)
+                if model.use_intervention_views else None
+            )
             if needs_training_view:
                 masked_tokens = batch["masked_tokens"].to(device)
                 masked_meta = batch["masked_meta"].to(device)
@@ -523,20 +1190,29 @@ def main() -> None:
                 payload_tokens = batch["payload_tokens"].to(device) if model.use_payload_channel else None
                 payload_lengths = batch["payload_length"].to(device) if model.use_payload_channel else None
                 clean_logits, clean_z, _ = model(
-                    clean_tokens, lengths, clean_meta, payload_tokens, payload_lengths
+                    clean_tokens, lengths, clean_meta, payload_tokens, payload_lengths,
+                    field_ids, semantic_features, intervened_semantic_features
                 )
-                ce = F.cross_entropy(clean_logits, labels, weight=class_weights)
+                ce = packet_ce_loss(
+                    clean_logits,
+                    labels,
+                    class_weights,
+                    content_group_ids,
+                    args.content_group_loss_reduction,
+                )
                 masked_ce = clean_logits.sum() * 0.0
                 consistency = clean_logits.sum() * 0.0
                 identifiability_loss = clean_logits.sum() * 0.0
                 if needs_training_view:
                     if args.learned_identifiability_router:
                         view_logits, _, _, reliability_logit = model.forward_with_identifiability(
-                            view_tokens, lengths, view_meta, payload_tokens, payload_lengths
+                            view_tokens, lengths, view_meta, payload_tokens, payload_lengths,
+                            field_ids, semantic_features, intervened_semantic_features
                         )
                     else:
                         view_logits, _, _ = model(
-                            view_tokens, lengths, view_meta, payload_tokens, payload_lengths
+                            view_tokens, lengths, view_meta, payload_tokens, payload_lengths,
+                            field_ids, semantic_features, intervened_semantic_features
                         )
                     if args.ambiguity_aware_targets:
                         hard_targets = F.one_hot(labels, num_classes=num_classes).float()
@@ -587,19 +1263,36 @@ def main() -> None:
                     clean_z, labels, flow_ids, temperature=args.temperature,
                     same_flow_weight=2.0, same_label_weight=1.0,
                 )
-                loss = ce + args.masked_ce_weight * masked_ce + args.consistency_weight * consistency
-                loss = loss + args.contrastive_weight * contrastive
-                loss = loss + args.identifiability_loss_weight * identifiability_loss
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
+                auxiliary_loss = (
+                    args.masked_ce_weight * masked_ce
+                    + args.consistency_weight * consistency
+                    + args.contrastive_weight * contrastive
+                    + args.identifiability_loss_weight * identifiability_loss
+                )
+                loss = ce + auxiliary_loss
+            if args.protect_main_gradient:
+                diagnostics = assign_main_protected_gradients(
+                    ce,
+                    auxiliary_loss,
+                    list(model.parameters()),
+                    projection_scope=args.gradient_projection_scope,
+                )
+                gradient_conflicts.append(float(diagnostics["conflict_rate"]))
+                gradient_cosines.append(float(diagnostics["cosine"]))
+            else:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            if args.protect_main_gradient:
+                optimizer.step()
+            else:
+                scaler.step(optimizer)
+                scaler.update()
             scheduler.step()
             losses.append(float(loss.detach().cpu()))
         inference_config = {"raw_weight": 1.0, "selection_scope": "raw_only"}
         if args.select_invariant_blend or args.learned_identifiability_router:
-            y_valid, raw_valid, masked_valid, routed_reliability = predict_packet_views(
+            y_valid, raw_valid, masked_valid, routed_reliability, valid_content_group_ids = predict_packet_views(
                 model,
                 valid_loader,
                 device,
@@ -609,7 +1302,7 @@ def main() -> None:
             assert masked_valid is not None
             if args.learned_identifiability_router:
                 assert routed_reliability is not None
-                invariant_scale, valid_metrics, _ = select_routed_invariant_blend(
+                invariant_scale, valid_metrics, selected_valid_probabilities = select_routed_invariant_blend(
                     y_valid,
                     raw_valid,
                     masked_valid,
@@ -621,7 +1314,7 @@ def main() -> None:
                 )
                 raw_weight = 1.0
             else:
-                raw_weight, valid_metrics, _ = select_invariant_blend(
+                raw_weight, valid_metrics, selected_valid_probabilities = select_invariant_blend(
                     y_valid,
                     raw_valid,
                     masked_valid,
@@ -634,8 +1327,35 @@ def main() -> None:
             raw_metrics = packet_classification_metrics(
                 y_valid, raw_valid.argmax(axis=1), num_classes, label_names
             )
+            raw_metrics.update(
+                packet_content_group_metrics(
+                    y_valid,
+                    raw_valid.argmax(axis=1),
+                    valid_content_group_ids,
+                    num_classes,
+                    label_names,
+                )
+            )
             masked_metrics = packet_classification_metrics(
                 y_valid, masked_valid.argmax(axis=1), num_classes, label_names
+            )
+            masked_metrics.update(
+                packet_content_group_metrics(
+                    y_valid,
+                    masked_valid.argmax(axis=1),
+                    valid_content_group_ids,
+                    num_classes,
+                    label_names,
+                )
+            )
+            valid_metrics.update(
+                packet_content_group_metrics(
+                    y_valid,
+                    selected_valid_probabilities.argmax(axis=1),
+                    valid_content_group_ids,
+                    num_classes,
+                    label_names,
+                )
             )
             inference_config = {
                 "raw_weight": raw_weight,
@@ -656,18 +1376,36 @@ def main() -> None:
             "loss": float(np.mean(losses)),
             "validation_metrics": valid_metrics,
             "inference_config": inference_config,
+            "gradient_conflict_rate": (
+                float(np.mean(gradient_conflicts)) if gradient_conflicts else None
+            ),
+            "gradient_cosine_mean": (
+                float(np.mean(gradient_cosines)) if gradient_cosines else None
+            ),
         }
         history.append(record)
         key = (valid_metrics["macro_f1"], valid_metrics["accuracy"])
+        gradient_text = ""
+        if record["gradient_conflict_rate"] is not None:
+            gradient_text = (
+                f" grad_conflict={record['gradient_conflict_rate']:.3f}"
+                f" grad_cos={record['gradient_cosine_mean']:.3f}"
+            )
         print(
             f"epoch={epoch} loss={record['loss']:.4f} valid_acc={valid_metrics['accuracy']:.4f} "
-            f"valid_macro_f1={valid_metrics['macro_f1']:.4f}", flush=True
+            f"valid_macro_f1={valid_metrics['macro_f1']:.4f}{gradient_text}",
+            flush=True,
         )
         if best_key is None or key > best_key:
             best_key = key
             best_epoch = epoch
             save_checkpoint(
-                output_dir / "best.pt", model, config, valid_metrics, inference_config
+                output_dir / "best.pt",
+                model,
+                config,
+                valid_metrics,
+                inference_config,
+                initialization,
             )
         if epoch - best_epoch >= args.patience:
             print(f"early stopping after epoch={epoch}; best_epoch={best_epoch}", flush=True)
@@ -679,15 +1417,27 @@ def main() -> None:
         "task": "packet-level-classification",
         "sample_unit": "one_packet",
         "architecture": (
-            "dual-channel-byte-payload-transformer-meta-gated"
-            if args.use_payload_channel else "local-byte-transformer-meta-gated"
+            (
+                "shared-protocol-aware-semantic-content-structural-trichannel-single-head"
+                if config.get("semantic_dim", 0) > 0
+                else "shared-protocol-aware-content-structural-gated"
+            )
+            if args.use_protocol_fields else (
+                "dual-channel-byte-payload-transformer-meta-gated"
+                if args.use_payload_channel else "local-byte-transformer-meta-gated"
+            )
         ),
         "config": vars(args),
         "model_config": config,
         "best_epoch": best_epoch,
         "validation_metrics": checkpoint["validation_metrics"],
         "inference_config": checkpoint.get("inference_config", {"raw_weight": 1.0}),
+        "initialization": checkpoint.get("initialization", {}),
         "history": history,
+        "content_group_manifests": {
+            "train": train_dataset.content_group_manifest,
+            "valid": valid_dataset.content_group_manifest,
+        },
     }
     if args.test_index:
         selected_raw_weight = float(result["inference_config"].get("raw_weight", 1.0))
@@ -697,6 +1447,13 @@ def main() -> None:
             include_augmented=args.select_invariant_blend or args.learned_identifiability_router,
             max_payload_bytes=payload_width,
             num_classes=num_classes,
+            semantic_embedding_cache=args.test_semantic_embedding_cache,
+            semantic_embedding_manifest=args.test_semantic_embedding_manifest,
+            required_header_policy=args.required_semantic_header_policy,
+            required_packet_context_policy=args.required_semantic_packet_context_policy,
+            intervened_semantic_embedding_cache=args.test_intervened_semantic_embedding_cache,
+            intervened_semantic_embedding_manifest=args.test_intervened_semantic_embedding_manifest,
+            required_intervened_header_policy=args.required_intervened_semantic_header_policy,
         )
         test_loader = DataLoader(
             test_dataset,
@@ -705,8 +1462,9 @@ def main() -> None:
             num_workers=args.num_workers,
             pin_memory=device.type == "cuda",
         )
+        result["content_group_manifests"]["test"] = test_dataset.content_group_manifest
         router_enabled = bool(result["inference_config"].get("router_enabled", False))
-        y_true, raw_test, masked_test, routed_reliability = predict_packet_views(
+        y_true, raw_test, masked_test, routed_reliability, test_content_group_ids = predict_packet_views(
             model,
             test_loader,
             device,
@@ -727,6 +1485,15 @@ def main() -> None:
         test_metrics = packet_classification_metrics(
             y_true, probabilities.argmax(axis=1), num_classes, label_names
         )
+        test_metrics.update(
+            packet_content_group_metrics(
+                y_true,
+                probabilities.argmax(axis=1),
+                test_content_group_ids,
+                num_classes,
+                label_names,
+            )
+        )
         result["test_metrics"] = test_metrics
         result["test_view_metrics"] = {
             "raw": packet_classification_metrics(
@@ -739,7 +1506,12 @@ def main() -> None:
             )
         if args.output_npz:
             Path(args.output_npz).parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(args.output_npz, y_true=y_true, probabilities=probabilities)
+            np.savez_compressed(
+                args.output_npz,
+                y_true=y_true,
+                probabilities=probabilities,
+                content_group_ids=test_content_group_ids,
+            )
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:

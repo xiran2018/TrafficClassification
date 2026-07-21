@@ -7,13 +7,17 @@ from pathlib import Path
 from typing import Any, Dict
 
 from paper_framework_defaults import (
+    DEFAULT_FRAMEWORK_PROFILE,
+    DEFAULT_FRAMEWORK_PROFILE_DESCRIPTION,
     DEFAULT_PAPER_SAFE_RESULTS,
+    DEFAULT_SHARED_CORE_MODULES,
     DEFAULT_TARGETS,
     DEFAULT_UNIFIED_EXPERT_SLOTS,
     DEFAULT_UNIFIED_EXPERT_SLOTS_CSV,
     default_framework_results,
 )
 from summarize_experiment_results import metric_from_payload
+from audit_unified_framework import build_report as build_unified_framework_report
 
 
 def load_json(path: Path) -> Dict[str, Any] | None:
@@ -32,7 +36,10 @@ def slot_status(data: Dict[str, Any]) -> Dict[str, Any]:
         # onto the required slots and missing slots are identity-from-base.
         inputs = data.get("inputs") or []
         slots = list(DEFAULT_UNIFIED_EXPERT_SLOTS) if inputs else []
-        mode = "inferred_identity_compatible" if inputs else "missing"
+        if inputs and (data.get("config") or {}).get("selected_mode"):
+            mode = "crossfold_consensus_identity_compatible"
+        else:
+            mode = "inferred_identity_compatible" if inputs else "missing"
     else:
         mode = "recorded"
     provided = []
@@ -98,15 +105,40 @@ def build_audit() -> Dict[str, Any]:
         audit_dataset(dataset, item["path"], item["target"])
         for dataset, item in configured.items()
     ]
+    unified_report = build_unified_framework_report()
+    packet_rows = list(unified_report.get("packet_level") or [])
+    unified_framework = unified_report.get("framework") or {}
+    shared_core_matches = list(DEFAULT_SHARED_CORE_MODULES) == list(unified_framework.get("shared_core_modules") or [])
+    unified_profile_ok = (
+        unified_report.get("status") == "pass"
+        and int(unified_framework.get("paper_unified_flow_manifest_passes") or 0) > 0
+        and int(unified_framework.get("paper_unified_packet_manifest_passes") or 0) > 0
+    )
+    packet_profile_ok = bool(packet_rows) and all(
+        row.get("publication_status") == "pass" for row in packet_rows
+    )
     return {
         "defaults": {
+            "framework_profile": DEFAULT_FRAMEWORK_PROFILE,
+            "framework_profile_description": DEFAULT_FRAMEWORK_PROFILE_DESCRIPTION,
+            "shared_core_modules": list(DEFAULT_SHARED_CORE_MODULES),
             "targets": {key: {"accuracy": value[0], "macro_f1": value[1]} for key, value in DEFAULT_TARGETS.items()},
             "paper_safe_results": DEFAULT_PAPER_SAFE_RESULTS,
             "unified_expert_slots": DEFAULT_UNIFIED_EXPERT_SLOTS,
             "unified_expert_slots_csv": DEFAULT_UNIFIED_EXPERT_SLOTS_CSV,
         },
+        "unified_framework": {
+            "status": unified_report.get("status"),
+            "shared_core_matches_defaults": shared_core_matches,
+            "paper_unified_flow_manifest_passes": unified_framework.get("paper_unified_flow_manifest_passes"),
+            "paper_unified_packet_manifest_passes": unified_framework.get("paper_unified_packet_manifest_passes"),
+            "flow_scope": unified_framework.get("flow_scope"),
+            "packet_scope": unified_framework.get("packet_scope"),
+        },
+        "flow_datasets": rows,
+        "packet_datasets": packet_rows,
         "datasets": rows,
-        "ok": all(row["ok"] for row in rows),
+        "ok": all(row["ok"] for row in rows) and shared_core_matches and unified_profile_ok and packet_profile_ok,
     }
 
 
@@ -116,10 +148,33 @@ def render_markdown(audit: Dict[str, Any]) -> str:
         "",
         f"Overall status: `{audit['ok']}`",
         "",
+        f"Default framework profile: `{audit['defaults']['framework_profile']}`",
+        "",
+        "Shared core modules:",
+        "",
+    ]
+    for module in audit["defaults"]["shared_core_modules"]:
+        lines.append(f"- `{module}`")
+    unified = audit.get("unified_framework") or {}
+    lines += [
+        "",
+        "Unified framework gate:",
+        "",
+        "| Status | Shared Core Match | paper_unified Flow Manifests | paper_unified Packet Manifests |",
+        "|---|---|---:|---:|",
+        "| {status} | {shared} | {flow} | {packet} |".format(
+            status=unified.get("status"),
+            shared=unified.get("shared_core_matches_defaults"),
+            flow=unified.get("paper_unified_flow_manifest_passes"),
+            packet=unified.get("paper_unified_packet_manifest_passes"),
+        ),
+        "",
+        "## Flow-Level Defaults",
+        "",
         "| Dataset | Exists | Acc | Macro-F1 | Target | Target Met | Slot Mode | Slots Match | Errors |",
         "|---|---|---:|---:|---|---|---|---|---|",
     ]
-    for row in audit["datasets"]:
+    for row in audit["flow_datasets"]:
         target = row.get("target")
         target_text = "-" if target is None else f"{target['accuracy']:.4f}/{target['macro_f1']:.4f}"
         slot = row.get("slot_status") or {}
@@ -135,6 +190,26 @@ def render_markdown(audit: Dict[str, Any]) -> str:
                 slot_mode=slot.get("mode", "-"),
                 slots_match=slot.get("matches_required", "-"),
                 errors=errors or "-",
+            )
+        )
+    lines += [
+        "",
+        "## Packet-Level Defaults",
+        "",
+        "| Dataset | Exists | Acc | Macro-F1 | Publication Status | Provenance | Path |",
+        "|---|---|---:|---:|---|---:|---|",
+    ]
+    for row in audit.get("packet_datasets") or []:
+        prov = row.get("framework_provenance") or {}
+        lines.append(
+            "| {dataset} | {exists} | {acc} | {f1} | {pub} | {prov_count} | `{path}` |".format(
+                dataset=row["dataset"],
+                exists=row["exists"],
+                acc="-" if row.get("accuracy") is None else f"{row['accuracy']:.4f}",
+                f1="-" if row.get("macro_f1") is None else f"{row['macro_f1']:.4f}",
+                pub=row.get("publication_status"),
+                prov_count=prov.get("matching_manifest_count", 0),
+                path=row["path"],
             )
         )
     lines.append("")

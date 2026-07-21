@@ -158,6 +158,15 @@ def main() -> None:
     ap.add_argument("--input_dir", required=True)
     ap.add_argument("--output_dir", required=True)
     ap.add_argument("--input_layout", choices=["flow_pcaps", "class_packet_pcaps"], default="flow_pcaps", help="flow_pcaps: one PCAP is one flow; class_packet_pcaps: one SWEET packet-level PCAP contains many real flows of one class.")
+    ap.add_argument(
+        "--packet_context_policy",
+        choices=["auto", "single_packet", "flow_context"],
+        default="auto",
+        help=(
+            "Metadata context used by each semantic packet prompt. auto preserves "
+            "legacy behavior; strict shared Packet-to-Flow runs use single_packet."
+        ),
+    )
     ap.add_argument("--max_packets_per_flow", type=int, default=64, help="Maximum packets retained per real flow. In class_packet_pcaps mode, 0 keeps every packet.")
     ap.add_argument("--payload_prefix_len", type=int, default=128)
     ap.add_argument("--l3_prefix_len", type=int, default=512)
@@ -175,6 +184,14 @@ def main() -> None:
     args = ap.parse_args()
     if args.input_layout == "flow_pcaps" and args.max_packets_per_flow <= 0:
         ap.error("--max_packets_per_flow must be positive for --input_layout flow_pcaps")
+    if args.input_layout == "class_packet_pcaps" and args.packet_context_policy == "flow_context":
+        ap.error("class_packet_pcaps cannot use --packet_context_policy flow_context")
+    packet_context_policy = (
+        "single_packet"
+        if args.input_layout == "class_packet_pcaps"
+        or args.packet_context_policy == "single_packet"
+        else "flow_context"
+    )
     os.makedirs(args.output_dir, exist_ok=True)
 
     show_progress = not args.no_progress
@@ -223,6 +240,7 @@ def main() -> None:
                         l3_prefix_len=args.l3_prefix_len,
                         embedding_header_policy=args.embedding_header_policy,
                         header_random_salt=flow_id,
+                        single_packet_context=packet_context_policy == "single_packet",
                     )
                     flow_rows = [(flow_id, metas, qa_prompts, embed_prompts)]
             except Exception as exc:
@@ -251,7 +269,7 @@ def main() -> None:
                             "embedding_header_policy": args.embedding_header_policy,
                             "input_layout": args.input_layout,
                             "sample_unit": "packet" if args.input_layout == "class_packet_pcaps" else "flow_packet",
-                            "packet_context_policy": "single_packet" if args.input_layout == "class_packet_pcaps" else "flow_context",
+                            "packet_context_policy": packet_context_policy,
                             "meta": meta,
                         }
                         pidx.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -266,7 +284,7 @@ def main() -> None:
                             "embedding_header_policy": args.embedding_header_policy,
                             "input_layout": args.input_layout,
                             "sample_unit": "packet" if args.input_layout == "class_packet_pcaps" else "flow_packet",
-                            "packet_context_policy": "single_packet" if args.input_layout == "class_packet_pcaps" else "flow_context",
+                            "packet_context_policy": packet_context_policy,
                             "packet_weight": packet_information_weight(meta_obj),
                             "meta": {
                                 "direction": meta.get("direction"),

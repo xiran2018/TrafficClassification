@@ -60,14 +60,10 @@ def flow_content_map(index_path: str) -> tuple[Dict[str, str], Dict[str, str]]:
     return flow_to_hash, flow_to_path
 
 
-def aggregate_unique_content(
+def group_indices_by_content(
     flow_ids: Sequence[str],
-    y_true: Sequence[int],
-    prob: np.ndarray,
     flow_to_hash: Dict[str, str],
-) -> tuple[list[str], np.ndarray, np.ndarray, dict]:
-    if len(flow_ids) != len(y_true) or len(flow_ids) != len(prob):
-        raise ValueError("flow_ids, labels, and probabilities must have equal lengths")
+) -> tuple[list[str], list[list[int]]]:
     buckets = defaultdict(list)
     missing = []
     for index, flow_id in enumerate(flow_ids):
@@ -78,13 +74,25 @@ def aggregate_unique_content(
         buckets[content_hash].append(index)
     if missing:
         raise ValueError(f"Embedding index is missing {len(missing)} prediction flow IDs; first={missing[0]}")
+    return list(buckets.keys()), list(buckets.values())
+
+
+def aggregate_unique_content(
+    flow_ids: Sequence[str],
+    y_true: Sequence[int],
+    prob: np.ndarray,
+    flow_to_hash: Dict[str, str],
+) -> tuple[list[str], np.ndarray, np.ndarray, dict]:
+    if len(flow_ids) != len(y_true) or len(flow_ids) != len(prob):
+        raise ValueError("flow_ids, labels, and probabilities must have equal lengths")
+    grouped_hashes, grouped_indices = group_indices_by_content(flow_ids, flow_to_hash)
 
     hashes = []
     labels = []
     probabilities = []
     duplicate_groups = 0
     duplicate_rows = 0
-    for content_hash, indices in buckets.items():
+    for content_hash, indices in zip(grouped_hashes, grouped_indices):
         group_labels = {int(y_true[index]) for index in indices}
         if len(group_labels) != 1:
             raise ValueError(f"Content hash {content_hash} has conflicting labels: {sorted(group_labels)}")
@@ -124,6 +132,38 @@ def bootstrap_ci(y_true: np.ndarray, prob: np.ndarray, samples: int, seed: int) 
     }
 
 
+def content_group_bootstrap_ci(
+    y_true: np.ndarray,
+    prob: np.ndarray,
+    groups: Sequence[Sequence[int]],
+    samples: int,
+    seed: int,
+) -> dict:
+    if samples <= 0:
+        return {}
+    if not groups:
+        return {}
+    rng = np.random.default_rng(seed)
+    group_arrays = [np.asarray(indices, dtype=np.int64) for indices in groups]
+    accuracy = []
+    macro_f1 = []
+    for _ in range(samples):
+        sampled_groups = rng.integers(0, len(group_arrays), size=len(group_arrays))
+        sampled_indices = np.concatenate([group_arrays[index] for index in sampled_groups])
+        result = metrics(y_true[sampled_indices], prob[sampled_indices].argmax(axis=1))
+        accuracy.append(result["accuracy"])
+        macro_f1.append(result["macro_f1"])
+    return {
+        "method": "cluster_bootstrap_by_exact_pcap_sha256",
+        "samples": samples,
+        "seed": seed,
+        "num_groups": len(group_arrays),
+        "num_rows": int(len(y_true)),
+        "accuracy_95_ci": np.percentile(accuracy, [2.5, 97.5]).astype(float).tolist(),
+        "macro_f1_95_ci": np.percentile(macro_f1, [2.5, 97.5]).astype(float).tolist(),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Recompute prediction metrics with exact-PCAP duplicate groups counted once.")
     ap.add_argument("--prediction_json", required=True)
@@ -140,12 +180,14 @@ def main() -> None:
     y_true = np.asarray(prediction["flow_y_true"], dtype=np.int64)
     prob = np.asarray(prediction["flow_prob"], dtype=np.float64)
     flow_to_hash, _ = flow_content_map(args.flow_embedding_index)
+    _, grouped_indices = group_indices_by_content(flow_ids, flow_to_hash)
     hashes, unique_y, unique_prob, audit = aggregate_unique_content(
         flow_ids, y_true, prob, flow_to_hash
     )
     raw_metrics = metrics(y_true, prob.argmax(axis=1))
     unique_metrics = metrics(unique_y, unique_prob.argmax(axis=1))
     ci = bootstrap_ci(unique_y, unique_prob, args.bootstrap_samples, args.seed)
+    group_ci = content_group_bootstrap_ci(y_true, prob, grouped_indices, args.bootstrap_samples, args.seed)
     payload = {
         "method": "exact_pcap_sha256_unique_content_evaluation",
         "prediction_json": args.prediction_json,
@@ -156,6 +198,7 @@ def main() -> None:
         },
         "audit": audit,
         "content_unique_bootstrap": ci,
+        "content_group_bootstrap": group_ci,
     }
     if not args.summary_only:
         payload.update({
@@ -164,7 +207,7 @@ def main() -> None:
             "content_y_pred": unique_prob.argmax(axis=1).astype(int).tolist(),
             "content_prob": unique_prob.tolist(),
         })
-    print(json.dumps({"metrics": payload["metrics"], "audit": audit, "bootstrap": ci}, indent=2))
+    print(json.dumps({"metrics": payload["metrics"], "audit": audit, "bootstrap": ci, "group_bootstrap": group_ci}, indent=2))
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:

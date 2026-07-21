@@ -234,6 +234,7 @@ def candidate_record(
         "gate_c": gate_c,
         "gate_strength": gate_strength,
         "predictions": predictions,
+        "_probabilities": probabilities,
         "macro_f1": float(overall["macro_f1"]),
         "accuracy": float(overall["accuracy"]),
         "fold_macro_f1": fold_f1,
@@ -357,6 +358,11 @@ def main() -> None:
         default="",
         help="Optional fused test probabilities for cross-fold consensus.",
     )
+    ap.add_argument(
+        "--output_valid_npz",
+        default="",
+        help="Optional selected nested-OOF validation probabilities for a higher fusion layer.",
+    )
     ap.add_argument("--gate_out", required=True)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
@@ -378,6 +384,7 @@ def main() -> None:
     selected_c = selected["gate_c"]
     gate_strength = selected["gate_strength"]
     valid_predictions = selected["predictions"]
+    valid_probabilities = selected["_probabilities"]
 
     # Refit calibration and the selected gate on all validation samples only.
     semantic_temperature, semantic = select_temperature(semantic_raw, y_valid)
@@ -415,11 +422,20 @@ def main() -> None:
             {
                 key: value
                 for key, value in candidate.items()
-                if key != "predictions"
+                if key not in {"predictions", "_probabilities"}
             }
             for candidate in candidates
         ],
     }
+    if args.output_valid_npz:
+        valid_npz_path = Path(args.output_valid_npz)
+        valid_npz_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            valid_npz_path,
+            y_true=y_valid.astype(np.int64),
+            probabilities=valid_probabilities.astype(np.float32),
+            probability_scope=np.asarray("nested_oof_validation"),
+        )
 
     if bool(args.test_semantic) != bool(args.test_structural):
         raise ValueError("provide both --test_semantic and --test_structural, or neither")

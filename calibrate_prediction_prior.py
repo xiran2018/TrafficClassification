@@ -120,6 +120,64 @@ def estimate_prior_em(target_prob: np.ndarray, source_prior: np.ndarray, max_ite
     return simplex_project(prior)
 
 
+def select_candidate_key(
+    reports: dict,
+    selection_reports: dict,
+    unsupervised_reports: dict,
+    selection_scope: str,
+    select_metric: str,
+    hard_prior_kl_cap: float,
+):
+    """Select a calibration candidate without silently violating constraints."""
+    keys = list(reports)
+    if not keys:
+        raise ValueError("No calibration candidates were evaluated")
+
+    if selection_scope == "test_oracle":
+        score = lambda key: (
+            reports[key][select_metric],
+            reports[key]["macro_f1"],
+            reports[key]["accuracy"],
+        )
+        return max(keys, key=score), True, ""
+    if selection_scope == "valid_weighted":
+        score = lambda key: (
+            selection_reports[key][select_metric],
+            selection_reports[key]["macro_f1"],
+            selection_reports[key]["accuracy"],
+        )
+        return max(keys, key=score), True, ""
+    if selection_scope == "hard_prior_match":
+        score = lambda key: (
+            -unsupervised_reports[key]["hard_prior_kl"],
+            unsupervised_reports[key]["margin"],
+            unsupervised_reports[key]["confidence"],
+        )
+        return max(keys, key=score), True, ""
+
+    feasible = [
+        key
+        for key in keys
+        if unsupervised_reports[key]["hard_prior_kl"] <= hard_prior_kl_cap
+    ]
+    if feasible:
+        score = lambda key: (
+            -unsupervised_reports[key]["soft_prior_kl"],
+            unsupervised_reports[key]["margin"],
+            unsupervised_reports[key]["confidence"],
+        )
+        return max(feasible, key=score), True, ""
+
+    identity = [key for key in keys if unsupervised_reports[key]["strength"] == 0.0]
+    if not identity:
+        raise ValueError(
+            "soft_prior_under_hard_cap requires strength 0 so an identity "
+            "fallback exists when every candidate violates the hard KL cap"
+        )
+    identity_key = next((key for key in identity if unsupervised_reports[key]["gate_mode"] == "none"), identity[0])
+    return identity_key, False, "identity_no_feasible_candidate"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     input_group = ap.add_mutually_exclusive_group(required=True)
@@ -210,11 +268,7 @@ def main() -> None:
     reports = {}
     selection_reports = {}
     unsupervised_reports = {}
-    best_key = None
-    best_score = None
-    best_pred = None
-    best_valid_prob = None
-    best_test_prob = None
+    candidate_state = {}
     gate_modes = [x.strip() for x in args.gate_modes.split(",") if x.strip()]
     gate_thresholds = [float(x) for x in args.gate_thresholds.split(",") if x.strip()]
     if not gate_thresholds:
@@ -252,6 +306,7 @@ def main() -> None:
                 reports[key] = metrics
                 selection_reports[key] = valid_metrics
                 unsupervised_reports[key] = {
+                    "strength": strength,
                     "hard_prior_kl": hard_prior_kl,
                     "soft_prior_kl": soft_prior_kl,
                     "confidence": confidence,
@@ -261,24 +316,24 @@ def main() -> None:
                     "gate_threshold": gate_threshold,
                     "gate_mean": gate_mean,
                 }
+                candidate_state[key] = {
+                    "pred": pred,
+                    "valid_prob": valid_prob_adjusted,
+                    "test_prob": test_prob_adjusted,
+                }
                 print(f"candidate={key}", json.dumps(metrics, sort_keys=True))
-                if args.selection_scope == "test_oracle":
-                    selected_metrics = metrics
-                    score = (selected_metrics[args.select_metric], selected_metrics["macro_f1"], selected_metrics["accuracy"])
-                elif args.selection_scope == "valid_weighted":
-                    selected_metrics = valid_metrics
-                    score = (selected_metrics[args.select_metric], selected_metrics["macro_f1"], selected_metrics["accuracy"])
-                elif args.selection_scope == "hard_prior_match":
-                    score = (-hard_prior_kl, margin, confidence)
-                else:
-                    within_cap = 1.0 if hard_prior_kl <= args.hard_prior_kl_cap else 0.0
-                    score = (within_cap, -soft_prior_kl if within_cap else -hard_prior_kl, margin, confidence)
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_key = key
-                    best_pred = pred
-                    best_valid_prob = valid_prob_adjusted
-                    best_test_prob = test_prob_adjusted
+
+    best_key, selection_constraint_satisfied, selection_fallback_reason = select_candidate_key(
+        reports,
+        selection_reports,
+        unsupervised_reports,
+        args.selection_scope,
+        args.select_metric,
+        args.hard_prior_kl_cap,
+    )
+    best_pred = candidate_state[best_key]["pred"]
+    best_valid_prob = candidate_state[best_key]["valid_prob"]
+    best_test_prob = candidate_state[best_key]["test_prob"]
 
     label_names, label_map = load_label_names(args.label_map)
     if label_names:
@@ -297,6 +352,8 @@ def main() -> None:
             "selected_strength": best_key,
             "select_metric": args.select_metric,
             "selection_scope": args.selection_scope,
+            "selection_constraint_satisfied": selection_constraint_satisfied,
+            "selection_fallback_reason": selection_fallback_reason,
             "prior_method": args.prior_method,
             "target_prior_json": args.target_prior_json,
             "target_prior_key": args.target_prior_key if args.target_prior_json else "",

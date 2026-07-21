@@ -199,6 +199,61 @@ def selected_mode(probs: List[np.ndarray], requested: str, confidence_threshold:
     return "vote_priority" if mean_conf >= confidence_threshold else "log_mean"
 
 
+def validation_selective_threshold(
+    data: Dict[str, Any],
+    min_precision: float = 0.9,
+    min_coverage: float = 0.1,
+) -> Tuple[float, Dict[str, float]]:
+    """Choose the widest validation subset meeting a precision guarantee.
+
+    The threshold is learned from the anchor fold only. Test labels and the
+    other experts' test performance never participate in this decision.
+    """
+    y_true = np.asarray(data.get("valid_y_true", []), dtype=np.int64)
+    valid_prob = np.asarray(data.get("valid_prob", []), dtype=np.float64)
+    if y_true.size == 0 or valid_prob.ndim != 2 or valid_prob.shape[0] != y_true.size:
+        raise ValueError(
+            "selective_anchor_vote requires valid_y_true and valid_prob in the anchor input"
+        )
+    valid_prob = normalize_prob(valid_prob)
+    confidence = valid_prob.max(axis=1)
+    correct = valid_prob.argmax(axis=1) == y_true
+    order = np.argsort(-confidence, kind="stable")
+    sorted_confidence = confidence[order]
+    cumulative_precision = np.cumsum(correct[order]) / np.arange(1, y_true.size + 1)
+    coverage = np.arange(1, y_true.size + 1) / float(y_true.size)
+    eligible = np.flatnonzero(
+        (cumulative_precision >= float(min_precision))
+        & (coverage >= float(min_coverage))
+    )
+    if eligible.size == 0:
+        return float("inf"), {
+            "validation_precision": 0.0,
+            "validation_coverage": 0.0,
+            "selected_count": 0,
+        }
+    # The last eligible prefix maximizes anchor coverage under the guarantee.
+    selected = int(eligible[-1])
+    return float(sorted_confidence[selected]), {
+        "validation_precision": float(cumulative_precision[selected]),
+        "validation_coverage": float(coverage[selected]),
+        "selected_count": selected + 1,
+    }
+
+
+def selective_anchor_vote(
+    probs: List[np.ndarray],
+    threshold: float,
+) -> Tuple[np.ndarray, int]:
+    if not probs:
+        raise ValueError("selective_anchor_vote requires at least one input")
+    fused = fuse_probs(probs, "vote_priority")
+    anchor = normalize_prob(probs[0])
+    selected = anchor.max(axis=1) >= float(threshold)
+    fused[selected] = anchor[selected]
+    return normalize_prob(fused), int(selected.sum())
+
+
 def write_payload(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -214,12 +269,15 @@ def main() -> None:
             "mean", "log_mean", "vote", "vote_priority", "auto_confidence",
             "class_reliability_mean", "class_reliability_log_mean", "class_reliability_vote",
             "class_reliability_tie_break",
+            "selective_anchor_vote",
             "confusion_em", "confusion_em_tie_break",
         ],
         default="auto_confidence",
     )
     ap.add_argument("--confidence_threshold", type=float, default=0.9)
     ap.add_argument("--reliability_smoothing", type=float, default=4.0)
+    ap.add_argument("--anchor_min_precision", type=float, default=0.9)
+    ap.add_argument("--anchor_min_coverage", type=float, default=0.1)
     ap.add_argument("--confusion_smoothing", type=float, default=1.0)
     ap.add_argument("--confusion_prior_anchor_weight", type=float, default=0.05)
     ap.add_argument("--confusion_em_max_iter", type=int, default=100)
@@ -280,7 +338,17 @@ def main() -> None:
     estimated_target_prior = None
     em_iterations = 0
     em_tie_count = 0
-    if mode == "class_reliability_tie_break":
+    selective_threshold = None
+    selective_report = None
+    selective_test_count = 0
+    if mode == "selective_anchor_vote":
+        selective_threshold, selective_report = validation_selective_threshold(
+            payloads[0][1],
+            args.anchor_min_precision,
+            args.anchor_min_coverage,
+        )
+        fused, selective_test_count = selective_anchor_vote(probs, selective_threshold)
+    elif mode == "class_reliability_tie_break":
         fused = fuse_probs(probs, "vote_priority")
         hard_predictions = np.stack([prob.argmax(axis=1) for prob in probs], axis=1)
         tie_mask = np.asarray([len(set(row.tolist())) == len(probs) for row in hard_predictions])
@@ -322,6 +390,11 @@ def main() -> None:
         "selected_mode": mode,
         "confidence_threshold": args.confidence_threshold,
         "reliability_smoothing": args.reliability_smoothing,
+        "anchor_min_precision": args.anchor_min_precision,
+        "anchor_min_coverage": args.anchor_min_coverage,
+        "selective_anchor_threshold": selective_threshold,
+        "selective_anchor_validation": selective_report,
+        "selective_anchor_test_count": selective_test_count,
         "confusion_smoothing": args.confusion_smoothing,
         "confusion_prior_anchor_weight": args.confusion_prior_anchor_weight,
         "confusion_em_iterations": em_iterations,

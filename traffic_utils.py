@@ -695,6 +695,7 @@ def extract_flow_packets(
     l3_prefix_len: int = 512,
     embedding_header_policy: str = "full",
     header_random_salt: str = "",
+    single_packet_context: bool = False,
 ) -> Tuple[List[PacketMeta], List[str], List[str]]:
     """Return packet metadata, raw QA prompts, and structured embedding prompts."""
     packets: List[ParsedPacket] = []
@@ -711,7 +712,7 @@ def extract_flow_packets(
         l3_prefix_len=l3_prefix_len,
         embedding_header_policy=embedding_header_policy,
         header_random_salt=header_random_salt or stable_id(str(Path(pcap_path).resolve())),
-        single_packet_context=False,
+        single_packet_context=single_packet_context,
     )
 
 
@@ -770,6 +771,12 @@ def meta_feature_vector(m: Any) -> List[float]:
         math.log1p(max(0, getattr(m, "tcp_window", -1))),
         1.0 if getattr(m, "full_l3_captured", False) else 0.0,
     ]
+
+
+def current_packet_meta_feature_vector(m: Any) -> List[float]:
+    """Packet-local structural features shared by packet and flow tasks."""
+    values = meta_feature_vector(m)
+    return values[:3] + values[4:]
 
 
 def make_label_map(labels: Iterable[str]) -> Dict[str, int]:

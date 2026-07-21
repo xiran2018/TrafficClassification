@@ -6,6 +6,7 @@ from train_tower2 import (
     class_conditional_environment_alignment_loss,
     environment_risk_variance_loss,
     iter_balanced_group_batches,
+    split_flow_groups,
 )
 
 
@@ -34,6 +35,45 @@ class EnvironmentGeneralizationTest(unittest.TestCase):
         batch = next(iter(iter_balanced_group_batches(groups, batch_size=4, classes_per_batch=2, samples_per_class=2)))
         for label in range(2):
             self.assertEqual({item["environment"] for item in batch if item["label"] == label}, {0, 1})
+
+    def test_content_group_split_keeps_duplicate_content_on_one_side(self):
+        groups = [
+            {"flow_id": "a", "label": 0, "content_group_id": 10, "items": [{}]},
+            {"flow_id": "b", "label": 0, "content_group_id": 10, "items": [{}]},
+            {"flow_id": "c", "label": 1, "content_group_id": 20, "items": [{}]},
+            {"flow_id": "d", "label": 1, "content_group_id": 30, "items": [{}]},
+        ]
+
+        train, valid = split_flow_groups(groups, valid_ratio=0.5, seed=3, group_key="content_group_id")
+
+        train_groups = {item["content_group_id"] for item in train}
+        valid_groups = {item["content_group_id"] for item in valid}
+        self.assertFalse(train_groups & valid_groups)
+        self.assertEqual(len(train) + len(valid), len(groups))
+
+    def test_content_unique_balanced_sampler_avoids_duplicate_exact_content_when_possible(self):
+        groups = [
+            {"flow_id": "a0", "label": 0, "content_group_id": 10, "items": [{}]},
+            {"flow_id": "a1", "label": 0, "content_group_id": 10, "items": [{}]},
+            {"flow_id": "a2", "label": 0, "content_group_id": 11, "items": [{}]},
+            {"flow_id": "b0", "label": 1, "content_group_id": 20, "items": [{}]},
+            {"flow_id": "b1", "label": 1, "content_group_id": 21, "items": [{}]},
+        ]
+
+        batch = next(
+            iter(
+                iter_balanced_group_batches(
+                    groups,
+                    batch_size=4,
+                    classes_per_batch=2,
+                    samples_per_class=2,
+                    content_group_unique=True,
+                )
+            )
+        )
+
+        content_groups = [item["content_group_id"] for item in batch]
+        self.assertEqual(len(content_groups), len(set(content_groups)))
 
 
 if __name__ == "__main__":

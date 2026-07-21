@@ -1,0 +1,46 @@
+{
+  "task": "packet-level-classification",
+  "sample_unit": "one_packet",
+  "method": "mean",
+  "inputs": [
+    "/tmp/two_tower_runs/packet_level/vpn-binary/fold0/test_dual_probs.npz",
+    "/tmp/two_tower_runs/packet_level/vpn-binary/fold1/test_dual_probs.npz",
+    "/tmp/two_tower_runs/packet_level/vpn-binary/fold2/test_dual_probs.npz"
+  ],
+  "metrics": {
+    "num_samples": 110594,
+    "accuracy": 0.9999186212633597,
+    "macro_precision": 0.9999177678006992,
+    "macro_recall": 0.9999194538644884,
+    "macro_f1": 0.9999186068245844,
+    "weighted_precision": 0.9999186294137534,
+    "weighted_recall": 0.9999186212633597,
+    "weighted_f1": 0.9999186213319757,
+    "per_class": {
+      "VPN": {
+        "label_id": 0,
+        "precision": 0.9999821524183473,
+        "recall": 0.9998572371825758,
+        "f1": 0.9999196908991942,
+        "support": 56037
+      },
+      "nonVPN": {
+        "label_id": 1,
+        "precision": 0.9998533831830511,
+        "recall": 0.999981670546401,
+        "f1": 0.9999175227499748,
+        "support": 54557
+      }
+    },
+    "confusion_matrix": [
+      [
+        56029,
+        8
+      ],
+      [
+        1,
+        54556
+      ]
+    ]
+  }
+}

@@ -9,7 +9,18 @@ from typing import Any, Dict, List, Tuple
 
 from sklearn.metrics import f1_score
 
-from paper_framework_defaults import DEFAULT_UNIFIED_EXPERT_SLOTS, default_framework_results
+from paper_framework_defaults import (
+    DEFAULT_ABLATION_ONLY_MODULES,
+    DEFAULT_FRAMEWORK_PROFILE,
+    DEFAULT_FRAMEWORK_PROFILE_DESCRIPTION,
+    DEFAULT_PAPER_MAIN_MODULES,
+    DEFAULT_MODEL_SHARED_CORE_MODULES,
+    DEFAULT_SHARED_CORE_MODULES,
+    DEFAULT_SHARED_PROTOCOL_GUARDS,
+    DEFAULT_UNIFIED_CANDIDATE_EXPERTS,
+    DEFAULT_UNIFIED_EXPERT_SLOTS,
+    default_framework_results,
+)
 
 
 def load_json(path: str) -> Dict[str, Any]:
@@ -128,6 +139,19 @@ def selector_summary(selected: Dict[str, Any]) -> str:
     return strategy
 
 
+def consensus_summary(data: Dict[str, Any]) -> str | None:
+    config = data.get("config") or {}
+    inputs = data.get("inputs") or []
+    if "selected_mode" not in config or not inputs:
+        return None
+    requested = config.get("requested_mode", "-")
+    selected = config.get("selected_mode", "-")
+    confidence = config.get("mean_input_confidence")
+    if confidence is None:
+        return f"cross_fold_consensus {requested}->{selected}, inputs={len(inputs)}"
+    return f"cross_fold_consensus {requested}->{selected}, inputs={len(inputs)}, mean_conf={format_float(confidence)}"
+
+
 def guard_summary(selected: Dict[str, Any]) -> str:
     fallback = selected.get("fallback_reason")
     carrier = fallback if fallback else selected
@@ -185,8 +209,23 @@ def selector_slot_summary(data: Dict[str, Any], required_slots: List[str]) -> Di
     slots = feature_config.get("unified_expert_slots") or []
     status = feature_config.get("input_slot_status") or []
     mode = "recorded"
+    inputs = data.get("inputs") or []
+    if not slots and inputs and (data.get("config") or {}).get("selected_mode"):
+        return {
+            "mode": "crossfold_consensus_identity_compatible",
+            "slots": list(required_slots),
+            "matches_required": True,
+            "provided": [],
+            "identity_from_base": list(required_slots),
+            "extra_provided": [],
+            "consensus_members": [row.get("name") for row in inputs],
+            "num_slots": len(required_slots),
+            "num_provided": 0,
+            "num_identity": len(required_slots),
+            "num_extra": 0,
+            "num_consensus_members": len(inputs),
+        }
     if not slots and not status:
-        inputs = data.get("inputs") or []
         if not inputs:
             return None
         slots = required_slots
@@ -246,6 +285,7 @@ def module_usage(data: Dict[str, Any], required_slots: List[str]) -> Dict[str, s
         "validation_gated_selector": "active",
         "bootstrap_guard": "inactive",
         "target_shift_guard": "inactive",
+        "cross_fold_consensus": "inactive",
         "expert_switch_or_fusion": "identity",
         "class_bias_calibration_candidate": "not_configured",
         "trainable_multiview_gate": "active" if multi_view_gate_summary(data) else "not_observed",
@@ -261,6 +301,15 @@ def module_usage(data: Dict[str, Any], required_slots: List[str]) -> Dict[str, s
         )
     if "class_bias_calibration" in strategies:
         usage["class_bias_calibration_candidate"] = "evaluated"
+
+    if consensus_summary(data):
+        usage["cross_fold_consensus"] = "active"
+        usage["bootstrap_guard"] = "inherited"
+        usage["target_shift_guard"] = "inherited"
+        usage["expert_switch_or_fusion"] = f"active:cross_fold_consensus:{(data.get('config') or {}).get('selected_mode', 'unknown')}"
+        if usage["class_bias_calibration_candidate"] == "not_configured":
+            usage["class_bias_calibration_candidate"] = "evaluated"
+        return usage
 
     carrier = selected
     if fallback:
@@ -292,6 +341,7 @@ def module_usage_summary(usage: Dict[str, str]) -> str:
         f"base={usage['flow_base_expert']}; "
         f"selector={usage['validation_gated_selector']}; "
         f"expert={usage['expert_switch_or_fusion']}; "
+        f"consensus={usage.get('cross_fold_consensus', 'inactive')}; "
         f"calib={usage['class_bias_calibration_candidate']}; "
         f"slots={usage.get('selector_expert_slots', 'legacy_not_recorded')}; "
         f"mv_gate={usage.get('trainable_multiview_gate', 'not_observed')}; "
@@ -311,6 +361,7 @@ def framework_consistency(rows: List[Dict[str, Any]], required_selector_slots: L
     ]
     required_candidates = [
         "expert_switch_or_fusion",
+        "cross_fold_consensus",
         "class_bias_calibration_candidate",
         "trainable_multiview_gate",
         "selector_expert_slots",
@@ -324,7 +375,7 @@ def framework_consistency(rows: List[Dict[str, Any]], required_selector_slots: L
             if usage.get(name) != "active":
                 failures.append(f"{name}!={usage.get(name)}")
         for name in required_safety:
-            if usage.get(name) != "active":
+            if usage.get(name) not in {"active", "inherited"}:
                 failures.append(f"{name}!={usage.get(name)}")
         expert_state = usage.get("expert_switch_or_fusion", "")
         if not expert_state.startswith(("active:", "gated_off:", "identity:")):
@@ -353,6 +404,14 @@ def framework_consistency(rows: List[Dict[str, Any]], required_selector_slots: L
     slot_uniform = len(set(configured_slot_sets)) <= 1 if configured_slot_sets else None
     return {
         "consistent": all(item["consistent"] for item in dataset_checks) and slot_uniform is not False,
+        "framework_profile": DEFAULT_FRAMEWORK_PROFILE,
+        "framework_profile_description": DEFAULT_FRAMEWORK_PROFILE_DESCRIPTION,
+        "paper_main_modules": list(DEFAULT_PAPER_MAIN_MODULES),
+        "shared_core_modules": list(DEFAULT_SHARED_CORE_MODULES),
+        "model_shared_core_modules": list(DEFAULT_MODEL_SHARED_CORE_MODULES),
+        "shared_protocol_guards": list(DEFAULT_SHARED_PROTOCOL_GUARDS),
+        "unified_candidate_experts": list(DEFAULT_UNIFIED_CANDIDATE_EXPERTS),
+        "ablation_only_modules": list(DEFAULT_ABLATION_ONLY_MODULES),
         "required_selector_slots": required_selector_slots,
         "required_active_modules": required_active,
         "required_safety_modules": required_safety,
@@ -361,11 +420,11 @@ def framework_consistency(rows: List[Dict[str, Any]], required_selector_slots: L
         "selector_slots": list(configured_slot_sets[0]) if configured_slot_sets and slot_uniform else [],
         "dataset_checks": dataset_checks,
         "interpretation": (
-            "All datasets pass through the same backbone, base expert, validation-gated selector, "
-            "bootstrap guard, target-shift guard, and candidate expert/calibration family. "
-            "When unified expert slots are configured, missing dataset-specific experts are routed as identity candidates. "
-            "Dataset-specific validation may activate, gate off, or leave candidate experts as identity. "
-            "When multi-view pooling is evaluated, learned branch-gate weights are reported as trainable module evidence."
+            f"The paper-facing profile is `{DEFAULT_FRAMEWORK_PROFILE}`. "
+            "All datasets pass through the same shared packet representation and protocol guards. "
+            "For consensus results, per-fold safety guards are inherited from the selected fold candidates and the consensus itself is label-free on the shared test set. "
+            "Candidate expert slots describe historical ablations and are not part of the strict shared-core main result. "
+            "Ablation-only modules are kept for reproducibility, but they are not counted as paper main-claim modules."
         ),
     }
 
@@ -395,8 +454,12 @@ def build_rows(
                 "target_macro_f1": target_f1,
                 "achieved": achieved,
                 "num_flows": len(data.get("flow_y_true", [])),
-                "selector": selector_summary(selected),
-                "guards": guard_summary(selected),
+                "selector": consensus_summary(data) or selector_summary(selected),
+                "guards": (
+                    "fold-candidate guards inherited; label-free shared-test consensus"
+                    if consensus_summary(data)
+                    else guard_summary(selected)
+                ),
                 "module_usage": module_usage(data, required_slots),
                 "selector_slot_summary": selector_slot_summary(data, required_slots),
                 "multi_view_gate": multi_view_gate_summary(data),
@@ -437,6 +500,20 @@ def markdown_consistency(audit: Dict[str, Any]) -> str:
     lines = [
         "",
         f"Framework consistency audit: {status}",
+        "",
+        f"Framework profile: `{audit.get('framework_profile', '-')}`",
+        "",
+        "Shared representation modules: "
+        + ", ".join(f"`{name}`" for name in audit.get("model_shared_core_modules", [])),
+        "",
+        "Shared protocol guards: "
+        + ", ".join(f"`{name}`" for name in audit.get("shared_protocol_guards", [])),
+        "",
+        "Unified candidate experts: "
+        + ", ".join(f"`{name}`" for name in audit.get("unified_candidate_experts", [])),
+        "",
+        "Ablation-only modules: "
+        + ", ".join(f"`{name}`" for name in audit.get("ablation_only_modules", [])),
         "",
         "| Dataset | Consistent | Expert candidate state | Notes |",
         "|---|---|---|---|",

@@ -77,6 +77,18 @@ DEFAULT_CASES = [
         "reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json",
         "class-bias calibrated soft gate",
     ),
+    (
+        "tls-120",
+        "coverage-audited distill student fusion",
+        "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_valid_acc.json",
+        "single-student graph/seq distillation; lower than consensus teacher",
+    ),
+    (
+        "tls-120",
+        "coverage-audited distill student selector",
+        "reasoningDataset/tls-120/test_selector_best_plus_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_valid_macro.json",
+        "student candidate admitted through unified expert slots",
+    ),
 ]
 
 

@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from paper_framework_defaults import DEFAULT_FLOW_DATASETS, DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
+from paper_framework_defaults import DEFAULT_FLOW_DATASETS, DEFAULT_PAPER_SAFE_RESULTS, DEFAULT_UNIFIED_EXPERT_SLOTS_CSV
 from recommend_next_experiment import cuda_summary
 from summarize_experiment_results import DEFAULT_TARGETS, RANK_METRICS, collect_dataset, parse_target
 
@@ -20,6 +20,13 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "name": "default",
             "paired_view_weight": 0.2,
             "paired_consistency_weight": 0.1,
+            "paired_alignment_weight": 0.0,
+            "paired_crossview_contrastive_weight": 0.0,
+            "paired_crossview_temperature": 0.07,
+            "paired_variance_weight": 0.0,
+            "paired_variance_target": 0.04,
+            "paired_covariance_weight": 0.0,
+            "view_domain_adversarial_weight": 0.0,
             "consistency_weight": 0.05,
             "meta_dropout_prob": 0.1,
             "embedding_dropout_prob": 0.05,
@@ -33,9 +40,37 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
     ],
     "stage8_balanced": [
         {
+            "name": "gentle_intervention",
+            "paired_view_weight": 0.05,
+            "paired_consistency_weight": 0.03,
+            "paired_alignment_weight": 0.005,
+            "paired_crossview_contrastive_weight": 0.0,
+            "paired_crossview_temperature": 0.07,
+            "paired_variance_weight": 0.0,
+            "paired_variance_target": 0.04,
+            "paired_covariance_weight": 0.0,
+            "view_domain_adversarial_weight": 0.0,
+            "consistency_weight": 0.03,
+            "meta_dropout_prob": 0.05,
+            "embedding_dropout_prob": 0.03,
+            "window_dropout_prob": 0.05,
+            "edge_attr_dropout_prob": 0.05,
+            "confidence_penalty_weight": 0.0,
+            "seed": 42,
+            "flow_pooling": "mean",
+            "multi_view_gate_entropy_weight": 0.0,
+        },
+        {
             "name": "default_balanced",
             "paired_view_weight": 0.2,
             "paired_consistency_weight": 0.1,
+            "paired_alignment_weight": 0.03,
+            "paired_crossview_contrastive_weight": 0.01,
+            "paired_crossview_temperature": 0.07,
+            "paired_variance_weight": 0.01,
+            "paired_variance_target": 0.04,
+            "paired_covariance_weight": 0.0,
+            "view_domain_adversarial_weight": 0.01,
             "consistency_weight": 0.05,
             "meta_dropout_prob": 0.1,
             "embedding_dropout_prob": 0.05,
@@ -50,6 +85,13 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "name": "stronger_invariance",
             "paired_view_weight": 0.1,
             "paired_consistency_weight": 0.15,
+            "paired_alignment_weight": 0.05,
+            "paired_crossview_contrastive_weight": 0.02,
+            "paired_crossview_temperature": 0.07,
+            "paired_variance_weight": 0.02,
+            "paired_variance_target": 0.04,
+            "paired_covariance_weight": 0.0,
+            "view_domain_adversarial_weight": 0.02,
             "consistency_weight": 0.1,
             "meta_dropout_prob": 0.2,
             "embedding_dropout_prob": 0.1,
@@ -64,6 +106,13 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "name": "higher_paired_view_multiview_gate",
             "paired_view_weight": 0.3,
             "paired_consistency_weight": 0.1,
+            "paired_alignment_weight": 0.03,
+            "paired_crossview_contrastive_weight": 0.01,
+            "paired_crossview_temperature": 0.07,
+            "paired_variance_weight": 0.01,
+            "paired_variance_target": 0.04,
+            "paired_covariance_weight": 0.0,
+            "view_domain_adversarial_weight": 0.0,
             "consistency_weight": 0.05,
             "meta_dropout_prob": 0.1,
             "embedding_dropout_prob": 0.05,
@@ -78,6 +127,13 @@ VARIANT_SCHEDULES: Dict[str, List[Dict[str, Any]]] = {
             "name": "dropout_regularized",
             "paired_view_weight": 0.15,
             "paired_consistency_weight": 0.1,
+            "paired_alignment_weight": 0.05,
+            "paired_crossview_contrastive_weight": 0.03,
+            "paired_crossview_temperature": 0.07,
+            "paired_variance_weight": 0.03,
+            "paired_variance_target": 0.04,
+            "paired_covariance_weight": 0.005,
+            "view_domain_adversarial_weight": 0.01,
             "consistency_weight": 0.05,
             "meta_dropout_prob": 0.25,
             "embedding_dropout_prob": 0.1,
@@ -208,6 +264,30 @@ def write_ledger(args, payload: Dict[str, Any]) -> None:
     print(f"wrote {out}", flush=True)
 
 
+def default_content_group_index(dataset: str) -> Path:
+    return Path("reasoningDataset") / dataset / "test_embeddings_rawproj_change_weight" / "flow_embedding_index.jsonl"
+
+
+def content_unique_eval_cmd(args, dataset: str) -> List[str] | None:
+    prediction_json = DEFAULT_PAPER_SAFE_RESULTS.get(dataset)
+    index = default_content_group_index(dataset)
+    if not prediction_json or not index.exists():
+        return None
+    return [
+        "python",
+        "evaluate_content_unique_predictions.py",
+        "--prediction_json",
+        prediction_json,
+        "--flow_embedding_index",
+        str(index),
+        "--output_json",
+        f"reasoningDataset/{dataset}/test_crossfold_consensus_auto_confidence_content_unique.json",
+        "--bootstrap_samples",
+        str(args.content_unique_bootstrap_samples),
+        "--summary_only",
+    ]
+
+
 def report_commands(args, datasets: List[str]) -> List[List[str]]:
     rec_cmd = [
         "python",
@@ -219,7 +299,7 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
     ]
     for dataset in datasets:
         rec_cmd += ["--dataset", dataset]
-    return [
+    commands = [
         rec_cmd,
         [
             "python",
@@ -239,13 +319,33 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
             "--output_md",
             "reasoningDataset/paper_ablation_report.md",
         ],
+    ]
+    for dataset in datasets:
+        cmd = content_unique_eval_cmd(args, dataset)
+        if cmd:
+            commands.append(cmd)
+    promotion_cmd = [
+        "python",
+        "audit_paper_candidate_promotion.py",
+        "--output_json",
+        "reasoningDataset/paper_candidate_promotion_audit.json",
+        "--output_md",
+        "reasoningDataset/paper_candidate_promotion_audit.md",
+        "--content_group_bootstrap_samples",
+        str(args.content_unique_bootstrap_samples),
+    ]
+    for dataset in datasets:
+        index = default_content_group_index(dataset)
+        if index.exists():
+            promotion_cmd += ["--raw_content_group_index", f"{dataset}={index}"]
+    commands += [
         [
             "python",
-            "make_paper_evidence_pack.py",
+            "audit_unified_framework.py",
             "--output_json",
-            "reasoningDataset/paper_evidence_pack.json",
+            "reasoningDataset/unified_framework_audit.json",
             "--output_md",
-            "reasoningDataset/paper_evidence_pack.md",
+            "reasoningDataset/unified_framework_audit.md",
         ],
         [
             "python",
@@ -257,21 +357,31 @@ def report_commands(args, datasets: List[str]) -> List[List[str]]:
         ],
         [
             "python",
+            "make_paper_evidence_pack.py",
+            "--output_json",
+            "reasoningDataset/paper_evidence_pack.json",
+            "--output_md",
+            "reasoningDataset/paper_evidence_pack.md",
+        ],
+        [
+            "python",
+            "make_paper_method_card.py",
+            "--output_json",
+            "reasoningDataset/paper_method_card.json",
+            "--output_md",
+            "reasoningDataset/paper_method_card.md",
+        ],
+        [
+            "python",
             "make_next_experiment_plan.py",
             "--output_json",
             "reasoningDataset/next_experiment_plan.json",
             "--output_md",
             "reasoningDataset/next_experiment_plan.md",
         ],
-        [
-            "python",
-            "audit_paper_candidate_promotion.py",
-            "--output_json",
-            "reasoningDataset/paper_candidate_promotion_audit.json",
-            "--output_md",
-            "reasoningDataset/paper_candidate_promotion_audit.md",
-        ],
+        promotion_cmd,
     ]
+    return commands
 
 
 def iteration_run_tag(args, iteration: int) -> str:
@@ -302,6 +412,8 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
         run_tag,
         "--model_types",
         args.model_types,
+        "--framework_profile",
+        getattr(args, "framework_profile", "paper_unified"),
         "--tower2_epochs",
         str(args.tower2_epochs),
         "--tower2_early_stop_patience",
@@ -310,6 +422,20 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
         str(variant["paired_view_weight"]),
         "--paired_consistency_weight",
         str(variant["paired_consistency_weight"]),
+        "--paired_alignment_weight",
+        str(variant.get("paired_alignment_weight", 0.0)),
+        "--paired_crossview_contrastive_weight",
+        str(variant.get("paired_crossview_contrastive_weight", 0.0)),
+        "--paired_crossview_temperature",
+        str(variant.get("paired_crossview_temperature", 0.07)),
+        "--paired_variance_weight",
+        str(variant.get("paired_variance_weight", 0.0)),
+        "--paired_variance_target",
+        str(variant.get("paired_variance_target", 0.04)),
+        "--paired_covariance_weight",
+        str(variant.get("paired_covariance_weight", 0.0)),
+        "--view_domain_adversarial_weight",
+        str(variant.get("view_domain_adversarial_weight", 0.0)),
         "--consistency_weight",
         str(variant["consistency_weight"]),
         "--meta_dropout_prob",
@@ -333,6 +459,27 @@ def suite_cmd(args, datasets: List[str], iteration: int, run_tag: str, variant: 
         "--output_json",
         str(Path(args.suite_output_dir) / f"recommended_suite_plan_iter{iteration:02d}.json"),
     ]
+    for item in args.distill_target:
+        cmd += ["--distill_target", item]
+    if args.distill_target:
+        cmd += [
+            "--distill_weight",
+            str(args.distill_weight),
+            "--distill_class_prior_weight",
+            str(args.distill_class_prior_weight),
+            "--distill_temperature",
+            str(args.distill_temperature),
+            "--distill_min_confidence",
+            str(args.distill_min_confidence),
+            "--distill_max_confidence",
+            str(args.distill_max_confidence),
+            "--distill_confidence_power",
+            str(args.distill_confidence_power),
+            "--distill_min_coverage",
+            str(args.distill_min_coverage),
+            "--distill_low_coverage_action",
+            args.distill_low_coverage_action,
+        ]
     if not args.enable_slot_stacker:
         cmd.append("--no-enable_slot_stacker")
     if not args.enable_soft_expert_gate:
@@ -428,7 +575,12 @@ def defaults_audit_ready(audit: Dict[str, Any] | None, required: bool) -> bool:
     return bool(isinstance(audit, dict) and audit.get("ok") is True)
 
 
-def ci_targets_ready(evidence: Dict[str, Any] | None, goal_datasets: List[str], required: bool) -> bool:
+def ci_targets_ready(
+    evidence: Dict[str, Any] | None,
+    goal_datasets: List[str],
+    required: bool,
+    require_content_group: bool = True,
+) -> bool:
     if not required:
         return True
     if not isinstance(evidence, dict):
@@ -437,6 +589,8 @@ def ci_targets_ready(evidence: Dict[str, Any] | None, goal_datasets: List[str], 
     for dataset in goal_datasets:
         row = by_dataset.get(dataset)
         if not row or row.get("ci_target_met") is not True:
+            return False
+        if require_content_group and row.get("content_group_ci_target_met") is not True:
             return False
     return True
 
@@ -481,6 +635,9 @@ def paper_safe_status_from_evidence(
                 "paper_safe_macro_f1": paper_safe_macro_f1,
                 "paper_safe_target_met": claim.get("point_target_met"),
                 "ci_target_met": claim.get("ci_target_met"),
+                "content_group_ci_target_met": claim.get("content_group_ci_target_met"),
+                "content_group_accuracy_ci95": claim.get("content_group_accuracy_ci95"),
+                "content_group_macro_f1_ci95": claim.get("content_group_macro_f1_ci95"),
                 "claim_strength": claim.get("claim_strength"),
                 "raw_best_accuracy": raw_best_accuracy,
                 "raw_best_macro_f1": raw_best_macro_f1,
@@ -509,6 +666,12 @@ def main() -> None:
         help="Stop only when centralized paper-safe defaults still pass target and unified-slot audits.",
     )
     ap.add_argument("--require_ci_targets", action="store_true", help="Stop only when goal datasets pass bootstrap CI target gates in the evidence pack.")
+    ap.add_argument(
+        "--require_content_group_ci_targets",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="When --require_ci_targets is active, also require content-grouped bootstrap CI target gates.",
+    )
     ap.add_argument("--allow_no_cuda", action="store_true")
     ap.add_argument("--continue_on_error", action="store_true")
     ap.add_argument("--run_tag", default="paired_ipport")
@@ -520,6 +683,15 @@ def main() -> None:
     ap.add_argument("--model_types", default="graph,seq")
     ap.add_argument("--tower2_epochs", type=int, default=30)
     ap.add_argument("--tower2_early_stop_patience", type=int, default=8)
+    ap.add_argument("--distill_target", action="append", default=[], help="Dataset-specific consensus teacher passed to the recommended suite as DATASET=JSON.")
+    ap.add_argument("--distill_weight", type=float, default=0.0)
+    ap.add_argument("--distill_class_prior_weight", type=float, default=0.0)
+    ap.add_argument("--distill_temperature", type=float, default=2.0)
+    ap.add_argument("--distill_min_confidence", type=float, default=0.0)
+    ap.add_argument("--distill_max_confidence", type=float, default=0.0)
+    ap.add_argument("--distill_confidence_power", type=float, default=0.0)
+    ap.add_argument("--distill_min_coverage", type=float, default=0.0)
+    ap.add_argument("--distill_low_coverage_action", choices=["warn", "disable_flow", "fail"], default="warn")
     ap.add_argument(
         "--variant_schedule",
         choices=sorted(VARIANT_SCHEDULES),
@@ -538,6 +710,12 @@ def main() -> None:
         help="Comma-separated expert slots required by the paper framework audit and passed to every suite child plan.",
     )
     ap.add_argument(
+        "--framework_profile",
+        choices=["legacy", "paper_unified"],
+        default="paper_unified",
+        help="Shared framework profile used by every recommended suite; legacy is for historical ablations only.",
+    )
+    ap.add_argument(
         "--enable_slot_stacker",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -550,6 +728,7 @@ def main() -> None:
         help="Keep the trainable unified-slot soft expert gate in every recommended-suite child plan.",
     )
     ap.add_argument("--suite_output_dir", default="reasoningDataset/autonomous_loop")
+    ap.add_argument("--content_unique_bootstrap_samples", type=int, default=2000)
     ap.add_argument("--output_json", default="reasoningDataset/autonomous_loop/research_loop_ledger.json")
     args = ap.parse_args()
 
@@ -572,6 +751,8 @@ def main() -> None:
         "require_framework_consistency": bool(args.require_framework_consistency),
         "require_paper_defaults_audit": bool(args.require_paper_defaults_audit),
         "require_ci_targets": bool(args.require_ci_targets),
+        "require_content_group_ci_targets": bool(args.require_content_group_ci_targets),
+        "content_unique_bootstrap_samples": int(args.content_unique_bootstrap_samples),
         "run_tag": args.run_tag,
         "run_tag_template": args.run_tag_template,
         "variant_schedule": args.variant_schedule,
@@ -579,6 +760,15 @@ def main() -> None:
         "final_selector_unified_expert_slots": args.final_selector_unified_expert_slots,
         "enable_slot_stacker": bool(args.enable_slot_stacker),
         "enable_soft_expert_gate": bool(args.enable_soft_expert_gate),
+        "distill_target": list(args.distill_target),
+        "distill_weight": args.distill_weight,
+        "distill_class_prior_weight": args.distill_class_prior_weight,
+        "distill_temperature": args.distill_temperature,
+        "distill_min_confidence": args.distill_min_confidence,
+        "distill_max_confidence": args.distill_max_confidence,
+        "distill_confidence_power": args.distill_confidence_power,
+        "distill_min_coverage": args.distill_min_coverage,
+        "distill_low_coverage_action": args.distill_low_coverage_action,
         "cuda": cuda_summary(),
         "iterations": [],
         "stop_reason": "",
@@ -609,7 +799,12 @@ def main() -> None:
         framework_met = framework_ready(framework, args.require_framework_consistency)
         framework_point_targets_met = framework_point_targets_ready(evidence, goal_datasets, args.require_framework_consistency)
         defaults_audit_met = defaults_audit_ready(defaults_audit, args.require_paper_defaults_audit)
-        ci_targets_met = ci_targets_ready(evidence, goal_datasets, args.require_ci_targets)
+        ci_targets_met = ci_targets_ready(
+            evidence,
+            goal_datasets,
+            args.require_ci_targets,
+            args.require_content_group_ci_targets,
+        )
         ready_to_stop = (
             raw_goals_met
             and paper_safe_goals_met
@@ -691,7 +886,12 @@ def main() -> None:
         record["paper_defaults_audit_met_after"] = defaults_audit_ready(
             defaults_audit_after, args.require_paper_defaults_audit
         )
-        record["ci_targets_met_after"] = ci_targets_ready(evidence_after, goal_datasets, args.require_ci_targets)
+        record["ci_targets_met_after"] = ci_targets_ready(
+            evidence_after,
+            goal_datasets,
+            args.require_ci_targets,
+            args.require_content_group_ci_targets,
+        )
         record["ready_to_stop_after"] = (
             record["raw_goals_met_after"]
             and record["paper_safe_goals_met_after"]

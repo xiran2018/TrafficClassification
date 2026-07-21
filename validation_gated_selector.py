@@ -12,6 +12,8 @@ from sklearn.metrics import accuracy_score, classification_report, precision_rec
 
 from probability_metrics import calibration_metrics
 
+REQUIRED_PROB_FIELDS = ["valid_flow_ids", "valid_y_true", "valid_prob", "flow_ids", "flow_y_true", "flow_prob"]
+
 
 def compute_metrics(y_true, y_pred):
     p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)
@@ -112,11 +114,84 @@ def load_label_names(path: str):
 def load_payload(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    required = ["valid_flow_ids", "valid_y_true", "valid_prob", "flow_ids", "flow_y_true", "flow_prob"]
-    missing = [key for key in required if key not in data]
+    missing = [key for key in REQUIRED_PROB_FIELDS if key not in data]
     if missing:
         raise ValueError(f"{path} is missing required probability fields: {missing}")
     return data
+
+
+def load_named_payloads(raw_inputs: List[List[str]]) -> Tuple[List[Tuple[str, Dict[str, Any], str]], List[Dict[str, Any]]]:
+    named_payloads: List[Tuple[str, Dict[str, Any], str]] = []
+    skipped: List[Dict[str, Any]] = []
+    for name, path in raw_inputs:
+        try:
+            named_payloads.append((name, load_payload(path), path))
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+            skipped.append({"name": name, "path": path, "reason": str(exc)})
+            print("skip_selector_input", json.dumps(skipped[-1], sort_keys=True))
+    if not named_payloads:
+        raise ValueError("No selector inputs contain the required valid/test probability fields.")
+    return named_payloads, skipped
+
+
+def _id_set(data: Dict[str, Any], split: str) -> set[str]:
+    key = "valid_flow_ids" if split == "valid" else "flow_ids"
+    return set(map(str, data[key]))
+
+
+def _compatible_group(
+    named_payloads: List[Tuple[str, Dict[str, Any], str]],
+    seed_idx: int,
+) -> Tuple[List[Tuple[str, Dict[str, Any], str]], set[str], set[str]]:
+    seed = named_payloads[seed_idx]
+    kept = [seed]
+    valid_common = _id_set(seed[1], "valid")
+    test_common = _id_set(seed[1], "test")
+    for idx, item in enumerate(named_payloads):
+        if idx == seed_idx:
+            continue
+        _, data, _ = item
+        next_valid = valid_common & _id_set(data, "valid")
+        next_test = test_common & _id_set(data, "test")
+        if next_valid and next_test:
+            kept.append(item)
+            valid_common = next_valid
+            test_common = next_test
+    return kept, valid_common, test_common
+
+
+def select_compatible_input_group(
+    named_payloads: List[Tuple[str, Dict[str, Any], str]],
+    preferred_base: str = "",
+) -> Tuple[List[Tuple[str, Dict[str, Any], str]], List[Dict[str, Any]]]:
+    if not named_payloads:
+        return named_payloads, []
+    if preferred_base:
+        names = [name for name, _, _ in named_payloads]
+        if preferred_base in names:
+            kept, _, _ = _compatible_group(named_payloads, names.index(preferred_base))
+            chosen_ids = {id(item[1]) for item in kept}
+        else:
+            raise ValueError(f"--base_input={preferred_base} is not one of loadable selector inputs: {names}")
+    else:
+        candidates = []
+        for idx in range(len(named_payloads)):
+            kept, valid_common, test_common = _compatible_group(named_payloads, idx)
+            candidates.append((len(kept), len(valid_common), len(test_common), -idx, kept))
+        _, _, _, _, kept = max(candidates, key=lambda item: item[:4])
+        chosen_ids = {id(item[1]) for item in kept}
+    skipped: List[Dict[str, Any]] = []
+    chosen_valid = set.intersection(*(_id_set(data, "valid") for _, data, _ in kept))
+    chosen_test = set.intersection(*(_id_set(data, "test") for _, data, _ in kept))
+    for name, data, path in named_payloads:
+        if id(data) in chosen_ids:
+            continue
+        valid_overlap = len(chosen_valid & _id_set(data, "valid"))
+        test_overlap = len(chosen_test & _id_set(data, "test"))
+        reason = f"incompatible flow ids with selected selector group: valid_overlap={valid_overlap}, test_overlap={test_overlap}"
+        skipped.append({"name": name, "path": path, "reason": reason})
+        print("skip_selector_input", json.dumps(skipped[-1], sort_keys=True))
+    return kept, skipped
 
 
 def normalize_prob(prob: np.ndarray) -> np.ndarray:
@@ -414,7 +489,9 @@ def main() -> None:
     ap.add_argument("--output_json", required=True)
     args = ap.parse_args()
 
-    named_payloads = [(name, load_payload(path), path) for name, path in args.input]
+    named_payloads, skipped_inputs = load_named_payloads(args.input)
+    named_payloads, incompatible_inputs = select_compatible_input_group(named_payloads, args.base_input)
+    skipped_inputs.extend(incompatible_inputs)
     unified_expert_slots = parse_name_list(args.unified_expert_slots)
     named_payloads, input_slot_status = apply_unified_expert_slots(named_payloads, unified_expert_slots)
     if args.base_input:
@@ -795,6 +872,7 @@ def main() -> None:
             "strategies": sorted(strategies),
             "unified_expert_slots": unified_expert_slots,
             "input_slot_status": input_slot_status,
+            "skipped_inputs": skipped_inputs,
             "output_smooth": args.output_smooth,
             "bootstrap_samples": args.bootstrap_samples,
             "rank_bootstrap_samples": rank_bootstrap_samples,

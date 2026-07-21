@@ -22,13 +22,59 @@ from train_tower2 import (
 )
 from models.flow_transformer import FlowTransformerClassifier
 from models.flow_graph_transformer import FlowGraphTransformerClassifier
+from models.counterfactual_flow_fusion import CounterfactualFlowFusion
 from probability_metrics import calibration_metrics
+
+
+def checkpoint_flow_stat_meta_dim(ckpt: dict) -> int:
+    """Read the persisted statistics contract with legacy compatibility."""
+    return int(ckpt.get("flow_stat_meta_dim", ckpt.get("meta_feature_dim", 0)))
 
 
 def load_model(ckpt_path: str, device: str):
     ckpt = torch.load(ckpt_path, map_location=device)
     if ckpt["model_type"] == "seq":
-        model = FlowTransformerClassifier(ckpt["input_dim"], ckpt["num_classes"], ckpt["hidden_dim"], ckpt["num_layers"], ckpt["num_heads"], ckpt["dropout"])
+        model = FlowTransformerClassifier(
+            ckpt["input_dim"], ckpt["num_classes"], ckpt["hidden_dim"],
+            ckpt["num_layers"], ckpt["num_heads"], ckpt["dropout"],
+            identifiability_feature_index=ckpt.get("identifiability_feature_index", -1),
+            identifiability_pooling=ckpt.get("packet_identifiability_pooling", False),
+            identifiability_feature_mode=ckpt.get("identifiability_feature_mode", "observed"),
+            identifiability_prior_init=ckpt.get("identifiability_prior_init", 0.1),
+            identifiability_dual_pooling=ckpt.get(
+                "packet_identifiability_dual_pooling", False
+            ),
+            identifiability_evidence_adapter=ckpt.get(
+                "packet_identifiability_evidence_adapter", False
+            ),
+            identifiability_adapter_max_delta=ckpt.get("identifiability_adapter_max_delta", 0.25),
+            identifiability_residual_max_weight=ckpt.get(
+                "identifiability_residual_max_weight", 0.0
+            ),
+            identifiability_residual_init=ckpt.get("identifiability_residual_init", 0.5),
+            dual_channel_mode=ckpt.get("dual_channel_mode", "concat"),
+            meta_feature_dim=ckpt.get("meta_feature_dim", 14),
+            native_structural_dim=ckpt.get("native_structural_dim", 0),
+            dual_channel_max_weight=ckpt.get("dual_channel_max_weight", 0.25),
+            dual_channel_init=ckpt.get("dual_channel_init", 0.1),
+            dual_channel_gate_mode=ckpt.get("dual_channel_gate_mode", "global"),
+            channel_fusion_base_mode=ckpt.get("channel_fusion_base_mode", "legacy"),
+            use_intervention_views=ckpt.get("use_intervention_views", False),
+            intervention_max_residual_weight=ckpt.get(
+                "intervention_max_residual_weight", 0.25
+            ),
+            intervention_view_base_mode=ckpt.get(
+                "intervention_view_base_mode", "symmetric_mean"
+            ),
+            exact_shared_packet_encoder=ckpt.get("exact_shared_packet_encoder", False),
+            shared_packet_hidden_dim=ckpt.get("shared_packet_hidden_dim", 128),
+            packet_evidence_max_weight=ckpt.get("packet_evidence_max_weight", 0.0),
+            train_ablate_input_channel=ckpt.get("train_ablate_input_channel", "none"),
+            train_ablate_intervention_view=ckpt.get(
+                "train_ablate_intervention_view", "none"
+            ),
+            train_fixed_channel_fusion=ckpt.get("train_fixed_channel_fusion", False),
+        )
     else:
         model = FlowGraphTransformerClassifier(
             ckpt["input_dim"],
@@ -38,6 +84,21 @@ def load_model(ckpt_path: str, device: str):
             ckpt["num_heads"],
             edge_attr_dim=ckpt.get("edge_attr_dim", 4),
             dropout=ckpt["dropout"],
+            identifiability_feature_index=ckpt.get("identifiability_feature_index", -1),
+            identifiability_pooling=ckpt.get("packet_identifiability_pooling", False),
+            identifiability_feature_mode=ckpt.get("identifiability_feature_mode", "observed"),
+            identifiability_prior_init=ckpt.get("identifiability_prior_init", 0.1),
+            identifiability_dual_pooling=ckpt.get(
+                "packet_identifiability_dual_pooling", False
+            ),
+            identifiability_evidence_adapter=ckpt.get(
+                "packet_identifiability_evidence_adapter", False
+            ),
+            identifiability_adapter_max_delta=ckpt.get("identifiability_adapter_max_delta", 0.25),
+            identifiability_residual_max_weight=ckpt.get(
+                "identifiability_residual_max_weight", 0.0
+            ),
+            identifiability_residual_init=ckpt.get("identifiability_residual_init", 0.5),
         )
     model.load_state_dict(ckpt["model_state"])
     model.to(device).eval()
@@ -57,25 +118,156 @@ def load_model(ckpt_path: str, device: str):
             flow_transformer_layers=ckpt.get("flow_transformer_layers", 1),
             flow_transformer_heads=ckpt.get("flow_transformer_heads", 4),
             dropout=ckpt.get("dropout", 0.1),
-            flow_stat_meta_dim=ckpt.get("meta_feature_dim", 0),
+            # New checkpoints persist the exact explicit-field contract. The
+            # fallback preserves legacy checkpoints whose statistics head was
+            # trained over the full trailing structural block.
+            flow_stat_meta_dim=checkpoint_flow_stat_meta_dim(ckpt),
             flow_stat_expert_weight=ckpt.get("flow_stat_expert_weight", 0.0),
             flow_stat_aux_weight=ckpt.get("flow_stat_aux_weight", 0.0),
+            identifiability_attention_prior=ckpt.get(
+                "identifiability_attention_prior", False
+            ),
+            identifiability_prior_init=ckpt.get("identifiability_prior_init", 0.1),
         )
         flow_head.load_state_dict(ckpt["flow_head_state"])
         flow_head.to(device).eval()
     return model, ckpt, flow_head
 
 
+def load_counterfactual_fusion(ckpt: dict, device: str):
+    has_state = "counterfactual_fusion_state" in ckpt
+    state = ckpt.get("counterfactual_fusion_state", {})
+    mode = ckpt.get("counterfactual_fusion", "none")
+    if not has_state or mode == "none":
+        return None
+    head = CounterfactualFlowFusion(
+        ckpt["hidden_dim"],
+        ckpt["num_classes"],
+        mode=mode,
+        base_mode=ckpt.get("counterfactual_base_mode", "mean"),
+        max_residual_weight=ckpt.get("counterfactual_max_residual_weight", 0.25),
+        initial_residual_fraction=ckpt.get(
+            "counterfactual_initial_residual_fraction", 0.1
+        ),
+        dropout=ckpt.get("dropout", 0.1),
+    )
+    head.load_state_dict(state)
+    return head.to(device).eval()
+
+
 @torch.no_grad()
-def predict_seq(model, dataset_path: str, device: str, batch_size: int):
+def ablate_seq_input_channel(
+    x: torch.Tensor,
+    model,
+    channel: str,
+) -> torch.Tensor:
+    """Zero one packet channel for inference-only contribution diagnostics."""
+    if channel == "none":
+        return x
+    if getattr(model, "dual_channel_mode", "concat") != "residual":
+        raise ValueError("input-channel ablation requires a residual dual-channel checkpoint")
+    embedding_dim = int(getattr(model, "embedding_feature_dim", 0))
+    native_dim = int(getattr(model, "native_structural_dim", 0))
+    meta_dim = int(getattr(model, "meta_feature_dim", 0))
+    if embedding_dim + meta_dim != x.shape[-1]:
+        raise ValueError(
+            "checkpoint/input dimensions disagree for channel ablation: "
+            f"embedding={embedding_dim} meta={meta_dim} input={x.shape[-1]}"
+        )
+    ranges = {
+        "semantic": (0, embedding_dim),
+        "content": (embedding_dim, embedding_dim + native_dim),
+        "structural": (embedding_dim + native_dim, embedding_dim + meta_dim),
+    }
+    start, end = ranges[channel]
+    if end <= start:
+        raise ValueError(f"checkpoint has no {channel} channel to ablate")
+    x = x.clone()
+    x[..., start:end] = 0
+    return x
+
+
+def ablate_intervention_inputs(
+    factual_x: torch.Tensor,
+    intervened_x: torch.Tensor,
+    mode: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Duplicate one aligned view without changing the trained fusion module."""
+    if mode == "none":
+        return factual_x, intervened_x
+    if mode == "factual_only":
+        return factual_x, factual_x
+    if mode == "intervened_only":
+        return intervened_x, intervened_x
+    raise ValueError(f"unknown intervention-view ablation: {mode}")
+
+
+@torch.no_grad()
+def predict_seq(
+    model,
+    dataset_path: str,
+    device: str,
+    batch_size: int,
+    intervened_dataset_path: str = "",
+    ablate_input_channel: str = "none",
+    ablate_intervention_view: str = "none",
+):
     ds = SeqDataset(dataset_path)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_seq)
-    y_true, y_pred, flow_ids, logits_all, emb_all, x_all = [], [], [], [], [], []
-    for batch in dl:
-        out = model(batch["x"].to(device), batch["mask"].to(device))
+    intervened_dl = None
+    if getattr(model, "use_intervention_views", False):
+        if not intervened_dataset_path:
+            raise ValueError("intervention-aware checkpoint requires a paired dataset")
+        intervened_ds = SeqDataset(intervened_dataset_path)
+        if len(intervened_ds) != len(ds):
+            raise ValueError("factual/intervened test dataset lengths differ")
+        intervened_dl = DataLoader(
+            intervened_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_seq
+        )
+    y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges = [], [], [], [], [], [], []
+    gate_values = {
+        "intervention_view_gate": [],
+        "dual_channel_gate": [],
+        "packet_evidence_gate": [],
+    }
+    batches = zip(dl, intervened_dl) if intervened_dl is not None else ((batch, None) for batch in dl)
+    for batch, intervened_batch in batches:
+        factual_x = ablate_seq_input_channel(
+            batch["x"].to(device), model, ablate_input_channel
+        )
+        intervened_x = None
+        if intervened_batch is not None:
+            if (
+                intervened_batch["flow_id"] != batch["flow_id"]
+                or not torch.equal(intervened_batch["label"], batch["label"])
+                or intervened_batch["x"].shape != batch["x"].shape
+            ):
+                raise ValueError("factual/intervened test windows are not aligned")
+            intervened_x = ablate_seq_input_channel(
+                intervened_batch["x"].to(device), model, ablate_input_channel
+            )
+            factual_x, intervened_x = ablate_intervention_inputs(
+                factual_x, intervened_x, ablate_intervention_view
+            )
+        out = model(
+            factual_x,
+            batch["mask"].to(device),
+            intervened_x=intervened_x,
+        )
+        valid_mask = batch["mask"].bool()
+        for gate_name in gate_values:
+            gate = out.get(gate_name)
+            if gate is None:
+                continue
+            gate = gate.detach().cpu()
+            if gate.ndim == 3 and gate.shape[:2] == valid_mask.shape:
+                gate = gate[valid_mask]
+            else:
+                gate = gate.reshape(-1, gate.shape[-1])
+            gate_values[gate_name].append(gate)
         logits = out["logits"].cpu()
         emb = out["embedding"].cpu()
-        x_cpu = batch["x"].cpu()
+        x_cpu = factual_x.cpu()
         labels = batch["label"]
         for i in range(logits.size(0)):
             if int(labels[i]) < 0:
@@ -85,14 +277,119 @@ def predict_seq(model, dataset_path: str, device: str, batch_size: int):
             flow_ids.append(batch["flow_id"][i])
             logits_all.append(logits[i].numpy())
             emb_all.append(emb[i].numpy())
-            x_all.append(x_cpu[i].numpy())
-    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all
+            x_all.append(x_cpu[i][batch["mask"][i]].numpy())
+            window_ranges.append(batch["window"][i])
+    gate_diagnostics = {}
+    for gate_name, chunks in gate_values.items():
+        if not chunks:
+            continue
+        values = torch.cat(chunks, dim=0).float()
+        gate_diagnostics[gate_name] = {
+            "num_samples": int(values.shape[0]),
+            "mean": values.mean(dim=0).tolist(),
+            "std": values.std(dim=0, unbiased=False).tolist(),
+            "p05": torch.quantile(values, 0.05, dim=0).tolist(),
+            "p50": torch.quantile(values, 0.50, dim=0).tolist(),
+            "p95": torch.quantile(values, 0.95, dim=0).tolist(),
+        }
+        if gate_name == "intervention_view_gate":
+            fusion = getattr(model, "intervention_view_fusion", None)
+            if fusion is None and hasattr(model, "shared_packet_encoder"):
+                fusion = model.shared_packet_encoder.intervention_view_fusion
+            if fusion is None:
+                raise ValueError("intervention gate was emitted without its fusion module")
+            max_residual = float(getattr(fusion, "max_residual_weight", 1.0))
+            base_mode = getattr(fusion, "base_mode", "symmetric_mean")
+            effective = fusion.effective_weights(values)
+            named_bounds = fusion.effective_weight_bounds()
+            view_names = ("factual", "intervened")
+            lower = torch.tensor(
+                [named_bounds[name][0] for name in view_names], dtype=effective.dtype
+            )
+            upper = torch.tensor(
+                [named_bounds[name][1] for name in view_names], dtype=effective.dtype
+            )
+            gate_diagnostics[gate_name]["base_mode"] = base_mode
+            gate_diagnostics[gate_name]["view_names"] = list(view_names)
+            gate_diagnostics[gate_name]["weight_semantics"] = (
+                "bounded_effective_routing_weights_before_channel_fusion"
+            )
+            gate_diagnostics[gate_name]["max_residual_weight"] = max_residual
+            gate_diagnostics[gate_name]["effective_routing_mean"] = effective.mean(dim=0).tolist()
+            gate_diagnostics[gate_name]["effective_routing_p05"] = torch.quantile(effective, 0.05, dim=0).tolist()
+            gate_diagnostics[gate_name]["effective_routing_p50"] = torch.quantile(effective, 0.50, dim=0).tolist()
+            gate_diagnostics[gate_name]["effective_routing_p95"] = torch.quantile(effective, 0.95, dim=0).tolist()
+            gate_diagnostics[gate_name]["theoretical_bounds"] = {
+                name: list(named_bounds[name]) for name in view_names
+            }
+            gate_diagnostics[gate_name]["bounds_satisfied"] = bool(
+                torch.all(effective >= lower - 1e-6)
+                and torch.all(effective <= upper + 1e-6)
+            )
+        elif gate_name == "packet_evidence_gate":
+            max_weight = float(getattr(model, "packet_evidence_max_weight", 0.0))
+            gate_diagnostics[gate_name]["weight_semantics"] = (
+                "learned_convex_weight_of_reused_packet_classifier_evidence"
+            )
+            gate_diagnostics[gate_name]["max_weight"] = max_weight
+            gate_diagnostics[gate_name]["bounds_satisfied"] = bool(
+                torch.all(values >= -1e-6)
+                and torch.all(values <= max_weight + 1e-6)
+            )
+        elif (
+            gate_name == "dual_channel_gate"
+            and getattr(model, "channel_fusion_base_mode", "legacy")
+            == "semantic_anchor"
+        ):
+            fusion = model.shared_packet_fusion
+            max_residual = float(getattr(model, "dual_channel_max_weight", 1.0))
+            fixed_fusion = bool(getattr(model, "train_fixed_channel_fusion", False))
+            if fixed_fusion:
+                effective = values
+                fixed_weight = 1.0 / len(fusion.channel_names)
+                named_bounds = {
+                    name: (fixed_weight, fixed_weight)
+                    for name in fusion.channel_names
+                }
+            else:
+                effective = fusion.effective_weights(values)
+                named_bounds = fusion.effective_weight_bounds()
+            lower = torch.tensor(
+                [named_bounds[name][0] for name in fusion.channel_names],
+                dtype=effective.dtype,
+            )
+            upper = torch.tensor(
+                [named_bounds[name][1] for name in fusion.channel_names],
+                dtype=effective.dtype,
+            )
+            gate_diagnostics[gate_name]["base_mode"] = "semantic_anchor"
+            gate_diagnostics[gate_name]["channel_names"] = list(fusion.channel_names)
+            gate_diagnostics[gate_name]["weight_semantics"] = (
+                "fixed_equal_normalized_channel_mean"
+                if fixed_fusion
+                else "bounded_effective_routing_weights_excluding_interaction_correction"
+            )
+            gate_diagnostics[gate_name]["max_residual_weight"] = (
+                0.0 if fixed_fusion else max_residual
+            )
+            gate_diagnostics[gate_name]["effective_routing_mean"] = effective.mean(dim=0).tolist()
+            gate_diagnostics[gate_name]["effective_routing_p05"] = torch.quantile(effective, 0.05, dim=0).tolist()
+            gate_diagnostics[gate_name]["effective_routing_p50"] = torch.quantile(effective, 0.50, dim=0).tolist()
+            gate_diagnostics[gate_name]["effective_routing_p95"] = torch.quantile(effective, 0.95, dim=0).tolist()
+            gate_diagnostics[gate_name]["theoretical_bounds"] = {
+                name: list(named_bounds[name]) for name in fusion.channel_names
+            }
+            gate_diagnostics[gate_name]["bounds_satisfied"] = bool(
+                torch.all(effective >= lower - 1e-6)
+                and torch.all(effective <= upper + 1e-6)
+            )
+    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics
 
 
 @torch.no_grad()
 def predict_graph(model, dataset_path: str, device: str):
     ds = GraphDataset(dataset_path)
-    y_true, y_pred, flow_ids, logits_all, emb_all, x_all = [], [], [], [], [], []
+    y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges = [], [], [], [], [], [], []
     for item in ds:
         label = int(item.get("label", -1))
         if label < 0:
@@ -105,7 +402,8 @@ def predict_graph(model, dataset_path: str, device: str):
         logits_all.append(logits)
         emb_all.append(out["embedding"].cpu().numpy())
         x_all.append(item["x"].cpu().numpy())
-    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all
+        window_ranges.append(item.get("window"))
+    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges
 
 
 def aggregate_by_flow(
@@ -114,6 +412,7 @@ def aggregate_by_flow(
     logits_all,
     emb_all=None,
     x_all=None,
+    window_ranges=None,
     flow_head=None,
     device: str = "cpu",
     class_to_coarse=None,
@@ -121,10 +420,12 @@ def aggregate_by_flow(
     hierarchical_mode: str = "logit",
     flow_eval_pooling: str = "checkpoint",
     flow_eval_topk: int = 3,
+    return_embeddings: bool = False,
 ):
     buckets = defaultdict(list)
     emb_buckets = defaultdict(list)
     x_buckets = defaultdict(list)
+    range_buckets = defaultdict(list)
     labels = {}
     for i, (y, fid, logit) in enumerate(zip(y_true, flow_ids, logits_all)):
         buckets[fid].append(logit)
@@ -132,19 +433,50 @@ def aggregate_by_flow(
             emb_buckets[fid].append(emb_all[i])
         if x_all is not None:
             x_buckets[fid].append(x_all[i])
+        if window_ranges is not None:
+            range_buckets[fid].append(window_ranges[i])
         labels[fid] = y
     flow_true, flow_pred, out_flow_ids, flow_logits_all = [], [], [], []
     multi_view_gates = []
     stat_gates = []
+    flow_embeddings = []
     for fid, arrs in buckets.items():
         if flow_head is None or flow_eval_pooling != "checkpoint":
             pooling = "mean_logits" if flow_eval_pooling == "checkpoint" else flow_eval_pooling
             logits = pool_window_logits(arrs, pooling, flow_eval_topk)
+            flow_embedding = (
+                np.stack(emb_buckets[fid], axis=0).mean(axis=0)
+                if emb_buckets.get(fid)
+                else None
+            )
         else:
             emb = torch.tensor(np.stack(emb_buckets[fid], axis=0), dtype=torch.float32, device=device)
             win_logits = torch.tensor(np.stack(arrs, axis=0), dtype=torch.float32, device=device)
             win_x = [torch.tensor(x, dtype=torch.float32, device=device) for x in x_buckets.get(fid, [])]
-            pooled = flow_head(emb, window_logits=win_logits, window_x=win_x)
+            window_reliability = None
+            if flow_head.identifiability_attention_prior and win_x:
+                reliability_index = -(flow_head.flow_stat_meta_dim + 2)
+                reliability_values = []
+                for x in win_x:
+                    valid = x.abs().sum(dim=-1) > 0
+                    packet_values = x[valid, reliability_index]
+                    reliability_values.append(
+                        packet_values.mean() if packet_values.numel() else x.new_tensor(1.0)
+                    )
+                window_reliability = torch.stack(reliability_values)
+            pooled = flow_head(
+                emb,
+                window_logits=win_logits,
+                window_x=win_x,
+                window_ranges=(
+                    range_buckets[fid]
+                    if range_buckets.get(fid)
+                    and all(item is not None for item in range_buckets[fid])
+                    else None
+                ),
+                window_reliability=window_reliability,
+            )
+            flow_embedding = pooled["embedding"].detach().cpu().numpy()
             if pooled.get("multi_view_gate") is not None:
                 multi_view_gates.append(pooled["multi_view_gate"].detach().cpu().numpy())
             if pooled.get("stat_gate") is not None:
@@ -162,6 +494,9 @@ def aggregate_by_flow(
         flow_pred.append(int(logits.argmax()))
         out_flow_ids.append(fid)
         flow_logits_all.append(np.asarray(logits, dtype=np.float32))
+        flow_embeddings.append(
+            None if flow_embedding is None else np.asarray(flow_embedding, dtype=np.float32)
+        )
     gate_summary = None
     if multi_view_gates:
         gate_arr = np.stack(multi_view_gates, axis=0)
@@ -187,7 +522,75 @@ def aggregate_by_flow(
             "max": float(stat_arr.max()),
             "num_flows": int(stat_arr.size),
         }
-    return flow_true, flow_pred, out_flow_ids, flow_logits_all, gate_summary, stat_gate_summary
+    result = (
+        flow_true,
+        flow_pred,
+        out_flow_ids,
+        flow_logits_all,
+        gate_summary,
+        stat_gate_summary,
+    )
+    return result + (flow_embeddings,) if return_embeddings else result
+
+
+def fuse_counterfactual_flows(
+    fusion_head,
+    clean_records,
+    paired_records,
+    device: str,
+):
+    clean_true, _, clean_ids, clean_logits, _, _, clean_embeddings = clean_records
+    paired_true, _, paired_ids, paired_logits, _, _, paired_embeddings = paired_records
+    paired_index = {flow_id: idx for idx, flow_id in enumerate(paired_ids)}
+    missing = [flow_id for flow_id in clean_ids if flow_id not in paired_index]
+    if missing:
+        raise ValueError(
+            f"paired test dataset is missing {len(missing)} clean flow_ids; "
+            f"examples={missing[:3]}"
+        )
+    ordered = [paired_index[flow_id] for flow_id in clean_ids]
+    aligned_true = [paired_true[idx] for idx in ordered]
+    if list(clean_true) != aligned_true:
+        raise ValueError("clean and paired test labels disagree after flow_id alignment")
+    if any(embedding is None for embedding in clean_embeddings) or any(
+        paired_embeddings[idx] is None for idx in ordered
+    ):
+        raise ValueError("counterfactual evaluation requires flow embeddings")
+
+    clean_embedding_t = torch.tensor(
+        np.stack(clean_embeddings), dtype=torch.float32, device=device
+    )
+    paired_embedding_t = torch.tensor(
+        np.stack([paired_embeddings[idx] for idx in ordered]),
+        dtype=torch.float32,
+        device=device,
+    )
+    clean_logits_t = torch.tensor(
+        np.stack(clean_logits), dtype=torch.float32, device=device
+    )
+    paired_logits_t = torch.tensor(
+        np.stack([paired_logits[idx] for idx in ordered]),
+        dtype=torch.float32,
+        device=device,
+    )
+    with torch.no_grad():
+        output = fusion_head(
+            clean_embedding_t,
+            paired_embedding_t,
+            clean_logits_t,
+            paired_logits_t,
+        )
+    logits = output["logits"].detach().cpu().numpy()
+    gates = output["residual_gate"].detach().cpu().numpy().reshape(-1)
+    diagnostics = {
+        "mode": fusion_head.mode,
+        "paired_coverage": 1.0,
+        "gate_mean": float(gates.mean()) if gates.size else 0.0,
+        "gate_std": float(gates.std()) if gates.size else 0.0,
+        "gate_min": float(gates.min()) if gates.size else 0.0,
+        "gate_max": float(gates.max()) if gates.size else 0.0,
+    }
+    return logits, diagnostics
 
 
 def softmax_np(x: np.ndarray) -> np.ndarray:
@@ -261,11 +664,28 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--dataset", required=True)
+    ap.add_argument("--paired_view_dataset", default="", help="Header-intervened counterpart required by counterfactual checkpoints.")
     ap.add_argument("--label_map", default="", help="Optional JSON mapping label name to label id, used for readable reports.")
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--output_json", default="")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no_report", action="store_true", help="Only print the metrics JSON, without classification reports.")
+    ap.add_argument(
+        "--ablate_input_channel",
+        choices=["none", "semantic", "content", "structural"],
+        default="none",
+        help="Inference-only diagnostic: zero one aligned packet channel in both factual and intervened inputs.",
+    )
+    ap.add_argument(
+        "--ablate_intervention_view",
+        choices=["none", "factual_only", "intervened_only"],
+        default="none",
+        help=(
+            "Inference-only diagnostic for shared intervention checkpoints: replace "
+            "both semantic views with the factual or intervened view while preserving "
+            "the trained architecture."
+        ),
+    )
     ap.add_argument(
         "--flow_eval_pooling",
         default="checkpoint",
@@ -275,24 +695,45 @@ def main():
     ap.add_argument("--flow_eval_topk", type=int, default=3, help="Top-k windows for --flow_eval_pooling topk_logits.")
     args = ap.parse_args()
     model, ckpt, flow_head = load_model(args.checkpoint, args.device)
+    fusion_head = load_counterfactual_fusion(ckpt, args.device)
+    if fusion_head is not None and not args.paired_view_dataset:
+        ap.error("this checkpoint requires --paired_view_dataset for counterfactual evaluation")
+    if ckpt.get("use_intervention_views", False) and not args.paired_view_dataset:
+        ap.error("this checkpoint requires --paired_view_dataset for shared intervention views")
+    if args.ablate_intervention_view != "none" and not ckpt.get(
+        "use_intervention_views", False
+    ):
+        ap.error("--ablate_intervention_view requires a shared intervention-view checkpoint")
     label_names, label_map = load_label_names(args.label_map)
     class_to_coarse = None
     if ckpt.get("num_coarse_classes", 0) > 0:
         class_to_coarse, _ = build_class_to_coarse(ckpt.get("coarse_groups", "vpn_app"), ckpt["num_classes"], args.device)
     if ckpt["model_type"] == "seq":
-        y_true, y_pred, flow_ids, logits_all, emb_all, x_all = predict_seq(model, args.dataset, args.device, args.batch_size)
+        y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics = predict_seq(
+            model,
+            args.dataset,
+            args.device,
+            args.batch_size,
+            intervened_dataset_path=(
+                args.paired_view_dataset if ckpt.get("use_intervention_views", False) else ""
+            ),
+            ablate_input_channel=args.ablate_input_channel,
+            ablate_intervention_view=args.ablate_intervention_view,
+        )
     else:
-        y_true, y_pred, flow_ids, logits_all, emb_all, x_all = predict_graph(model, args.dataset, args.device)
+        y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges = predict_graph(model, args.dataset, args.device)
+        gate_diagnostics = {}
 
     window_prob = softmax_np(np.stack(logits_all, axis=0)) if logits_all else np.zeros((0, ckpt["num_classes"]))
     window_metrics = compute_metrics(y_true, y_pred)
     window_metrics["calibration"] = calibration_metrics(y_true, window_prob)
-    flow_true, flow_pred, out_flow_ids, flow_logits_all, multi_view_gate_summary, stat_gate_summary = aggregate_by_flow(
+    clean_records = aggregate_by_flow(
         y_true,
         flow_ids,
         logits_all,
         emb_all=emb_all,
         x_all=x_all,
+        window_ranges=window_ranges,
         flow_head=flow_head,
         device=args.device,
         class_to_coarse=class_to_coarse,
@@ -300,7 +741,40 @@ def main():
         hierarchical_mode=ckpt.get("hierarchical_mode", "logit"),
         flow_eval_pooling=args.flow_eval_pooling,
         flow_eval_topk=args.flow_eval_topk,
+        return_embeddings=fusion_head is not None,
     )
+    if fusion_head is None:
+        flow_true, flow_pred, out_flow_ids, flow_logits_all, multi_view_gate_summary, stat_gate_summary = clean_records
+        counterfactual_summary = None
+    else:
+        if ckpt["model_type"] == "seq":
+            paired_outputs = predict_seq(
+                model, args.paired_view_dataset, args.device, args.batch_size
+            )
+        else:
+            paired_outputs = predict_graph(model, args.paired_view_dataset, args.device)
+        paired_records = aggregate_by_flow(
+            paired_outputs[0],
+            paired_outputs[2],
+            paired_outputs[3],
+            emb_all=paired_outputs[4],
+            x_all=paired_outputs[5],
+            window_ranges=paired_outputs[6],
+            flow_head=flow_head,
+            device=args.device,
+            class_to_coarse=class_to_coarse,
+            hierarchical_logit_weight=ckpt.get("hierarchical_logit_weight", 0.0),
+            hierarchical_mode=ckpt.get("hierarchical_mode", "logit"),
+            flow_eval_pooling=args.flow_eval_pooling,
+            flow_eval_topk=args.flow_eval_topk,
+            return_embeddings=True,
+        )
+        flow_true, _, out_flow_ids, _, multi_view_gate_summary, stat_gate_summary, _ = clean_records
+        fused_logits, counterfactual_summary = fuse_counterfactual_flows(
+            fusion_head, clean_records, paired_records, args.device
+        )
+        flow_logits_all = list(fused_logits)
+        flow_pred = fused_logits.argmax(axis=-1).astype(int).tolist()
     flow_prob = softmax_np(np.stack(flow_logits_all, axis=0)) if flow_logits_all else np.zeros((0, ckpt["num_classes"]))
     flow_metrics = compute_metrics(flow_true, flow_pred)
     flow_metrics["calibration"] = calibration_metrics(flow_true, flow_prob)
@@ -310,8 +784,28 @@ def main():
         "eval_config": {
             "flow_eval_pooling": args.flow_eval_pooling,
             "flow_eval_topk": args.flow_eval_topk,
+            "ablate_input_channel": args.ablate_input_channel,
+            "ablate_intervention_view": args.ablate_intervention_view,
+            "trained_ablate_input_channel": ckpt.get(
+                "train_ablate_input_channel", "none"
+            ),
+            "trained_ablate_intervention_view": ckpt.get(
+                "train_ablate_intervention_view", "none"
+            ),
+            "trained_fixed_channel_fusion": ckpt.get(
+                "train_fixed_channel_fusion", False
+            ),
+            "mechanism_sensitivity_scope": (
+                "retrained_ablation"
+                if ckpt.get("train_ablate_input_channel", "none") != "none"
+                or ckpt.get("train_ablate_intervention_view", "none") != "none"
+                or ckpt.get("train_fixed_channel_fusion", False)
+                else "inference_only_not_retrained_ablation"
+            ),
             "multi_view_gate": multi_view_gate_summary,
             "flow_stat_gate": stat_gate_summary,
+            "counterfactual_fusion": counterfactual_summary,
+            "learned_gate_diagnostics": gate_diagnostics,
         },
     }
     print(json.dumps(metrics, indent=2))

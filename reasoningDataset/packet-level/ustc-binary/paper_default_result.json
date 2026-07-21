@@ -1,0 +1,708 @@
+{
+  "task": "packet-level-classification",
+  "split_protocol": "per-flow-split",
+  "sample_unit": "one_packet",
+  "feature_scope": "current_packet_only",
+  "config": {
+    "train_index": "/tmp/two_tower_runs/packet_level/ustc-binary/fold0/train/packet_index.jsonl",
+    "valid_index": "/tmp/two_tower_runs/packet_level/ustc-binary/fold0/valid/packet_index.jsonl",
+    "test_index": "/tmp/two_tower_runs/packet_level/ustc-binary/fold0/test/packet_index.jsonl",
+    "label_map": "/tmp/two_tower_runs/packet_level/ustc-binary/fold0/train/label_map.json",
+    "output_json": "/tmp/two_tower_runs/packet_level/ustc-binary/fold0/packet_feature_expert.json",
+    "model_out": "/tmp/two_tower_runs/checkpoints/packet_level/ustc-binary_fold0/feature_expert.joblib",
+    "byte_prefix_len": [
+      32,
+      64,
+      96,
+      128,
+      256
+    ],
+    "min_samples_leaf": [
+      1,
+      2,
+      4
+    ],
+    "n_estimators": 300,
+    "zero_ip_bytes": false,
+    "seed": 42,
+    "n_jobs": -1
+  },
+  "trials": [
+    {
+      "byte_prefix_len": 32,
+      "min_samples_leaf": 1,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 32,
+      "min_samples_leaf": 2,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 32,
+      "min_samples_leaf": 4,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 64,
+      "min_samples_leaf": 1,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 64,
+      "min_samples_leaf": 2,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 64,
+      "min_samples_leaf": 4,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 96,
+      "min_samples_leaf": 1,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 96,
+      "min_samples_leaf": 2,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 96,
+      "min_samples_leaf": 4,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 128,
+      "min_samples_leaf": 1,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 128,
+      "min_samples_leaf": 2,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 128,
+      "min_samples_leaf": 4,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 256,
+      "min_samples_leaf": 1,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 256,
+      "min_samples_leaf": 2,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    },
+    {
+      "byte_prefix_len": 256,
+      "min_samples_leaf": 4,
+      "validation_metrics": {
+        "num_samples": 12000,
+        "accuracy": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0,
+        "weighted_precision": 1.0,
+        "weighted_recall": 1.0,
+        "weighted_f1": 1.0,
+        "per_class": {
+          "benign": {
+            "label_id": 0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          },
+          "malware": {
+            "label_id": 1,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "support": 6000
+          }
+        },
+        "confusion_matrix": [
+          [
+            6000,
+            0
+          ],
+          [
+            0,
+            6000
+          ]
+        ]
+      }
+    }
+  ],
+  "selected": {
+    "byte_prefix_len": 32,
+    "min_samples_leaf": 1,
+    "validation_metrics": {
+      "num_samples": 12000,
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "weighted_precision": 1.0,
+      "weighted_recall": 1.0,
+      "weighted_f1": 1.0,
+      "per_class": {
+        "benign": {
+          "label_id": 0,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 6000
+        },
+        "malware": {
+          "label_id": 1,
+          "precision": 1.0,
+          "recall": 1.0,
+          "f1": 1.0,
+          "support": 6000
+        }
+      },
+      "confusion_matrix": [
+        [
+          6000,
+          0
+        ],
+        [
+          0,
+          6000
+        ]
+      ]
+    }
+  },
+  "test_metrics": {
+    "num_samples": 609332,
+    "accuracy": 1.0,
+    "macro_precision": 1.0,
+    "macro_recall": 1.0,
+    "macro_f1": 1.0,
+    "weighted_precision": 1.0,
+    "weighted_recall": 1.0,
+    "weighted_f1": 1.0,
+    "per_class": {
+      "benign": {
+        "label_id": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 364403
+      },
+      "malware": {
+        "label_id": 1,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+        "support": 244929
+      }
+    },
+    "confusion_matrix": [
+      [
+        364403,
+        0
+      ],
+      [
+        0,
+        244929
+      ]
+    ]
+  }
+}

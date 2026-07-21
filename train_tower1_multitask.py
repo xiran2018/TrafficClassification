@@ -6,6 +6,7 @@ cannot directly optimize packet embedding classification and contrastive losses.
 
 Training objective:
     L = L_QA + alpha * L_packet_cls + beta * L_supcon
+        + gamma * L_flow_proto + delta * L_paired_consistency
 
 The packet embedding follows scheme B for decoder-only LLMs: last-token hidden state.
 """
@@ -17,7 +18,7 @@ import json
 import math
 import os
 import random
-from itertools import cycle
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -97,10 +98,171 @@ class PacketAuxDataset(Dataset):
         return self.rows[idx]
 
 
+def flow_balanced_validation_rows(rows: List[dict], packets_per_flow: int, seed: int) -> List[dict]:
+    """Select a deterministic, non-repeated packet subset with equal flow exposure."""
+    if packets_per_flow <= 0:
+        return list(rows)
+    grouped: Dict[str, List[dict]] = {}
+    for index, row in enumerate(rows):
+        grouped.setdefault(str(row.get("flow_id", index)), []).append(row)
+
+    selected: List[dict] = []
+    for flow_id in sorted(grouped):
+        candidates = grouped[flow_id]
+
+        def stable_packet_key(row: dict) -> bytes:
+            packet_id = row.get("packet_uid", row.get("packet_id", ""))
+            value = f"{seed}:{flow_id}:{packet_id}"
+            return hashlib.blake2b(value.encode("utf-8"), digest_size=16).digest()
+
+        selected.extend(sorted(candidates, key=stable_packet_key)[:packets_per_flow])
+    return selected
+
+
+def validation_patience_exhausted(non_improving_evals: int, patience: int) -> bool:
+    return int(patience) > 0 and int(non_improving_evals) >= int(patience)
+
+
+def tower1_training_config(args) -> dict:
+    keys = (
+        "base_model",
+        "label_map",
+        "packet_aux_jsonl",
+        "paired_packet_aux_jsonl",
+        "valid_packet_aux_jsonl",
+        "sft_jsonl",
+        "epochs",
+        "max_steps",
+        "packet_batch_size",
+        "valid_batch_size",
+        "valid_packets_per_flow",
+        "max_packet_length",
+        "lr",
+        "head_lr",
+        "weight_decay",
+        "class_weighting",
+        "class_weight_beta",
+        "class_weight_basis",
+        "class_weight_strength",
+        "disable_packet_information_weights",
+        "cls_weight",
+        "contrastive_weight",
+        "temperature",
+        "same_flow_positive_weight",
+        "same_label_positive_weight",
+        "flow_proto_weight",
+        "flow_proto_positive",
+        "flow_proto_context",
+        "paired_consistency_weight",
+        "paired_cls_weight",
+        "paired_logit_kl_weight",
+        "paired_raw_consistency_weight",
+        "flow_balanced_packet_batches",
+        "packets_per_flow",
+        "projection_dim",
+        "lora_r",
+        "lora_alpha",
+        "lora_dropout",
+        "gradient_accumulation_steps",
+        "gradient_checkpointing",
+        "dtype",
+        "local_files_only",
+        "init_checkpoint_dir",
+        "init_adapter_only",
+        "select_metric",
+        "early_stop_patience",
+        "no_sft",
+        "seed",
+    )
+    config = {key: getattr(args, key) for key in keys}
+    config["packet_batch_scheduler"] = "epoch_resampled_dataloader_v1"
+    return config
+
+
+def file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_training_contract(
+    output_dir: str | Path,
+    args,
+    *,
+    status: str,
+    completed_artifacts: Optional[dict] = None,
+) -> Path:
+    output = Path(output_dir) / "tower1_training_contract.json"
+    source_path = Path(__file__).resolve()
+    if status == "complete" and output.is_file():
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        if payload.get("schema") != "tower1_training_contract_v1":
+            raise ValueError(f"unexpected Tower-1 training contract schema: {output}")
+        if payload.get("training_config") != tower1_training_config(args):
+            raise ValueError("Tower-1 completion config differs from its launch contract")
+        payload["status"] = "complete"
+        payload["completed_artifacts"] = completed_artifacts or {}
+        payload["completion_observed_trainer_source"] = {
+            "path": str(source_path),
+            "sha256": file_sha256(source_path),
+        }
+        output.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return output
+
+    input_paths = {
+        "label_map": args.label_map,
+        "packet_aux_jsonl": args.packet_aux_jsonl,
+        "valid_packet_aux_jsonl": args.valid_packet_aux_jsonl,
+        "paired_packet_aux_jsonl": args.paired_packet_aux_jsonl,
+    }
+    input_paths.update(
+        {f"sft_jsonl_{index}": path for index, path in enumerate(args.sft_jsonl)}
+    )
+    input_evidence = {}
+    for name, value in input_paths.items():
+        if not value:
+            continue
+        path = Path(value).resolve()
+        input_evidence[name] = {
+            "path": str(path),
+            "sha256": file_sha256(path),
+            "size_bytes": path.stat().st_size,
+        }
+    payload = {
+        "schema": "tower1_training_contract_v1",
+        "status": status,
+        "argv": list(sys.argv),
+        "training_config": tower1_training_config(args),
+        "input_evidence": input_evidence,
+        "trainer_source": {
+            "path": str(source_path),
+            "sha256": file_sha256(source_path),
+        },
+        "completed_artifacts": completed_artifacts or {},
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return output
+
+
 class FlowBalancedPacketBatchSampler(BatchSampler):
     """Sample several packets from each selected flow so flow-aware SupCon has positives."""
 
-    def __init__(self, rows: List[dict], batch_size: int, packets_per_flow: int, seed: int = 42):
+    def __init__(
+        self,
+        rows: List[dict],
+        batch_size: int,
+        packets_per_flow: int,
+        seed: int = 42,
+        allow_packet_replacement: bool = True,
+    ):
         self.flow_to_indices: Dict[str, List[int]] = {}
         for idx, row in enumerate(rows):
             self.flow_to_indices.setdefault(str(row.get("flow_id", idx)), []).append(idx)
@@ -109,6 +271,7 @@ class FlowBalancedPacketBatchSampler(BatchSampler):
         self.packets_per_flow = max(1, int(packets_per_flow))
         self.flows_per_batch = max(1, self.batch_size // self.packets_per_flow)
         self.seed = seed
+        self.allow_packet_replacement = bool(allow_packet_replacement)
         self.epoch = 0
 
     def __iter__(self):
@@ -122,6 +285,8 @@ class FlowBalancedPacketBatchSampler(BatchSampler):
                 indices = self.flow_to_indices[flow_id]
                 if len(indices) >= self.packets_per_flow:
                     batch.extend(rng.sample(indices, self.packets_per_flow))
+                elif not self.allow_packet_replacement:
+                    batch.extend(indices)
                 else:
                     batch.extend(rng.choice(indices) for _ in range(self.packets_per_flow))
             if batch:
@@ -129,6 +294,26 @@ class FlowBalancedPacketBatchSampler(BatchSampler):
 
     def __len__(self) -> int:
         return max(1, math.ceil(len(self.flows) / self.flows_per_batch))
+
+
+class RestartableDataIterator:
+    """Restart a loader at exhaustion without caching its first epoch."""
+
+    def __init__(self, loader: Iterable):
+        self.loader = loader
+        self.iterator = iter(loader)
+        self.completed_passes = 0
+
+    def __next__(self):
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self.completed_passes += 1
+            self.iterator = iter(self.loader)
+            try:
+                return next(self.iterator)
+            except StopIteration as exc:
+                raise ValueError("cannot restart an empty training loader") from exc
 
 
 def stable_flow_id(value: str) -> int:
@@ -246,11 +431,44 @@ def load_label_names(label_map_path: str) -> List[str]:
     return names
 
 
-def configure_packet_weights(rows: List[dict], weighting: str, beta: float, disable_information_weights: bool) -> Dict[int, float]:
-    counts: Dict[int, int] = {}
+def packet_class_counts(rows: List[dict], basis: str = "packet") -> Dict[int, int]:
+    if basis == "packet":
+        counts: Dict[int, int] = {}
+        for row in rows:
+            label = int(row["label_id"])
+            counts[label] = counts.get(label, 0) + 1
+        return counts
+    if basis != "flow":
+        raise ValueError(f"Unknown class-weight count basis: {basis}")
+
+    flow_labels: Dict[str, int] = {}
     for row in rows:
+        flow_id = str(row.get("flow_id", ""))
+        if not flow_id:
+            raise ValueError("Flow-based class weighting requires every packet row to have flow_id")
         label = int(row["label_id"])
+        previous = flow_labels.setdefault(flow_id, label)
+        if previous != label:
+            raise ValueError(
+                f"Conflicting labels for flow_id={flow_id}: {previous} versus {label}"
+            )
+    counts: Dict[int, int] = {}
+    for label in flow_labels.values():
         counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def configure_packet_weights(
+    rows: List[dict],
+    weighting: str,
+    beta: float,
+    disable_information_weights: bool,
+    count_basis: str = "packet",
+    strength: float = 1.0,
+) -> Dict[int, float]:
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError(f"class weight strength must be in [0, 1], got {strength}")
+    counts = packet_class_counts(rows, basis=count_basis)
     if weighting == "inverse":
         class_weights = {label: 1.0 / max(count, 1) for label, count in counts.items()}
     elif weighting == "effective":
@@ -260,6 +478,9 @@ def configure_packet_weights(rows: List[dict], weighting: str, beta: float, disa
         }
     else:
         class_weights = {label: 1.0 for label in counts}
+    mean_weight = sum(class_weights.values()) / max(len(class_weights), 1)
+    class_weights = {label: weight / max(mean_weight, 1e-12) for label, weight in class_weights.items()}
+    class_weights = {label: weight ** strength for label, weight in class_weights.items()}
     mean_weight = sum(class_weights.values()) / max(len(class_weights), 1)
     class_weights = {label: weight / max(mean_weight, 1e-12) for label, weight in class_weights.items()}
     for row in rows:
@@ -353,6 +574,12 @@ def main() -> None:
     ap.add_argument("--sft_batch_size", type=int, default=2)
     ap.add_argument("--packet_batch_size", type=int, default=16)
     ap.add_argument("--valid_batch_size", type=int, default=0, help="Validation batch size; 0 reuses --packet_batch_size.")
+    ap.add_argument(
+        "--valid_packets_per_flow",
+        type=int,
+        default=0,
+        help="Deterministically evaluate at most this many packets per validation flow; 0 uses all packets.",
+    )
     ap.add_argument("--max_sft_length", type=int, default=1792)
     ap.add_argument("--max_packet_length", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=2e-5)
@@ -360,6 +587,18 @@ def main() -> None:
     ap.add_argument("--weight_decay", type=float, default=0.01)
     ap.add_argument("--class_weighting", choices=["none", "inverse", "effective"], default="none")
     ap.add_argument("--class_weight_beta", type=float, default=0.9999)
+    ap.add_argument(
+        "--class_weight_basis",
+        choices=["packet", "flow"],
+        default="packet",
+        help="Count raw packets or unique flows when deriving Tower-1 class-balanced CE weights.",
+    )
+    ap.add_argument(
+        "--class_weight_strength",
+        type=float,
+        default=1.0,
+        help="Exponent in [0,1] applied to normalized class weights; 0 disables reweighting and 1 uses it fully.",
+    )
     ap.add_argument("--disable_packet_information_weights", action="store_true", help="Give ACK/control packets full CE weight; recommended when packet classification is the primary task.")
     ap.add_argument("--cls_weight", type=float, default=0.1)
     ap.add_argument("--contrastive_weight", type=float, default=0.3)
@@ -368,10 +607,22 @@ def main() -> None:
     ap.add_argument("--same_label_positive_weight", type=float, default=1.0, help="Positive weight for same-label packets in flow-aware SupCon.")
     ap.add_argument("--flow_proto_weight", type=float, default=0.0, help="Weight for packet-to-flow prototype contrastive loss in Tower-1.")
     ap.add_argument("--flow_proto_positive", choices=["own_flow", "same_class"], default="same_class", help="Positive flow prototypes for --flow_proto_weight.")
+    ap.add_argument(
+        "--flow_proto_context",
+        choices=["inclusive", "leave_one_out"],
+        default="inclusive",
+        help="Whether an anchor packet may contribute to its own flow prototype.",
+    )
     ap.add_argument("--paired_packet_aux_jsonl", default="", help="Optional second-view packet_auxiliary.jsonl aligned by packet_uid, e.g. randomized IP/port prompts.")
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Weight for Tower-1 full-header vs paired-view packet embedding/logit consistency.")
     ap.add_argument("--paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier added inside the packet classification loss.")
     ap.add_argument("--paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
+    ap.add_argument(
+        "--paired_raw_consistency_weight",
+        type=float,
+        default=1.0,
+        help="Raw last-token cosine consistency inside Tower-1 paired loss; concat extraction exposes this representation downstream.",
+    )
     ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
     ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
     ap.add_argument("--projection_dim", type=int, default=256)
@@ -386,6 +637,12 @@ def main() -> None:
     ap.add_argument("--save_steps", type=int, default=0)
     ap.add_argument("--eval_steps", type=int, default=0, help="Validation interval. 0 evaluates once per packet-loader epoch.")
     ap.add_argument("--select_metric", choices=["macro_f1", "accuracy"], default="macro_f1")
+    ap.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=0,
+        help="Stop after this many non-improving validation evaluations; 0 disables early stopping.",
+    )
     ap.add_argument("--no_load_progress", action="store_true", help="Disable JSONL loading progress bars.")
     ap.add_argument("--stop_on_nonfinite_loss", action="store_true", help="Raise an error instead of skipping a NaN/Inf loss step.")
     ap.add_argument("--auto_max_sft_length", action="store_true", help="Scan SFT token lengths and raise --max_sft_length to the requested percentile.")
@@ -394,9 +651,15 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
+    if not 0.0 <= args.class_weight_strength <= 1.0:
+        ap.error("--class_weight_strength must be in [0, 1]")
+    if args.paired_raw_consistency_weight < 0:
+        ap.error("--paired_raw_consistency_weight must be non-negative")
 
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
+    contract_path = write_training_contract(args.output_dir, args, status="launched")
+    print(f"wrote Tower-1 training contract: {contract_path}", flush=True)
     device = torch.device(args.device)
     dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[args.dtype]
     print(f"device={device}, dtype={args.dtype}", flush=True)
@@ -461,14 +724,25 @@ def main() -> None:
         weighting=args.class_weighting,
         beta=args.class_weight_beta,
         disable_information_weights=args.disable_packet_information_weights,
+        count_basis=args.class_weight_basis,
+        strength=args.class_weight_strength,
     )
-    print(f"packet class weights ({args.class_weighting})={class_weights}", flush=True)
+    class_counts = packet_class_counts(packet_ds.rows, basis=args.class_weight_basis)
+    print(
+        f"packet class weights (method={args.class_weighting}, basis={args.class_weight_basis}, "
+        f"strength={args.class_weight_strength}) counts={class_counts} weights={class_weights}",
+        flush=True,
+    )
     if args.flow_balanced_packet_batches:
+        distinct_flow_context = (
+            args.flow_proto_weight > 0 and args.flow_proto_context == "leave_one_out"
+        )
         packet_sampler = FlowBalancedPacketBatchSampler(
             packet_ds.rows,
             batch_size=args.packet_batch_size,
             packets_per_flow=args.packets_per_flow,
             seed=args.seed,
+            allow_packet_replacement=not distinct_flow_context,
         )
         packet_loader = DataLoader(
             packet_ds,
@@ -477,7 +751,9 @@ def main() -> None:
         )
         print(
             f"flow-balanced packet sampler: flows={len(packet_sampler.flows)}, "
-            f"flows_per_batch={packet_sampler.flows_per_batch}, packets_per_flow={packet_sampler.packets_per_flow}",
+            f"flows_per_batch={packet_sampler.flows_per_batch}, "
+            f"packets_per_flow={packet_sampler.packets_per_flow}, "
+            f"allow_packet_replacement={packet_sampler.allow_packet_replacement}",
             flush=True,
         )
     else:
@@ -489,11 +765,17 @@ def main() -> None:
             collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
         )
     print(f"packet samples={len(packet_ds)}, packet batches/epoch={len(packet_loader)}", flush=True)
-    packet_iter = cycle(packet_loader)
+    packet_iter = RestartableDataIterator(packet_loader)
 
     valid_loader = None
     if args.valid_packet_aux_jsonl:
         valid_ds = PacketAuxDataset(args.valid_packet_aux_jsonl, show_progress=show_load_progress)
+        full_valid_count = len(valid_ds.rows)
+        valid_ds.rows = flow_balanced_validation_rows(
+            valid_ds.rows,
+            packets_per_flow=args.valid_packets_per_flow,
+            seed=args.seed,
+        )
         valid_loader = DataLoader(
             valid_ds,
             batch_size=args.valid_batch_size or args.packet_batch_size,
@@ -501,7 +783,11 @@ def main() -> None:
             drop_last=False,
             collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
         )
-        print(f"validation packet samples={len(valid_ds)}, batches={len(valid_loader)}", flush=True)
+        print(
+            f"validation packet samples={len(valid_ds)}/{full_valid_count}, "
+            f"packets_per_flow={args.valid_packets_per_flow or 'all'}, batches={len(valid_loader)}",
+            flush=True,
+        )
 
     sft_loader = None
     if not args.no_sft:
@@ -517,7 +803,7 @@ def main() -> None:
             collate_fn=SFTCollator(tokenizer, args.max_sft_length),
         )
         print(f"SFT samples={len(sft_ds)}, SFT batches/epoch={len(sft_loader)}", flush=True)
-        sft_iter = cycle(sft_loader)
+        sft_iter = RestartableDataIterator(sft_loader)
     else:
         print("SFT disabled; training packet cls + SupCon only", flush=True)
         sft_iter = None
@@ -551,8 +837,11 @@ def main() -> None:
     running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
     skipped_nonfinite = 0
     best_key = None
+    non_improving_evals = 0
     eval_interval = args.eval_steps if args.eval_steps > 0 else steps_per_epoch
     history_path = Path(args.output_dir) / "packet_validation_history.jsonl"
+    training_config = tower1_training_config(args)
+    history_path.unlink(missing_ok=True)
     for step in pbar:
         sft_batch = next(sft_iter) if sft_iter is not None else None
         packet_batch = next(packet_iter)
@@ -569,9 +858,11 @@ def main() -> None:
             same_label_positive_weight=args.same_label_positive_weight,
             flow_proto_weight=args.flow_proto_weight,
             flow_proto_positive=args.flow_proto_positive,
+            flow_proto_context=args.flow_proto_context,
             paired_consistency_weight=args.paired_consistency_weight,
             paired_cls_weight=args.paired_cls_weight,
             paired_logit_kl_weight=args.paired_logit_kl_weight,
+            paired_raw_consistency_weight=args.paired_raw_consistency_weight,
         )
         if not torch.isfinite(out.loss):
             skipped_nonfinite += 1
@@ -641,7 +932,12 @@ def main() -> None:
             running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
 
         if args.save_steps and (step + 1) % args.save_steps == 0:
-            save_model(model, args.output_dir, suffix=f"step_{step+1}")
+            save_model(
+                model,
+                args.output_dir,
+                suffix=f"step_{step+1}",
+                training_config=training_config,
+            )
 
         should_eval = valid_loader is not None and ((step + 1) % eval_interval == 0 or step + 1 == total_steps)
         if should_eval:
@@ -670,15 +966,57 @@ def main() -> None:
             )
             if improved:
                 best_key = key
-                save_model(model, args.output_dir, suffix="best")
+                non_improving_evals = 0
+                save_model(model, args.output_dir, suffix="best", training_config=training_config)
                 with open(Path(args.output_dir) / "best_packet_validation_metrics.json", "w", encoding="utf-8") as f:
                     json.dump(record, f, indent=2, ensure_ascii=False)
+            else:
+                non_improving_evals += 1
+            if validation_patience_exhausted(
+                non_improving_evals, args.early_stop_patience
+            ):
+                print(
+                    "early stopping Tower1 after "
+                    f"step={step + 1}; non_improving_evals={non_improving_evals} "
+                    f"patience={args.early_stop_patience}",
+                    flush=True,
+                )
+                break
 
     print(f"training finished; skipped_nonfinite={skipped_nonfinite}", flush=True)
-    save_model(model, args.output_dir)
+    save_model(
+        model,
+        args.output_dir,
+        suffix="final",
+        training_config=training_config,
+    )
+    output_dir = Path(args.output_dir)
+    completed_artifacts = {
+        name: {
+            "path": str(path.resolve()),
+            "sha256": file_sha256(path),
+        }
+        for name, path in {
+            "validation_history": output_dir / "packet_validation_history.jsonl",
+            "final_heads": output_dir / "final" / "tower1_heads.pt",
+            "final_config": output_dir / "final" / "tower1_config.json",
+        }.items()
+        if path.is_file()
+    }
+    write_training_contract(
+        args.output_dir,
+        args,
+        status="complete",
+        completed_artifacts=completed_artifacts,
+    )
 
 
-def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "") -> None:
+def save_model(
+    model: QwenPacketMultiTaskModel,
+    output_dir: str,
+    suffix: str = "",
+    training_config: Optional[dict] = None,
+) -> None:
     out = Path(output_dir) if not suffix else Path(output_dir) / suffix
     out.mkdir(parents=True, exist_ok=True)
     adapter_dir = out / "adapter"
@@ -697,6 +1035,8 @@ def save_model(model: QwenPacketMultiTaskModel, output_dir: str, suffix: str = "
                 "supports_flow_aware_supcon": True,
                 "supports_flow_prototype_loss": True,
                 "supports_paired_view_consistency": True,
+                "paired_consistency_representation": "raw_and_projected",
+                "training_config": training_config or {},
             },
             f,
             indent=2,

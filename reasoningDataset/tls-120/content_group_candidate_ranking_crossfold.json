@@ -1,0 +1,1133 @@
+{
+  "dataset": "tls-120",
+  "root": "reasoningDataset/tls-120",
+  "prediction_glob": [
+    "test*.json",
+    "test_crossfold_consensus*.json"
+  ],
+  "flow_embedding_index": "reasoningDataset/tls-120/test_embeddings_rawproj_change_weight/flow_embedding_index.jsonl",
+  "bootstrap_samples": 200,
+  "seed": 42,
+  "target_accuracy": 0.78,
+  "target_macro_f1": 0.7,
+  "top_k": 20,
+  "num_candidates": 63,
+  "num_ok": 55,
+  "rows": [
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_rgssi_auto_confidence.json",
+      "status": "ok",
+      "accuracy": 0.8475134292150407,
+      "macro_f1": 0.8304026568985646,
+      "content_group_accuracy_ci95": [
+        0.8401490209669035,
+        0.8542735227863456
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8226585116912618,
+        0.8358866622841392
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json",
+      "status": "ok",
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "content_group_accuracy_ci95": [
+        0.8394494021833304,
+        0.851934240166349
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196531315258295,
+        0.8350953912867213
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence_fold0.json",
+      "status": "ok",
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "content_group_accuracy_ci95": [
+        0.8394494021833304,
+        0.851934240166349
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196531315258295,
+        0.8350953912867213
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence_fold1.json",
+      "status": "ok",
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "content_group_accuracy_ci95": [
+        0.8394494021833304,
+        0.851934240166349
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196531315258295,
+        0.8350953912867213
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence_fold2.json",
+      "status": "ok",
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "content_group_accuracy_ci95": [
+        0.8394494021833304,
+        0.851934240166349
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196531315258295,
+        0.8350953912867213
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_soft_gate_tls120_tol0015_calib_family_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7996014555536303,
+      "macro_f1": 0.7869103179473798,
+      "content_group_accuracy_ci95": [
+        0.7922283832957893,
+        0.807147808005545
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7772833374691218,
+        0.7942382400509795
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_unified_slot_tls120_confidence_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7990816149714087,
+      "macro_f1": 0.7897106451185681,
+      "content_group_accuracy_ci95": [
+        0.7917172067232715,
+        0.8065348293190089
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7810463997618999,
+        0.7954926596167098
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_expert_gate_unified_slot_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7976953734188182,
+      "macro_f1": 0.7881541348621538,
+      "content_group_accuracy_ci95": [
+        0.7910219199445503,
+        0.8049753075723445
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7792588245306924,
+        0.7956201249975019
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_unified_slot_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7976953734188182,
+      "macro_f1": 0.7881541348621538,
+      "content_group_accuracy_ci95": [
+        0.7910219199445503,
+        0.8049753075723445
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7792588245306924,
+        0.7956201249975019
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_best_plus_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7971755328365968,
+      "macro_f1": 0.7876257812185263,
+      "content_group_accuracy_ci95": [
+        0.7907576676485877,
+        0.8046287471841969
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7792387570236639,
+        0.7948402851386153
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_expert_gate_base_slot_stacker_tls120_e80_seed7.json",
+      "status": "ok",
+      "accuracy": 0.7973488130306706,
+      "macro_f1": 0.7842955965155876,
+      "content_group_accuracy_ci95": [
+        0.7903266331658292,
+        0.8049753075723445
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7755308751145472,
+        0.7912638537202533
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_always_soft_gate_tls120_tol0015_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7973488130306706,
+      "macro_f1": 0.7842955965155876,
+      "content_group_accuracy_ci95": [
+        0.7903266331658292,
+        0.8049753075723445
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7755308751145472,
+        0.7912638537202533
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_calpen_ece010_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7944896898284526,
+      "macro_f1": 0.7807428635245226,
+      "content_group_accuracy_ci95": [
+        0.7876429561601108,
+        0.8025472188528852
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7722495903874644,
+        0.7872605451338806
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_unified_slot_stacker_tls120_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7944896898284526,
+      "macro_f1": 0.7807428635245226,
+      "content_group_accuracy_ci95": [
+        0.7876429561601108,
+        0.8025472188528852
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7722495903874644,
+        0.7872605451338806
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_unified_soft_gate_tls120_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7922370473054929,
+      "macro_f1": 0.778731270518289,
+      "content_group_accuracy_ci95": [
+        0.7854682897244845,
+        0.79977690175013
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7700331428118993,
+        0.7856314589654572
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_safe_prior_residual_minbase90_unified.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7769472086112468,
+      "content_group_accuracy_ci95": [
+        0.7845975567492636,
+        0.798232542020447
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7680092086578115,
+        0.7840911482229946
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_valid_acc.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7769472086112468,
+      "content_group_accuracy_ci95": [
+        0.7845975567492636,
+        0.798232542020447
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7680092086578115,
+        0.7840911482229946
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_bootstrap_shift_safe_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7769472086112468,
+      "content_group_accuracy_ci95": [
+        0.7845975567492636,
+        0.798232542020447
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7680092086578115,
+        0.7840911482229946
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_reliability_safe_gain003_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7769472086112468,
+      "content_group_accuracy_ci95": [
+        0.7845975567492636,
+        0.798232542020447
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7680092086578115,
+        0.7840911482229946
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_safe_gain003_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7769472086112468,
+      "content_group_accuracy_ci95": [
+        0.7845975567492636,
+        0.798232542020447
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7680092086578115,
+        0.7840911482229946
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_always_soft_gate_tls120_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7771975279893067,
+      "content_group_accuracy_ci95": [
+        0.7844112805406342,
+        0.7983018540980766
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7676025517730295,
+        0.7841773410334554
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_bootstrap_shift_tol001_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7771975279893067,
+      "content_group_accuracy_ci95": [
+        0.7844112805406342,
+        0.7983018540980766
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7676025517730295,
+        0.7841773410334554
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_shift005_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7771975279893067,
+      "content_group_accuracy_ci95": [
+        0.7844112805406342,
+        0.7983018540980766
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7676025517730295,
+        0.7841773410334554
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_calib_tol001_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7771975279893067,
+      "content_group_accuracy_ci95": [
+        0.7844112805406342,
+        0.7983018540980766
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7676025517730295,
+        0.7841773410334554
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_graph_seq_rawproj_change_weight_valid_macro.json",
+      "status": "ok",
+      "accuracy": 0.7908508057529025,
+      "macro_f1": 0.7771975279893067,
+      "content_group_accuracy_ci95": [
+        0.7844112805406342,
+        0.7983018540980766
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7676025517730295,
+        0.7841773410334554
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_expert_gate_graph_seq_tls120_e80_seed7.json",
+      "status": "ok",
+      "accuracy": 0.790330965170681,
+      "macro_f1": 0.7767314584620234,
+      "content_group_accuracy_ci95": [
+        0.7840062380869867,
+        0.7987372205856871
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7673707126797602,
+        0.7838893541153694
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": true
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_graph_metrics_flow_tls120_rawproj_change_weight_acc_ft_probs.json",
+      "status": "ok",
+      "accuracy": 0.7790677525558829,
+      "macro_f1": 0.7635232361490186,
+      "content_group_accuracy_ci95": [
+        0.7725480852538555,
+        0.7870429734881303
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7539644196184482,
+        0.7708734930514032
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold0.json",
+      "status": "ok",
+      "accuracy": 0.7789811124588459,
+      "macro_f1": 0.7635014243062765,
+      "content_group_accuracy_ci95": [
+        0.7712549818055796,
+        0.7865209669034829
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7547067919638107,
+        0.7703946948451649
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_base_prior_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_accuracy.json",
+      "status": "ok",
+      "accuracy": 0.7700571824640443,
+      "macro_f1": 0.7420824764833599,
+      "content_group_accuracy_ci95": [
+        0.7612935366487611,
+        0.7786410500779761
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7309984488251753,
+        0.7492227860161792
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_acc_logits_conf.json",
+      "status": "ok",
+      "accuracy": 0.7697106220758967,
+      "macro_f1": 0.7417884210268662,
+      "content_group_accuracy_ci95": [
+        0.7610292843527985,
+        0.7782013515855137
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7309469790544415,
+        0.7488615351753859
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_acc_logits_conf_guarded_default.json",
+      "status": "ok",
+      "accuracy": 0.7696239819788598,
+      "macro_f1": 0.7416715231807455,
+      "content_group_accuracy_ci95": [
+        0.7607736960665397,
+        0.7783746317795875
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7306837634552551,
+        0.7486338578368007
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_accuracy.json",
+      "status": "ok",
+      "accuracy": 0.7696239819788598,
+      "macro_f1": 0.7416715231807455,
+      "content_group_accuracy_ci95": [
+        0.7607736960665397,
+        0.7783746317795875
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7306837634552551,
+        0.7486338578368007
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_tls120_rawproj_change_weight_baseline_probs.json",
+      "status": "ok",
+      "accuracy": 0.7558482065499913,
+      "macro_f1": 0.7464579698153773,
+      "content_group_accuracy_ci95": [
+        0.748652746491076,
+        0.7645122162536822
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7374392436220137,
+        0.7531956899034071
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_acc_logits_conf.json",
+      "status": "ok",
+      "accuracy": 0.7539421244151794,
+      "macro_f1": 0.7265664879567056,
+      "content_group_accuracy_ci95": [
+        0.7465603881476348,
+        0.761915179345001
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7150442989079905,
+        0.7335317710355007
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold2.json",
+      "status": "ok",
+      "accuracy": 0.7530757234448102,
+      "macro_f1": 0.7210585269710873,
+      "content_group_accuracy_ci95": [
+        0.7457936232888581,
+        0.7607108819961879
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7119081856135856,
+        0.7283412578569519
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_stacker_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_accuracy.json",
+      "status": "ok",
+      "accuracy": 0.7539421244151794,
+      "macro_f1": 0.7268167365843181,
+      "content_group_accuracy_ci95": [
+        0.7450008664009704,
+        0.7621772656385375
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7143843544178522,
+        0.733480877167247
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_selector_base_prior_stacker_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_accuracy.json",
+      "status": "ok",
+      "accuracy": 0.7537688442211056,
+      "macro_f1": 0.7266540754760996,
+      "content_group_accuracy_ci95": [
+        0.7449185583087853,
+        0.7617440651533529
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7141244425588337,
+        0.7333777774645077
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold1.json",
+      "status": "ok",
+      "accuracy": 0.7512562814070352,
+      "macro_f1": 0.7200734823075531,
+      "content_group_accuracy_ci95": [
+        0.7439698492462312,
+        0.7597643389360595
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7096887060988024,
+        0.7263523760937598
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_safe_prior_candidate.json",
+      "status": "ok",
+      "accuracy": 0.7436319528677872,
+      "macro_f1": 0.7101106134196175,
+      "content_group_accuracy_ci95": [
+        0.7370386414832785,
+        0.7516309998267198
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6994835668263392,
+        0.7179314491848173
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_safe_prior_residual.json",
+      "status": "ok",
+      "accuracy": 0.7436319528677872,
+      "macro_f1": 0.7101106134196175,
+      "content_group_accuracy_ci95": [
+        0.7370386414832785,
+        0.7516309998267198
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6994835668263392,
+        0.7179314491848173
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_valid_acc.json",
+      "status": "ok",
+      "accuracy": 0.7436319528677872,
+      "macro_f1": 0.7101106134196175,
+      "content_group_accuracy_ci95": [
+        0.7370386414832785,
+        0.7516309998267198
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6994835668263392,
+        0.7179314491848173
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_safe_prior_unified.json",
+      "status": "ok",
+      "accuracy": 0.7362675446196499,
+      "macro_f1": 0.7594217766744743,
+      "content_group_accuracy_ci95": [
+        0.7291522266504938,
+        0.7457156472015248
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7511543947932999,
+        0.7659310620446412
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_safe_prior_candidate.json",
+      "status": "ok",
+      "accuracy": 0.7354877837463178,
+      "macro_f1": 0.6986132228062594,
+      "content_group_accuracy_ci95": [
+        0.7275147288164963,
+        0.7448644082481373
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6881576847972541,
+        0.7070756252188148
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_safe_prior_residual.json",
+      "status": "ok",
+      "accuracy": 0.7354877837463178,
+      "macro_f1": 0.6986132228062594,
+      "content_group_accuracy_ci95": [
+        0.7275147288164963,
+        0.7448644082481373
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6881576847972541,
+        0.7070756252188148
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_valid_acc.json",
+      "status": "ok",
+      "accuracy": 0.7354877837463178,
+      "macro_f1": 0.6986132228062594,
+      "content_group_accuracy_ci95": [
+        0.7275147288164963,
+        0.7448644082481373
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6881576847972541,
+        0.7070756252188148
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_safe_prior_candidate.json",
+      "status": "ok",
+      "accuracy": 0.7270836943337377,
+      "macro_f1": 0.6931881664866409,
+      "content_group_accuracy_ci95": [
+        0.7179864841448622,
+        0.734558568705597
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6816438536190167,
+        0.700066277832955
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_safe_prior_residual.json",
+      "status": "ok",
+      "accuracy": 0.7270836943337377,
+      "macro_f1": 0.6931881664866409,
+      "content_group_accuracy_ci95": [
+        0.7179864841448622,
+        0.734558568705597
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6816438536190167,
+        0.700066277832955
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_valid_acc.json",
+      "status": "ok",
+      "accuracy": 0.7270836943337377,
+      "macro_f1": 0.6931881664866409,
+      "content_group_accuracy_ci95": [
+        0.7179864841448622,
+        0.734558568705597
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6816438536190167,
+        0.700066277832955
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_probs.json",
+      "status": "ok",
+      "accuracy": 0.7246577716167042,
+      "macro_f1": 0.6882270473722151,
+      "content_group_accuracy_ci95": [
+        0.7166782186796049,
+        0.7324662103621556
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6780929233456091,
+        0.6947341105683056
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_graph_metrics_flow_rawproj_flowaware_change_weight_fold2_stage8_flowaware_consensus_distill_student_probs.json",
+      "status": "ok",
+      "accuracy": 0.7228383295789291,
+      "macro_f1": 0.6888277547604884,
+      "content_group_accuracy_ci95": [
+        0.7144277421590711,
+        0.7297717033443077
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6774898889787461,
+        0.6957954720294414
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_fusion_graph_seq_tls120_rawproj_change_weight_prior_ensemble_unified.json",
+      "status": "ok",
+      "accuracy": 0.7209322474441171,
+      "macro_f1": 0.7504310862435646,
+      "content_group_accuracy_ci95": [
+        0.7141439958412753,
+        0.7302937099289551
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7421882875851313,
+        0.7568764221800185
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_graph_metrics_flow_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_probs.json",
+      "status": "ok",
+      "accuracy": 0.7198925662796742,
+      "macro_f1": 0.6837654352167041,
+      "content_group_accuracy_ci95": [
+        0.7117354011436493,
+        0.7273522786345521
+      ],
+      "content_group_macro_f1_ci95": [
+        0.672995561442747,
+        0.6903500181928721
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rawproj_flowaware_change_weight_fold2_stage8_flowaware_fold2_stage8_cv_probs.json",
+      "status": "ok",
+      "accuracy": 0.7110552763819096,
+      "macro_f1": 0.6764819180535199,
+      "content_group_accuracy_ci95": [
+        0.7036865361289205,
+        0.7207654652573211
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6671973673807912,
+        0.6841357615284063
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_probs.json",
+      "status": "ok",
+      "accuracy": 0.7105354357996881,
+      "macro_f1": 0.6779178869291281,
+      "content_group_accuracy_ci95": [
+        0.7024779067752556,
+        0.7198124241899151
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6671446054680382,
+        0.6847740380442503
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_graph_metrics_flow_rawproj_flowaware_change_weight_fold1_stage8_flowaware_fold1_stage8_cv_probs.json",
+      "status": "ok",
+      "accuracy": 0.6765725177612198,
+      "macro_f1": 0.6411593839120311,
+      "content_group_accuracy_ci95": [
+        0.6686882689308612,
+        0.6839650840408942
+      ],
+      "content_group_macro_f1_ci95": [
+        0.6315801868606797,
+        0.6478772248698501
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "content_group_target_met": false
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence_content_unique.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_y_true",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_content_unique_summary.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_y_true",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_crossfold_consensus_rgssi_bootstrap.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_y_true",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_graph_metrics_flow_tls120_rawproj_change_weight_acc_ft.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_graph_metrics_flow_tls120_rawproj_change_weight_baseline_ft.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold0_bootstrap.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_y_true",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold1_bootstrap.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_y_true",
+        "flow_prob"
+      ]
+    },
+    {
+      "path": "reasoningDataset/tls-120/test_seq_metrics_flow_rgssi_fold2_bootstrap.json",
+      "status": "missing_fields",
+      "missing": [
+        "flow_ids",
+        "flow_y_true",
+        "flow_prob"
+      ]
+    }
+  ]
+}

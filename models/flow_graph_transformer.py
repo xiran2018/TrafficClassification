@@ -66,12 +66,25 @@ class EdgeAwareGraphLayer(nn.Module):
 
 
 class FlowGraphTransformerClassifier(nn.Module):
-    def __init__(self, input_dim: int, num_classes: int, hidden_dim: int = 256, num_layers: int = 2, num_heads: int = 4, num_edge_types: int = 7, edge_attr_dim: int = 4, dropout: float = 0.1):
+    def __init__(self, input_dim: int, num_classes: int, hidden_dim: int = 256, num_layers: int = 2, num_heads: int = 4, num_edge_types: int = 7, edge_attr_dim: int = 4, dropout: float = 0.1, identifiability_feature_index: int = -1, identifiability_pooling: bool = False, identifiability_feature_mode: str = "observed", identifiability_prior_init: float = 0.1, identifiability_dual_pooling: bool = False, identifiability_evidence_adapter: bool = False, identifiability_adapter_max_delta: float = 0.25, identifiability_residual_max_weight: float = 0.0, identifiability_residual_init: float = 0.5):
         super().__init__()
         self.proj = nn.Linear(input_dim, hidden_dim)
         self.edge_attr_dim = edge_attr_dim
+        self.identifiability_feature_index = int(identifiability_feature_index)
+        self.identifiability_feature_mode = str(identifiability_feature_mode)
+        if self.identifiability_feature_mode not in {"observed", "zero"}:
+            raise ValueError("identifiability_feature_mode must be 'observed' or 'zero'")
         self.layers = nn.ModuleList([EdgeAwareGraphLayer(hidden_dim, num_heads, num_edge_types, edge_attr_dim, dropout) for _ in range(num_layers)])
-        self.pool = AttentionPooling(hidden_dim)
+        self.pool = AttentionPooling(
+            hidden_dim,
+            reliability_prior=bool(identifiability_pooling) and not identifiability_dual_pooling and not identifiability_evidence_adapter,
+            reliability_prior_init=identifiability_prior_init,
+            reliability_dual=identifiability_dual_pooling,
+            reliability_evidence_adapter=identifiability_evidence_adapter,
+            reliability_adapter_max_delta=identifiability_adapter_max_delta,
+            reliability_residual_max_weight=identifiability_residual_max_weight,
+            reliability_residual_init=identifiability_residual_init,
+        )
         self.cls = nn.Linear(hidden_dim, num_classes)
         self.coherence = nn.Linear(hidden_dim, 2)
         self.edge_mlp = nn.Sequential(nn.Linear(hidden_dim * 2 + edge_attr_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, 2))
@@ -80,6 +93,14 @@ class FlowGraphTransformerClassifier(nn.Module):
         self.next_iat = nn.Linear(hidden_dim, 4)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor):
+        if self.identifiability_feature_mode == "zero" and self.identifiability_feature_index >= 0:
+            x = x.clone()
+            x[:, self.identifiability_feature_index:self.identifiability_feature_index + 2] = 0
+        reliability = (
+            x[:, self.identifiability_feature_index]
+            if self.identifiability_feature_index >= 0
+            else None
+        )
         h = self.proj(x)
         if edge_attr.numel() == 0:
             edge_attr = torch.zeros((0, self.edge_attr_dim), dtype=x.dtype, device=x.device)
@@ -87,13 +108,17 @@ class FlowGraphTransformerClassifier(nn.Module):
             edge_attr = edge_attr.to(device=x.device, dtype=x.dtype)
         for layer in self.layers:
             h = layer(h, edge_index, edge_attr)
-        g = self.pool(h.unsqueeze(0), torch.ones(1, h.size(0), dtype=torch.bool, device=h.device)).squeeze(0)
+        g = self.pool(
+            h.unsqueeze(0),
+            torch.ones(1, h.size(0), dtype=torch.bool, device=h.device),
+            reliability=None if reliability is None else reliability.unsqueeze(0),
+        ).squeeze(0)
         edge_logits = None
         if edge_index.numel() > 0:
             src, dst = edge_index[0].long(), edge_index[1].long()
             edge_feat = torch.cat([h[src], h[dst], edge_attr.float()], dim=-1)
             edge_logits = self.edge_mlp(edge_feat)
-        return {
+        out = {
             "logits": self.cls(g.unsqueeze(0)),
             "coherence_logits": self.coherence(g.unsqueeze(0)),
             "embedding": g,
@@ -102,3 +127,8 @@ class FlowGraphTransformerClassifier(nn.Module):
             "next_length_logits": self.next_length(g.unsqueeze(0)),
             "next_iat_logits": self.next_iat(g.unsqueeze(0)),
         }
+        if self.pool.last_reliability_gate is not None:
+            out["identifiability_gate"] = self.pool.last_reliability_gate.squeeze(0)
+        if self.pool.last_reliability_adapter_norm is not None:
+            out["identifiability_adapter_norm"] = self.pool.last_reliability_adapter_norm.squeeze(0)
+        return out

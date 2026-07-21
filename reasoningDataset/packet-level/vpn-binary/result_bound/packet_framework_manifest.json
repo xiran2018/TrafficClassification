@@ -1,0 +1,76 @@
+{
+  "task": "packet-level",
+  "dataset": "vpn-binary",
+  "stage": "paper_result_binding",
+  "framework_profile": "paper_unified",
+  "result_json": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+  "framework": {
+    "framework_name": "unified_shortcut_resistant_packet_to_flow",
+    "framework_profile": "paper_unified",
+    "task": "packet-level",
+    "dataset": "vpn-binary",
+    "stage": "paper_result_binding",
+    "input_unit": "one_current_packet_crossfold_result",
+    "shared_core_modules": [
+      "per_flow_split_guard",
+      "field_aware_header_policy",
+      "current_packet_structural_encoder",
+      "current_packet_byte_payload_encoder",
+      "semantic_tower1_channel",
+      "semantic_structural_gate",
+      "cross_fold_stability",
+      "validation_only_selection",
+      "label_free_calibration_guard"
+    ],
+    "task_modules": [
+      "per_flow_split_guard",
+      "field_aware_header_policy",
+      "current_packet_structural_encoder",
+      "current_packet_byte_payload_encoder",
+      "semantic_tower1_channel",
+      "semantic_structural_gate",
+      "cross_fold_stability",
+      "validation_only_selection",
+      "label_free_calibration_guard",
+      "strict_current_packet_protocol",
+      "packet_level_classifier"
+    ],
+    "shared_module_status": {
+      "per_flow_split_guard": "enforced",
+      "field_aware_header_policy": "mask_ip_port",
+      "current_packet_structural_encoder": "present",
+      "current_packet_byte_payload_encoder": "present",
+      "semantic_tower1_channel": "present_or_available_in_source_inputs",
+      "semantic_structural_gate": "validation_selected_or_consensus_bound",
+      "cross_fold_stability": "crossfold_consensus_bound",
+      "validation_only_selection": "enforced_by_source_results",
+      "label_free_calibration_guard": "recorded_from_source_results"
+    },
+    "task_module_status": {
+      "strict_current_packet_protocol": "source_result_bound",
+      "packet_level_classifier": "crossfold_consensus"
+    },
+    "selection_protocol": "validation_only",
+    "calibration_protocol": "label_free_or_validation_only",
+    "notes": {
+      "framework_profile": "paper_unified",
+      "completed": true,
+      "dry_run": false,
+      "binding_only": true,
+      "published_result_paths": [
+        "reasoningDataset/packet-level/vpn-binary/paper_default_result.json"
+      ],
+      "result_metrics": {
+        "accuracy": 0.9999186212633597,
+        "macro_f1": 0.9999186068245844,
+        "num_samples": 110594
+      },
+      "source_input_count": 3,
+      "source_inputs": [
+        "/tmp/two_tower_runs/packet_level/vpn-binary/fold0/test_dual_probs.npz",
+        "/tmp/two_tower_runs/packet_level/vpn-binary/fold1/test_dual_probs.npz",
+        "/tmp/two_tower_runs/packet_level/vpn-binary/fold2/test_dual_probs.npz"
+      ]
+    }
+  }
+}

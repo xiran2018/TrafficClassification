@@ -91,10 +91,15 @@ def main() -> None:
     else:
         weights = np.full(len(arrays), 1.0 / len(arrays), dtype=np.float64)
     y_true = arrays[0]["y_true"].astype(np.int64)
+    flow_ids = arrays[0]["flow_ids"] if "flow_ids" in arrays[0] else None
     fused = None
     for path, data, weight in zip(args.inputs, arrays, weights):
         if not np.array_equal(y_true, data["y_true"]):
             raise ValueError(f"label alignment mismatch: {path}")
+        if ("flow_ids" in data) != (flow_ids is not None):
+            raise ValueError(f"flow-id availability mismatch: {path}")
+        if flow_ids is not None and not np.array_equal(flow_ids, data["flow_ids"]):
+            raise ValueError(f"flow-id alignment mismatch: {path}")
         probabilities = data["probabilities"].astype(np.float32)
         contribution = np.log(np.clip(probabilities, 1e-12, 1.0)) if args.method == "log_mean" else probabilities
         contribution = float(weight) * contribution
@@ -120,7 +125,13 @@ def main() -> None:
     if args.output_npz:
         output_npz = Path(args.output_npz)
         output_npz.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(output_npz, y_true=y_true, probabilities=fused.astype(np.float32))
+        output_arrays = {
+            "y_true": y_true,
+            "probabilities": fused.astype(np.float32),
+        }
+        if flow_ids is not None:
+            output_arrays["flow_ids"] = flow_ids
+        np.savez_compressed(output_npz, **output_arrays)
     if args.output_validation_npz:
         if not args.validation_inputs:
             raise ValueError("--output_validation_npz requires --validation_inputs")

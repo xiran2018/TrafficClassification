@@ -26,14 +26,23 @@ from models.packet_byte_transformer import PacketByteTransformer
 from train_packet_byte_transformer import (
     MASK_TOKEN,
     PacketByteDataset,
+    assign_main_protected_gradients,
     extract_packet_payload,
     interpolate_identifiability_reliability,
     mask_session_tokens,
+    packet_ce_loss,
+    packet_content_group_metrics,
+    packet_content_group_mean_loss,
     select_invariant_blend,
     select_routed_invariant_blend,
 )
 from train_packet_feature_expert import packet_features
-from traffic_utils import PacketMeta, extract_packet_classification_flows, format_packet_embedding_prompt
+from traffic_utils import (
+    PacketMeta,
+    extract_flow_packets,
+    extract_packet_classification_flows,
+    format_packet_embedding_prompt,
+)
 
 
 def tcp_packet(src_ip, dst_ip, sport, dport, seq=1, ack=1):
@@ -113,6 +122,29 @@ def test_class_pcap_recovers_real_flows_but_keeps_single_packet_inputs(tmp_path)
         assert metas[0].iat == 0.0
         assert metas[1].iat == 0.0
         assert {meta.direction for meta in metas} == {"C2S", "S2C"}
+
+
+def test_flow_preprocessing_can_enforce_strict_single_packet_semantic_context(tmp_path):
+    pcap = tmp_path / "one-flow.pcap"
+    write_raw_pcap(
+        pcap,
+        [
+            (1.0, tcp_packet("10.0.0.1", "20.0.0.1", 50000, 443, seq=1)),
+            (3.0, tcp_packet("20.0.0.1", "10.0.0.1", 443, 50000, seq=2)),
+        ],
+    )
+
+    contextual, _, contextual_prompts = extract_flow_packets(
+        pcap, single_packet_context=False
+    )
+    strict, _, strict_prompts = extract_flow_packets(
+        pcap, single_packet_context=True
+    )
+
+    assert [meta.iat for meta in contextual] == [0.0, 2.0]
+    assert [meta.iat for meta in strict] == [0.0, 0.0]
+    assert "iat=2.0" in contextual_prompts[1]
+    assert "iat=0.0" in strict_prompts[1]
 
 
 def test_recovered_flow_id_is_stable_across_split_directories(tmp_path):
@@ -236,11 +268,39 @@ def test_identifiability_report_exposes_conflicts_and_error_strata():
     report = build_report(train, test, probabilities)
 
     assert report["levels"]["session"]["train"]["conflicting_signatures"] == 1
+    assert report["levels"]["session"]["train"]["per_class"] == {
+        "0": {
+            "support": 1,
+            "samples_in_conflicting_signatures": 1,
+            "conflicting_sample_rate": 1.0,
+        },
+        "1": {
+            "support": 1,
+            "samples_in_conflicting_signatures": 1,
+            "conflicting_sample_rate": 1.0,
+        },
+    }
+    assert report["levels"]["session"]["test"]["per_class"]["0"] == {
+        "support": 1,
+        "samples_in_conflicting_signatures": 0,
+        "conflicting_sample_rate": 0.0,
+    }
     assert report["levels"]["session"]["test_seen_rate"] == 1.0
     assert report["model_error_strata"]["all"]["errors"] == 1
     assert report["model_error_strata"]["tcp_control"]["errors"] == 1
     counts = report["model_error_strata"]["error_examples"][0]["train_signature_label_counts"]
     assert counts["session"] == {"0": 1, "1": 1}
+
+
+def test_identifiability_report_rejects_auxiliary_rows_without_packet_bytes():
+    row = {
+        "label_id": 0,
+        "flow_id": "flow-0",
+        "meta": {"l4": "TCP", "packet_len": 40, "payload_len": 0},
+    }
+
+    with pytest.raises(ValueError, match="use packet_index.jsonl"):
+        build_report([row], [row])
 
 
 def test_packet_dataset_builds_conflict_aware_invariant_targets(tmp_path):
@@ -279,6 +339,91 @@ def test_packet_dataset_builds_conflict_aware_invariant_targets(tmp_path):
     assert torch.equal(dataset.signature_support, torch.tensor([2, 2]))
     assert torch.allclose(dataset.ambiguity_targets, torch.full((2, 2), 0.5))
     assert torch.allclose(dataset.invariant_reliability, torch.zeros(2), atol=1e-6)
+
+
+def test_packet_dataset_attaches_exact_pcap_content_groups(tmp_path):
+    pcap = tmp_path / "class.pcap"
+    pcap.write_bytes(b"shared-packet-container")
+    rows = []
+    for idx, packet in enumerate(
+        (
+            tcp_packet("10.0.0.1", "20.0.0.1", 50000, 443, seq=1, ack=2),
+            tcp_packet("10.0.0.2", "20.0.0.2", 50001, 443, seq=2, ack=3),
+        )
+    ):
+        rows.append(
+            {
+                "label_id": 0,
+                "flow_id": f"flow-{idx}",
+                "pcap_path": str(pcap),
+                "meta": {
+                    "l3_hex_prefix": packet.hex(),
+                    "l3": "IPv4",
+                    "l4": "TCP",
+                    "packet_len": 40,
+                    "ip_header_len": 20,
+                    "tcp_data_offset": 20,
+                    "payload_len": 0,
+                    "tcp_flags": "A",
+                },
+            }
+        )
+    index = tmp_path / "packet_index.jsonl"
+    index.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    dataset = PacketByteDataset(str(index), max_bytes=40, include_augmented=False)
+
+    assert dataset.content_group_ids.tolist() == [0, 0]
+    assert dataset[0]["content_group_id"].item() == dataset[1]["content_group_id"].item()
+    assert dataset.content_group_manifest["num_content_groups"] == 1
+    assert dataset.content_group_manifest["duplicate_content_groups"] == 1
+
+
+def test_packet_content_group_metrics_count_container_once():
+    metrics = packet_content_group_metrics(
+        y_true=np.asarray([0, 0, 1], dtype=np.int64),
+        y_pred=np.asarray([0, 1, 1], dtype=np.int64),
+        content_group_ids=np.asarray([5, 5, 6], dtype=np.int64),
+        num_classes=2,
+        label_names=["a", "b"],
+    )
+
+    assert metrics["content_group_count"] == 2
+    assert metrics["content_group_rows"] == 3
+    assert metrics["content_group_accuracy"] == pytest.approx(1.0)
+    assert metrics["content_group_macro_f1"] == pytest.approx(1.0)
+
+
+def test_packet_content_group_mean_loss_downweights_duplicate_container():
+    per_sample = torch.tensor([2.0, 4.0, 8.0])
+
+    loss = packet_content_group_mean_loss(per_sample, torch.tensor([1, 1, 2]))
+
+    assert loss.item() == pytest.approx(((2.0 + 4.0) / 2.0 + 8.0) / 2.0)
+    assert loss.item() != pytest.approx(per_sample.mean().item())
+
+
+def test_packet_ce_loss_supports_group_mean_reduction():
+    logits = torch.tensor([[3.0, 0.0], [0.0, 3.0], [0.0, 3.0]])
+    labels = torch.tensor([0, 0, 1])
+    weights = torch.ones(2)
+
+    grouped = packet_ce_loss(
+        logits,
+        labels,
+        weights,
+        torch.tensor([7, 7, 8]),
+        reduction="group_mean",
+    )
+    plain = packet_ce_loss(
+        logits,
+        labels,
+        weights,
+        torch.tensor([7, 7, 8]),
+        reduction="none",
+    )
+
+    assert grouped.item() != pytest.approx(plain.item())
 
 
 def test_session_mask_removes_tcp_options_but_keeps_payload():
@@ -355,9 +500,57 @@ def test_byte_transformer_identifiability_head_is_optional():
 
     assert logits.shape == (2, 2)
     assert projected.shape[0] == 2
-    assert gate.shape == (2, 16)
+    assert gate.shape == (2, 2)
+    torch.testing.assert_close(gate.sum(dim=-1), torch.ones(2))
     assert reliability_logit.shape == (2,)
     assert torch.isfinite(reliability_logit).all()
+
+
+def test_main_protected_gradient_removes_conflicting_auxiliary_component():
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    main_loss = parameter.sum()
+    auxiliary_loss = -2.0 * parameter.sum()
+
+    diagnostics = assign_main_protected_gradients(
+        main_loss, auxiliary_loss, [parameter]
+    )
+
+    assert diagnostics["conflict"] is True
+    assert diagnostics["cosine"] == pytest.approx(-1.0)
+    assert torch.allclose(parameter.grad, torch.ones_like(parameter))
+
+
+def test_main_protected_gradient_preserves_aligned_auxiliary_component():
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    main_loss = parameter.sum()
+    auxiliary_loss = 0.5 * parameter.sum()
+
+    diagnostics = assign_main_protected_gradients(
+        main_loss, auxiliary_loss, [parameter]
+    )
+
+    assert diagnostics["conflict"] is False
+    assert diagnostics["cosine"] == pytest.approx(1.0)
+    assert torch.allclose(parameter.grad, torch.full_like(parameter, 1.5))
+
+
+def test_layerwise_projection_detects_conflict_hidden_by_global_dot_product():
+    first = torch.nn.Parameter(torch.tensor([1.0]))
+    second = torch.nn.Parameter(torch.tensor([1.0]))
+    main_loss = first.sum() + second.sum()
+    auxiliary_loss = -first.sum() + 2.0 * second.sum()
+
+    diagnostics = assign_main_protected_gradients(
+        main_loss,
+        auxiliary_loss,
+        [first, second],
+        projection_scope="layerwise",
+    )
+
+    assert diagnostics["conflict"] is True
+    assert diagnostics["conflict_rate"] == pytest.approx(0.5)
+    assert torch.allclose(first.grad, torch.tensor([1.0]))
+    assert torch.allclose(second.grad, torch.tensor([3.0]))
 
 
 def test_feature_expert_can_mask_endpoint_shortcuts():
@@ -451,7 +644,8 @@ def test_byte_transformer_session_mask_and_forward():
     )
     assert logits.shape == (2, 3)
     assert projected.shape == (2, 16)
-    assert gate.shape == (2, 32)
+    assert gate.shape == (2, 2)
+    torch.testing.assert_close(gate.sum(dim=-1), torch.ones(2))
     assert torch.isfinite(logits).all()
 
 
@@ -487,7 +681,8 @@ def test_dual_channel_byte_transformer_extracts_current_packet_payload():
     )
     assert logits.shape == (2, 3)
     assert projected.shape == (2, 16)
-    assert gate.shape == (2, 32)
+    assert gate.shape == (2, 2)
+    torch.testing.assert_close(gate.sum(dim=-1), torch.ones(2))
     assert torch.isfinite(logits).all()
 
 
@@ -693,6 +888,43 @@ def test_packet_prior_calibration_npz_contract(tmp_path, monkeypatch):
     calibrated = np.load(output_npz)
     np.testing.assert_array_equal(calibrated["y_true"], y_test)
     np.testing.assert_allclose(calibrated["probabilities"], test_prob)
+
+
+def test_prior_hard_cap_falls_back_to_identity_when_no_candidate_is_feasible(tmp_path, monkeypatch):
+    y_valid = np.asarray([0, 0, 1, 1], dtype=np.int64)
+    valid_prob = np.asarray(
+        [[0.9, 0.1], [0.8, 0.2], [0.2, 0.8], [0.1, 0.9]], dtype=np.float32
+    )
+    y_test = np.asarray([0, 1], dtype=np.int64)
+    test_prob = np.asarray([[0.6, 0.4], [0.55, 0.45]], dtype=np.float32)
+    valid_path = tmp_path / "valid.npz"
+    test_path = tmp_path / "test.npz"
+    output_json = tmp_path / "calibrated.json"
+    output_npz = tmp_path / "calibrated.npz"
+    np.savez_compressed(valid_path, y_true=y_valid, probabilities=valid_prob)
+    np.savez_compressed(test_path, y_true=y_test, probabilities=test_prob)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "calibrate_prediction_prior.py",
+            "--valid_npz", str(valid_path),
+            "--test_npz", str(test_path),
+            "--strengths", "0,1",
+            "--selection_scope", "soft_prior_under_hard_cap",
+            "--hard_prior_kl_cap", "-1",
+            "--output_json", str(output_json),
+            "--output_npz", str(output_npz),
+        ],
+    )
+
+    calibrate_prior_main()
+
+    result = json.loads(output_json.read_text(encoding="utf-8"))
+    assert result["selected_strength"] == "0"
+    assert result["selection_constraint_satisfied"] is False
+    assert result["selection_fallback_reason"] == "identity_no_feasible_candidate"
+    np.testing.assert_allclose(np.load(output_npz)["probabilities"], test_prob)
 
 
 def test_packet_weight_selection_exports_validation_blend(tmp_path, monkeypatch):

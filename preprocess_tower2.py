@@ -11,6 +11,7 @@ for Same-flow Coherence Prediction and keeps labels consistent across splits.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -20,7 +21,8 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 
-from traffic_utils import meta_feature_vector
+from audit_packet_identifiability import packet_signature
+from traffic_utils import current_packet_meta_feature_vector, meta_feature_vector
 
 EDGE_TYPES = {
     "temporal_next": 0,
@@ -40,13 +42,191 @@ def load_jsonl(path):
                 yield json.loads(line)
 
 
-def meta_vec_from_dict(m: Dict[str, Any]) -> List[float]:
+def sha256_file(path: str, cache: Dict[str, str]) -> str:
+    key = str(Path(path).expanduser().resolve())
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    h = hashlib.sha256()
+    with open(key, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    cache[key] = digest
+    return digest
+
+
+def attach_content_groups(
+    rows: List[Dict[str, Any]],
+    index_path: str,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any] | None]:
+    """Attach exact-PCAP content group ids to flow rows.
+
+    The group id is deterministic for one preprocessing run: all flows whose
+    original PCAP bytes have the same SHA256 hash receive the same integer id.
+    This is intentionally optional so existing Tower-2 datasets remain
+    byte-for-byte behavior-compatible unless a caller asks for group metadata.
+    """
+    if not index_path:
+        return rows, None
+
+    references: Dict[str, Dict[str, Any]] = {}
+    for row in load_jsonl(index_path):
+        flow_id = str(row["flow_id"])
+        if flow_id in references:
+            raise ValueError(f"duplicate flow_id in content group index: {flow_id}")
+        references[flow_id] = row
+
+    cache: Dict[str, str] = {}
+    flow_to_hash: Dict[str, str] = {}
+    flow_to_path: Dict[str, str] = {}
+    flow_to_label: Dict[str, int] = {}
+    for flow_id, ref in references.items():
+        pcap_path = str(ref.get("pcap_path") or "")
+        if not pcap_path:
+            raise ValueError(f"content group index row is missing pcap_path for flow_id={flow_id}")
+        flow_to_hash[flow_id] = sha256_file(pcap_path, cache)
+        flow_to_path[flow_id] = pcap_path
+        flow_to_label[flow_id] = int(ref["label_id"])
+
+    hash_to_group_id = {digest: idx for idx, digest in enumerate(sorted(set(flow_to_hash.values())))}
+    output_rows: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    label_mismatches: List[str] = []
+    for row in rows:
+        flow_id = str(row["flow_id"])
+        digest = flow_to_hash.get(flow_id)
+        if digest is None:
+            missing.append(flow_id)
+            continue
+        if int(row["label_id"]) != flow_to_label[flow_id]:
+            label_mismatches.append(flow_id)
+            continue
+        out = dict(row)
+        out["content_hash"] = digest
+        out["content_group_id"] = int(hash_to_group_id[digest])
+        out["content_pcap_path"] = flow_to_path[flow_id]
+        output_rows.append(out)
+
+    if missing or label_mismatches:
+        raise ValueError(
+            "content group index does not align with flow rows: "
+            f"missing={missing[:3]} label_mismatches={label_mismatches[:3]}"
+        )
+
+    group_sizes: Dict[int, int] = {}
+    for row in output_rows:
+        group_id = int(row["content_group_id"])
+        group_sizes[group_id] = group_sizes.get(group_id, 0) + 1
+    duplicate_groups = sum(1 for size in group_sizes.values() if size > 1)
+    manifest = {
+        "version": 1,
+        "method": "exact_pcap_sha256_content_groups",
+        "source_index": index_path,
+        "num_flows": len(output_rows),
+        "num_content_groups": len(group_sizes),
+        "duplicate_content_groups": duplicate_groups,
+        "max_group_size": max(group_sizes.values(), default=0),
+    }
+    return output_rows, manifest
+
+
+def load_metadata_reference(path: str) -> Dict[str, Dict[str, Any]]:
+    if not path:
+        return {}
+    references: Dict[str, Dict[str, Any]] = {}
+    for row in load_jsonl(path):
+        flow_id = str(row["flow_id"])
+        if flow_id in references:
+            raise ValueError(f"duplicate flow_id in metadata reference: {flow_id}")
+        references[flow_id] = row
+    return references
+
+
+def load_structural_embedding_index(path: str) -> Dict[str, Dict[str, Any]]:
+    if not path:
+        return {}
+    references: Dict[str, Dict[str, Any]] = {}
+    for row in load_jsonl(path):
+        flow_id = str(row["flow_id"])
+        if flow_id in references:
+            raise ValueError(f"duplicate flow_id in structural embedding index: {flow_id}")
+        references[flow_id] = row
+    return references
+
+
+def apply_structural_embedding_reference(
+    row: Dict[str, Any],
+    references: Dict[str, Dict[str, Any]],
+    required_scope: str = "",
+) -> Dict[str, Any]:
+    if not references:
+        return row
+    flow_id = str(row["flow_id"])
+    reference = references.get(flow_id)
+    if reference is None:
+        raise ValueError(f"structural embedding index is missing flow_id={flow_id}")
+    if int(row["label_id"]) != int(reference["label_id"]):
+        raise ValueError(f"structural embedding label mismatch for flow_id={flow_id}")
+    observed_scope = str(reference.get("representation_scope", "unknown"))
+    if required_scope and observed_scope != required_scope:
+        raise ValueError(
+            f"structural representation scope mismatch for flow_id={flow_id}: "
+            f"observed={observed_scope!r} required={required_scope!r}"
+        )
+    semantic = np.load(row["embedding_path"], mmap_mode="r")
+    structural = np.load(reference["structural_embedding_path"], mmap_mode="r")
+    metas = row.get("packet_metas", [])
+    expected_count = min(int(semantic.shape[0]), len(metas))
+    if int(structural.shape[0]) != expected_count:
+        raise ValueError(
+            f"structural packet count mismatch for flow_id={flow_id}: "
+            f"semantic/meta={expected_count} structural={structural.shape[0]}"
+        )
+    expected_packet_ids = [int(meta.get("packet_id", index)) for index, meta in enumerate(metas[:expected_count])]
+    observed_packet_ids = [int(value) for value in reference.get("packet_ids", expected_packet_ids)]
+    if observed_packet_ids != expected_packet_ids:
+        raise ValueError(f"structural packet_id order mismatch for flow_id={flow_id}")
+    output = dict(row)
+    output["structural_embedding_path"] = reference["structural_embedding_path"]
+    output["structural_embedding_dim"] = int(structural.shape[1])
+    output["structural_encoder_checkpoint"] = reference.get("encoder_checkpoint", "")
+    output["structural_representation_scope"] = observed_scope
+    output["structural_representation_name"] = reference.get("representation_name", "")
+    return output
+
+
+def apply_metadata_reference(
+    row: Dict[str, Any], references: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    if not references:
+        return row
+    flow_id = str(row["flow_id"])
+    reference = references.get(flow_id)
+    if reference is None:
+        raise ValueError(f"metadata reference is missing flow_id={flow_id}")
+    if int(row["label_id"]) != int(reference["label_id"]):
+        raise ValueError(f"metadata reference label mismatch for flow_id={flow_id}")
+    embedding = np.load(row["embedding_path"], mmap_mode="r")
+    metas = reference.get("packet_metas", [])
+    if int(embedding.shape[0]) != len(metas):
+        raise ValueError(
+            f"metadata reference packet count mismatch for flow_id={flow_id}: "
+            f"embedding={embedding.shape[0]} reference={len(metas)}"
+        )
+    output = dict(row)
+    output["packet_metas"] = metas
+    output["metadata_reference_flow_id"] = flow_id
+    return output
+
+
+def meta_vec_from_dict(m: Dict[str, Any], strict_current_packet: bool = False) -> List[float]:
     class Obj:
         pass
     o = Obj()
     for k, v in m.items():
         setattr(o, k, v)
-    return meta_feature_vector(o)
+    return current_packet_meta_feature_vector(o) if strict_current_packet else meta_feature_vector(o)
 
 
 def length_bin(x: int) -> int:
@@ -67,6 +247,63 @@ def iat_bin(x: float) -> int:
     if x < 0.1:
         return 2
     return 3
+
+
+def _signature_reliability(label_counts: Dict[str, int]) -> float:
+    counts = np.asarray(list(label_counts.values()), dtype=np.float64)
+    probabilities = counts / counts.sum()
+    if len(probabilities) <= 1:
+        return 1.0
+    entropy = float(-(probabilities * np.log(probabilities.clip(min=1e-12))).sum())
+    return float(max(0.0, 1.0 - entropy / np.log(len(probabilities))))
+
+
+def build_identifiability_profile(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    counts: Dict[str, Dict[str, Dict[str, int]]] = {
+        "session": {},
+        "semantic": {},
+    }
+    for row in rows:
+        label = str(int(row["label_id"]))
+        for meta in row.get("packet_metas", []):
+            packet_row = {"meta": meta}
+            for level in counts:
+                signature = packet_signature(packet_row, level)
+                label_counts = counts[level].setdefault(signature, {})
+                label_counts[label] = label_counts.get(label, 0) + 1
+    profile: Dict[str, Any] = {"version": 1, "levels": {}}
+    for level, signatures in counts.items():
+        profile["levels"][level] = {
+            signature: {
+                "support": int(sum(label_counts.values())),
+                "reliability": _signature_reliability(label_counts),
+                "label_counts": label_counts,
+            }
+            for signature, label_counts in signatures.items()
+        }
+    return profile
+
+
+def packet_identifiability(
+    meta: Dict[str, Any], profile: Dict[str, Any], min_support: int = 2
+) -> Tuple[float, int, str]:
+    packet_row = {"meta": meta}
+    for level in ("session", "semantic"):
+        signature = packet_signature(packet_row, level)
+        entry = profile.get("levels", {}).get(level, {}).get(signature)
+        if entry is not None and int(entry.get("support", 0)) >= min_support:
+            return (
+                float(entry.get("reliability", 0.0)),
+                int(entry.get("support", 0)),
+                level,
+            )
+    payload_len = int(meta.get("payload_len", 0))
+    flags = str(meta.get("tcp_flags", "") or "")
+    if payload_len > 0:
+        return 1.0, 0, "payload_fallback"
+    if meta.get("l4") == "TCP" and ("F" in flags or flags == "A"):
+        return 0.25, 0, "control_fallback"
+    return 0.5, 0, "unknown_fallback"
 
 
 def window_indices(n: int, window_size: int, stride: int):
@@ -151,15 +388,55 @@ def build_edges(metas: List[Dict[str, Any]], burst_iat_threshold: float = 0.01) 
     return edge_index, edge_attr, targets
 
 
-def build_samples_from_flow(row: Dict[str, Any], window_size: int, stride: int):
+def build_samples_from_flow(
+    row: Dict[str, Any],
+    window_size: int,
+    stride: int,
+    identifiability_profile: Dict[str, Any] | None = None,
+    identifiability_min_support: int = 2,
+    strict_current_packet_features: bool = False,
+):
     emb = np.load(row["embedding_path"]).astype("float32")
     metas = row["packet_metas"]
     n = min(len(metas), emb.shape[0])
     if n == 0:
         return [], []
     emb, metas = emb[:n], metas[:n]
-    meta_feats = np.asarray([meta_vec_from_dict(m) for m in metas], dtype="float32")
-    x_all = np.concatenate([emb, meta_feats], axis=1)
+    meta_feats = np.asarray(
+        [meta_vec_from_dict(m, strict_current_packet_features) for m in metas],
+        dtype="float32",
+    )
+    structural = None
+    if row.get("structural_embedding_path"):
+        structural = np.load(row["structural_embedding_path"]).astype("float32")[:n]
+        if structural.shape[0] != n:
+            raise ValueError(
+                f"structural embedding packet count changed for flow_id={row['flow_id']}"
+            )
+    identifiability = None
+    if identifiability_profile is not None:
+        identifiability_rows = [
+            packet_identifiability(meta, identifiability_profile, identifiability_min_support)
+            for meta in metas
+        ]
+        identifiability = np.asarray(
+            [
+                [reliability, np.log1p(support)]
+                for reliability, support, _ in identifiability_rows
+            ],
+            dtype="float32",
+        )
+        components = [emb]
+        if structural is not None:
+            components.append(structural)
+        components.extend([identifiability, meta_feats])
+        x_all = np.concatenate(components, axis=1)
+    else:
+        components = [emb]
+        if structural is not None:
+            components.append(structural)
+        components.append(meta_feats)
+        x_all = np.concatenate(components, axis=1)
     seq_samples = []
     graph_samples = []
     for s, e in window_indices(n, window_size, stride):
@@ -182,6 +459,17 @@ def build_samples_from_flow(row: Dict[str, Any], window_size: int, stride: int):
             "window": (s, e),
             **{k: torch.tensor(v, dtype=torch.long) for k, v in next_targets.items()},
         }
+        if "content_group_id" in row:
+            common["content_group_id"] = int(row["content_group_id"])
+            common["content_hash"] = str(row.get("content_hash", ""))
+            common["content_pcap_path"] = str(row.get("content_pcap_path", row.get("pcap_path", "")))
+        if identifiability is not None:
+            common["packet_identifiability"] = torch.tensor(
+                identifiability[s:e, 0], dtype=torch.float32
+            )
+            common["packet_identifiability_support"] = torch.tensor(
+                identifiability[s:e, 1], dtype=torch.float32
+            )
         seq_samples.append(common.copy())
         edge_index, edge_attr, edge_targets = build_edges(wm)
         graph_samples.append({
@@ -244,14 +532,88 @@ def main() -> None:
     ap.add_argument("--window_size", type=int, default=32)
     ap.add_argument("--stride", type=int, default=16)
     ap.add_argument("--negative_coherence_ratio", type=float, default=0.0, help="Use >0 for training only, e.g., 0.5.")
+    ap.add_argument("--build_identifiability_profile", default="")
+    ap.add_argument("--identifiability_profile", default="")
+    ap.add_argument("--identifiability_min_support", type=int, default=2)
+    ap.add_argument("--metadata_reference_index", default="", help="Optional clean-view flow embedding index whose fully parsed packet_metas replace a paired view's legacy/reduced metadata after strict flow/label/count checks.")
+    ap.add_argument("--structural_embedding_index", default="", help="Optional flow_structural_embedding_index.jsonl from extract_native_flow_embeddings.py. Native packet embeddings are appended after semantic embeddings and before trailing metadata.")
+    ap.add_argument("--require_structural_scope", default="", help="Reject structural embeddings that do not attest this packet-context scope.")
+    ap.add_argument("--strict_current_packet_features", action="store_true", help="Exclude cross-packet IAT from the shared structural channel.")
+    ap.add_argument("--content_group_index", default="", help="Optional flow_embedding_index.jsonl used to attach exact-PCAP SHA256 content_group_id metadata for group-aware validation/training.")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    rows = list(load_jsonl(args.flow_embedding_index))
+    rows, content_group_manifest = attach_content_groups(rows, args.content_group_index)
+    if content_group_manifest is not None:
+        manifest_path = Path(args.output_dir) / "content_group_manifest.json"
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(content_group_manifest, handle, indent=2, ensure_ascii=False)
+        print(
+            "attached content groups "
+            + json.dumps(content_group_manifest, sort_keys=True),
+            flush=True,
+        )
+    metadata_references = load_metadata_reference(args.metadata_reference_index)
+    if metadata_references:
+        rows = [apply_metadata_reference(row, metadata_references) for row in rows]
+        if len(rows) != len(metadata_references):
+            missing = sorted(set(metadata_references) - {str(row["flow_id"]) for row in rows})
+            raise ValueError(
+                "metadata reference contains unmatched flows: "
+                f"count={len(missing)} examples={missing[:3]}"
+            )
+        print(
+            f"reused clean metadata for {len(rows)} paired flows from "
+            f"{args.metadata_reference_index}"
+        )
+    structural_references = load_structural_embedding_index(args.structural_embedding_index)
+    if structural_references:
+        semantic_flow_ids = {str(row["flow_id"]) for row in rows}
+        missing_from_semantic = sorted(structural_references.keys() - semantic_flow_ids)
+        missing_from_structural = sorted(semantic_flow_ids - structural_references.keys())
+        if missing_from_semantic or missing_from_structural:
+            raise ValueError(
+                "semantic/structural flow sets differ: "
+                f"structural_only={missing_from_semantic[:3]} "
+                f"semantic_only={missing_from_structural[:3]}"
+            )
+        rows = [
+            apply_structural_embedding_reference(
+                row, structural_references, args.require_structural_scope
+            )
+            for row in rows
+        ]
+        print(
+            f"attached native structural embeddings for {len(rows)} flows from "
+            f"{args.structural_embedding_index}"
+        )
+    if args.build_identifiability_profile and args.identifiability_profile:
+        ap.error("use only one of --build_identifiability_profile or --identifiability_profile")
+    profile = None
+    if args.build_identifiability_profile:
+        profile = build_identifiability_profile(rows)
+        profile_path = Path(args.build_identifiability_profile)
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(profile_path, "w", encoding="utf-8") as handle:
+            json.dump(profile, handle)
+        print(f"saved identifiability profile to {profile_path}")
+    elif args.identifiability_profile:
+        with open(args.identifiability_profile, "r", encoding="utf-8") as handle:
+            profile = json.load(handle)
+
     seq_samples: List[Dict[str, Any]] = []
     graph_samples: List[Dict[str, Any]] = []
-    for row in load_jsonl(args.flow_embedding_index):
-        ss, gs = build_samples_from_flow(row, args.window_size, args.stride)
+    for row in rows:
+        ss, gs = build_samples_from_flow(
+            row,
+            args.window_size,
+            args.stride,
+            profile,
+            args.identifiability_min_support,
+            args.strict_current_packet_features,
+        )
         seq_samples.extend(ss)
         graph_samples.extend(gs)
 

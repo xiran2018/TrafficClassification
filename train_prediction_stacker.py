@@ -16,6 +16,8 @@ from sklearn.preprocessing import StandardScaler
 from probability_metrics import calibration_metrics
 from validation_gated_selector import apply_unified_expert_slots, parse_name_list, target_shift_guard
 
+REQUIRED_PROB_FIELDS = ["valid_flow_ids", "valid_y_true", "valid_prob", "flow_ids", "flow_y_true", "flow_prob"]
+
 
 def compute_metrics(y_true, y_pred):
     p_macro, r_macro, f_macro, _ = precision_recall_fscore_support(y_true, y_pred, average="macro", zero_division=0)
@@ -48,11 +50,55 @@ def load_label_names(path: str):
 def load_prob_payload(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    required = ["valid_flow_ids", "valid_y_true", "valid_prob", "flow_ids", "flow_y_true", "flow_prob"]
-    missing = [key for key in required if key not in data]
+    missing = [key for key in REQUIRED_PROB_FIELDS if key not in data]
     if missing:
         raise ValueError(f"{path} is missing required probability fields: {missing}")
     return data
+
+
+def load_named_prob_payloads(raw_inputs: List[List[str]]) -> Tuple[List[Tuple[str, Dict[str, Any], str]], List[Dict[str, Any]]]:
+    named_payloads: List[Tuple[str, Dict[str, Any], str]] = []
+    skipped: List[Dict[str, Any]] = []
+    for name, path in raw_inputs:
+        try:
+            named_payloads.append((name, load_prob_payload(path), path))
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+            skipped.append({"name": name, "path": path, "reason": str(exc)})
+            print("skip_stacker_input", json.dumps(skipped[-1], sort_keys=True))
+    if not named_payloads:
+        raise ValueError("No stacker inputs contain the required valid/test probability fields.")
+    return named_payloads, skipped
+
+
+def _id_set(data: Dict[str, Any], split: str) -> set[str]:
+    key = "valid_flow_ids" if split == "valid" else "flow_ids"
+    return set(map(str, data[key]))
+
+
+def filter_compatible_inputs(
+    named_payloads: List[Tuple[str, Dict[str, Any], str]],
+) -> Tuple[List[Tuple[str, Dict[str, Any], str]], List[Dict[str, Any]]]:
+    if not named_payloads:
+        return named_payloads, []
+    kept = [named_payloads[0]]
+    skipped: List[Dict[str, Any]] = []
+    valid_common = _id_set(named_payloads[0][1], "valid")
+    test_common = _id_set(named_payloads[0][1], "test")
+    for name, data, path in named_payloads[1:]:
+        next_valid = valid_common & _id_set(data, "valid")
+        next_test = test_common & _id_set(data, "test")
+        if next_valid and next_test:
+            kept.append((name, data, path))
+            valid_common = next_valid
+            test_common = next_test
+        else:
+            reason = (
+                f"incompatible flow ids with fallback group: "
+                f"valid_overlap={len(next_valid)}, test_overlap={len(next_test)}"
+            )
+            skipped.append({"name": name, "path": path, "reason": reason})
+            print("skip_stacker_input", json.dumps(skipped[-1], sort_keys=True))
+    return kept, skipped
 
 
 def normalize_prob(prob: np.ndarray) -> np.ndarray:
@@ -138,9 +184,11 @@ def main() -> None:
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
 
-    named_payloads = [(name, load_prob_payload(path), path) for name, path in args.input]
+    named_payloads, skipped_inputs = load_named_prob_payloads(args.input)
     unified_expert_slots = parse_name_list(args.unified_expert_slots)
     named_payloads, input_slot_status = apply_unified_expert_slots(named_payloads, unified_expert_slots)
+    named_payloads, incompatible_inputs = filter_compatible_inputs(named_payloads)
+    skipped_inputs.extend(incompatible_inputs)
     input_names = [name for name, _, _ in named_payloads]
     if args.base_input:
         if args.base_input not in input_names:
@@ -298,6 +346,7 @@ def main() -> None:
                 "select_metric": args.select_metric,
                 "unified_expert_slots": unified_expert_slots,
                 "input_slot_status": input_slot_status,
+                "skipped_inputs": skipped_inputs,
                 "base_input": input_names[base_index],
             },
         }

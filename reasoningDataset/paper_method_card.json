@@ -1,0 +1,1074 @@
+{
+  "method_name": "Unified Shortcut-Resistant Packet-to-Flow Framework",
+  "framework_profile": "paper_unified",
+  "scope": {
+    "flow": [
+      "vpn-app",
+      "tls-120"
+    ],
+    "packet": [
+      "vpn-app",
+      "tls-120"
+    ]
+  },
+  "supplementary_packet_only_scope": [
+    "vpn-service",
+    "vpn-binary",
+    "ustc-app",
+    "ustc-binary"
+  ],
+  "architecture_rule": "Every dataset and both tasks execute all shared representation modules; only learned parameters and gates differ. Supervised Packet-module weights are trained independently from each task's own split and are never transferred across tasks. Flow adds packet_to_flow_proj and aggregation after the shared packet representation.",
+  "shared_core_modules": [
+    "per_flow_split_guard",
+    "field_aware_header_policy",
+    "current_packet_structural_encoder",
+    "current_packet_byte_payload_encoder",
+    "semantic_tower1_channel",
+    "shared_intervention_view_fusion",
+    "shared_packet_channel_fusion",
+    "semantic_structural_gate",
+    "content_stability_guard",
+    "cross_fold_stability",
+    "validation_only_selection",
+    "label_free_calibration_guard"
+  ],
+  "model_shared_core_modules": [
+    "label_free_protocol_content_pretraining",
+    "field_aware_header_intervention",
+    "semantic_tower1_channel",
+    "current_packet_structural_encoder",
+    "shared_intervention_view_fusion",
+    "bounded_tri_channel_router"
+  ],
+  "shared_protocol_guards": [
+    "per_flow_split_guard",
+    "content_group_empirical_risk",
+    "validation_only_selection",
+    "fixed_cross_fold_consensus"
+  ],
+  "flow_modules": [
+    "per_flow_split_guard",
+    "field_aware_header_policy",
+    "current_packet_structural_encoder",
+    "current_packet_byte_payload_encoder",
+    "semantic_tower1_channel",
+    "shared_intervention_view_fusion",
+    "shared_packet_channel_fusion",
+    "semantic_structural_gate",
+    "content_stability_guard",
+    "cross_fold_stability",
+    "validation_only_selection",
+    "label_free_calibration_guard",
+    "packet_to_window_flow_aggregator",
+    "flow_level_classifier"
+  ],
+  "packet_modules": [
+    "per_flow_split_guard",
+    "field_aware_header_policy",
+    "current_packet_structural_encoder",
+    "current_packet_byte_payload_encoder",
+    "semantic_tower1_channel",
+    "shared_intervention_view_fusion",
+    "shared_packet_channel_fusion",
+    "semantic_structural_gate",
+    "content_stability_guard",
+    "cross_fold_stability",
+    "validation_only_selection",
+    "label_free_calibration_guard",
+    "strict_current_packet_protocol",
+    "packet_level_classifier"
+  ],
+  "problems": [
+    {
+      "problem": "Shortcut learning from endpoints, ports, and split artifacts",
+      "modules": [
+        "per_flow_split_guard",
+        "field_aware_header_intervention"
+      ],
+      "paper_angle": "Treat header intervention and split provenance as part of the model protocol, not cleanup."
+    },
+    {
+      "problem": "Packet-level evidence does not automatically transfer to flow-level decisions",
+      "modules": [
+        "label_free_protocol_content_pretraining",
+        "semantic_tower1_channel",
+        "current_packet_structural_encoder",
+        "packet_to_window_flow_aggregator"
+      ],
+      "paper_angle": "Use a shared packet representation contract and a task-specific flow aggregator."
+    },
+    {
+      "problem": "Semantic, packet-content, and structural evidence have split-dependent reliability",
+      "modules": [
+        "shared_intervention_view_fusion",
+        "bounded_tri_channel_router"
+      ],
+      "paper_angle": "Route every sample through the same three channels and learn bounded, data-dependent reliability weights."
+    },
+    {
+      "problem": "Validation-selected recipes and duplicate content can inflate evidence",
+      "modules": [
+        "content_group_empirical_risk",
+        "validation_only_selection",
+        "fixed_cross_fold_consensus"
+      ],
+      "paper_angle": "Freeze one cross-dataset recipe on validation and report a fixed equal-weight consensus."
+    }
+  ],
+  "contributions": [
+    {
+      "name": "Field-aware shortcut intervention",
+      "claim": "A paired factual/intervened view masks endpoint and port fields under the same policy for both tasks, so shortcut resistance is learned inside the shared representation rather than added at prediction time."
+    },
+    {
+      "name": "Packet-to-flow dual representation contract",
+      "claim": "Packet-level and flow-level classification reuse the same label-free protocol-content, Tower1 semantic, 13-dimensional packet-local structural encoders and bounded router under a strict current-packet input policy; supervised parameters are re-trained from each task's own training split, while sequence position and window context enter only through the Flow aggregator. The shared core may retain a direction cue inferred from the current packet alone, but never previous-packet IAT or whole-flow server-role inference."
+    },
+    {
+      "name": "Counterfactual semantic-structural routing",
+      "claim": "Factual and header-intervened semantic views are fused before one semantic-anchored bounded router combines semantic, protocol-content, and packet-local structural evidence for every dataset and both tasks."
+    },
+    {
+      "name": "Validation-safe publication protocol",
+      "claim": "One validation-frozen cross-dataset recipe, content-group empirical risk, fixed equal-weight log-mean, flow-cluster bootstrap, executed-policy/checkpoint audits, and reporting-only train-signature novelty strata distinguish publishable evidence from exploratory probes."
+    }
+  ],
+  "flow_claims": [
+    {
+      "dataset": "vpn-app",
+      "accuracy": 0.7511961722488039,
+      "macro_f1": 0.7522269064093092,
+      "target_accuracy": 0.74,
+      "target_macro_f1": 0.65,
+      "point_target_met": true,
+      "ci_target_met": false,
+      "claim_strength": "point_pass_ci_mixed",
+      "accuracy_ci95": [
+        0.7287230861244018,
+        0.771561004784689
+      ],
+      "macro_f1_ci95": [
+        0.7181101362200663,
+        0.7830008844045173
+      ],
+      "calibration": null,
+      "module_usage": {
+        "packet_embedding_backbone": "active",
+        "flow_base_expert": "active",
+        "validation_gated_selector": "active",
+        "bootstrap_guard": "inherited",
+        "target_shift_guard": "inherited",
+        "cross_fold_consensus": "active",
+        "expert_switch_or_fusion": "active:cross_fold_consensus:vote_priority",
+        "class_bias_calibration_candidate": "evaluated",
+        "trainable_multiview_gate": "not_observed",
+        "selector_expert_slots": "crossfold_consensus_identity_compatible:10;provided:0;identity:10;extra:0"
+      },
+      "selector_slot_summary": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "extra_provided": [],
+        "consensus_members": [
+          "fold0",
+          "fold1",
+          "fold2"
+        ],
+        "num_slots": 10,
+        "num_provided": 0,
+        "num_identity": 10,
+        "num_extra": 0,
+        "num_consensus_members": 3
+      },
+      "multi_view_gate": null,
+      "selector": "cross_fold_consensus auto_confidence->vote_priority, inputs=3, mean_conf=0.9345",
+      "num_flows": 1672,
+      "content_unique_accuracy": 0.7531914893617021,
+      "content_unique_macro_f1": 0.756951406206018,
+      "content_group_accuracy_ci95": [
+        0.7297779002253988,
+        0.7729199371775571
+      ],
+      "content_group_macro_f1_ci95": [
+        0.7171382334799626,
+        0.7821503767788687
+      ],
+      "content_group_count": 1645,
+      "content_group_rows": 1672,
+      "content_group_ci_target_met": false
+    },
+    {
+      "dataset": "tls-120",
+      "accuracy": 0.8461271876624502,
+      "macro_f1": 0.8291911492056544,
+      "target_accuracy": 0.78,
+      "target_macro_f1": 0.7,
+      "point_target_met": true,
+      "ci_target_met": true,
+      "claim_strength": "strong",
+      "accuracy_ci95": [
+        0.8391050077976088,
+        0.8526251949402184
+      ],
+      "macro_f1_ci95": [
+        0.8195869151877188,
+        0.8353929952448997
+      ],
+      "calibration": null,
+      "module_usage": {
+        "packet_embedding_backbone": "active",
+        "flow_base_expert": "active",
+        "validation_gated_selector": "active",
+        "bootstrap_guard": "inherited",
+        "target_shift_guard": "inherited",
+        "cross_fold_consensus": "active",
+        "expert_switch_or_fusion": "active:cross_fold_consensus:log_mean",
+        "class_bias_calibration_candidate": "evaluated",
+        "trainable_multiview_gate": "not_observed",
+        "selector_expert_slots": "crossfold_consensus_identity_compatible:10;provided:0;identity:10;extra:0"
+      },
+      "selector_slot_summary": {
+        "mode": "crossfold_consensus_identity_compatible",
+        "slots": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "matches_required": true,
+        "provided": [],
+        "identity_from_base": [
+          "base",
+          "graph",
+          "seq",
+          "prior_base",
+          "emb_lr",
+          "emb_et",
+          "proto_emb",
+          "paired",
+          "slot_stacker",
+          "soft_gate"
+        ],
+        "extra_provided": [],
+        "consensus_members": [
+          "fold0",
+          "fold1",
+          "fold2"
+        ],
+        "num_slots": 10,
+        "num_provided": 0,
+        "num_identity": 10,
+        "num_extra": 0,
+        "num_consensus_members": 3
+      },
+      "multi_view_gate": null,
+      "selector": "cross_fold_consensus auto_confidence->log_mean, inputs=3, mean_conf=0.7305",
+      "num_flows": 11542,
+      "content_unique_accuracy": 0.8461271876624502,
+      "content_unique_macro_f1": 0.8291911492056544,
+      "content_group_accuracy_ci95": [
+        0.8397158204817189,
+        0.8524540807485704
+      ],
+      "content_group_macro_f1_ci95": [
+        0.8196920868528031,
+        0.8358509929822964
+      ],
+      "content_group_count": 11542,
+      "content_group_rows": 11542,
+      "content_group_ci_target_met": true
+    }
+  ],
+  "packet_claims": [
+    {
+      "dataset": "vpn-app",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/vpn-app/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/vpn-app/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "pass",
+        "glob": "reasoningDataset/packet-level/vpn-app/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 4,
+        "candidate_manifest_count": 4,
+        "manifest_count": 4,
+        "matching_manifests": [
+          "reasoningDataset/packet-level/vpn-app/fold0/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-app/fold1/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-app/fold2/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-app/result_bound/packet_framework_manifest.json"
+        ],
+        "required_result_path": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+        "fold_manifest_count": 3,
+        "completed_folds": [
+          0,
+          1,
+          2
+        ],
+        "result_bound_manifest_count": 1,
+        "result_bound_manifests": [
+          "reasoningDataset/packet-level/vpn-app/result_bound/packet_framework_manifest.json"
+        ]
+      },
+      "accuracy": 0.9066244022994682,
+      "macro_f1": 0.8112461556528934,
+      "num_samples": 111678,
+      "metric_status": "pass",
+      "publication_status": "pass",
+      "status": "pass"
+    },
+    {
+      "dataset": "tls-120",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/tls-120/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/tls-120/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "pass",
+        "glob": "reasoningDataset/packet-level/tls-120/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 4,
+        "candidate_manifest_count": 4,
+        "manifest_count": 4,
+        "matching_manifests": [
+          "reasoningDataset/packet-level/tls-120/fold0/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/tls-120/fold1/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/tls-120/fold2/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/tls-120/result_bound/packet_framework_manifest.json"
+        ],
+        "required_result_path": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+        "fold_manifest_count": 3,
+        "completed_folds": [
+          0,
+          1,
+          2
+        ],
+        "result_bound_manifest_count": 1,
+        "result_bound_manifests": [
+          "reasoningDataset/packet-level/tls-120/result_bound/packet_framework_manifest.json"
+        ]
+      },
+      "accuracy": 0.8744011667996404,
+      "macro_f1": 0.8479274094708068,
+      "num_samples": 553994,
+      "metric_status": "pass",
+      "publication_status": "pass",
+      "status": "pass"
+    }
+  ],
+  "supplementary_packet_claims": [
+    {
+      "dataset": "vpn-service",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/vpn-service/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/vpn-service/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/vpn-service/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/vpn-service/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "pass",
+        "glob": "reasoningDataset/packet-level/vpn-service/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 4,
+        "candidate_manifest_count": 4,
+        "manifest_count": 4,
+        "matching_manifests": [
+          "reasoningDataset/packet-level/vpn-service/fold0/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-service/fold1/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-service/fold2/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-service/result_bound/packet_framework_manifest.json"
+        ],
+        "required_result_path": "reasoningDataset/packet-level/vpn-service/paper_default_result.json",
+        "fold_manifest_count": 3,
+        "completed_folds": [
+          0,
+          1,
+          2
+        ],
+        "result_bound_manifest_count": 1,
+        "result_bound_manifests": [
+          "reasoningDataset/packet-level/vpn-service/result_bound/packet_framework_manifest.json"
+        ]
+      },
+      "accuracy": 0.9512068098556138,
+      "macro_f1": 0.9434656797061393,
+      "num_samples": null,
+      "metric_status": "pass",
+      "publication_status": "pass",
+      "status": "pass"
+    },
+    {
+      "dataset": "vpn-binary",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/vpn-binary/*/packet_framework_manifest.json",
+      "note": "Strict one-current-packet input.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "pass",
+        "glob": "reasoningDataset/packet-level/vpn-binary/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 4,
+        "candidate_manifest_count": 4,
+        "manifest_count": 4,
+        "matching_manifests": [
+          "reasoningDataset/packet-level/vpn-binary/fold0/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-binary/fold1/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-binary/fold2/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/vpn-binary/result_bound/packet_framework_manifest.json"
+        ],
+        "required_result_path": "reasoningDataset/packet-level/vpn-binary/paper_default_result.json",
+        "fold_manifest_count": 3,
+        "completed_folds": [
+          0,
+          1,
+          2
+        ],
+        "result_bound_manifest_count": 1,
+        "result_bound_manifests": [
+          "reasoningDataset/packet-level/vpn-binary/result_bound/packet_framework_manifest.json"
+        ]
+      },
+      "accuracy": 0.9999186212633597,
+      "macro_f1": 0.9999186068245844,
+      "num_samples": 110594,
+      "metric_status": "pass",
+      "publication_status": "pass",
+      "status": "pass"
+    },
+    {
+      "dataset": "ustc-app",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/ustc-app/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/ustc-app/*/packet_framework_manifest.json",
+      "note": "Packet-level only; excluded from current flow-level claims.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/ustc-app/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/ustc-app/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "pass",
+        "glob": "reasoningDataset/packet-level/ustc-app/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 4,
+        "candidate_manifest_count": 4,
+        "manifest_count": 4,
+        "matching_manifests": [
+          "reasoningDataset/packet-level/ustc-app/fold0/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/ustc-app/fold1/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/ustc-app/fold2/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/ustc-app/result_bound/packet_framework_manifest.json"
+        ],
+        "required_result_path": "reasoningDataset/packet-level/ustc-app/paper_default_result.json",
+        "fold_manifest_count": 3,
+        "completed_folds": [
+          0,
+          1,
+          2
+        ],
+        "result_bound_manifest_count": 1,
+        "result_bound_manifests": [
+          "reasoningDataset/packet-level/ustc-app/result_bound/packet_framework_manifest.json"
+        ]
+      },
+      "accuracy": 0.9773248211171217,
+      "macro_f1": 0.9848701958816448,
+      "num_samples": 609477,
+      "metric_status": "pass",
+      "publication_status": "pass",
+      "status": "pass"
+    },
+    {
+      "dataset": "ustc-binary",
+      "task": "packet-level",
+      "path": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json",
+      "exists": true,
+      "target_accuracy": null,
+      "target_macro_f1": null,
+      "required_framework_profile": "paper_unified",
+      "framework_manifest_glob": "reasoningDataset/packet-level/ustc-binary/*/packet_framework_manifest.json",
+      "note": "All three folds are exact; fold0 path is used as an audit anchor.",
+      "canonical_result_path": {
+        "ok": true,
+        "expected": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json",
+        "actual": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json"
+      },
+      "framework_provenance": {
+        "status": "pass",
+        "glob": "reasoningDataset/packet-level/ustc-binary/*/packet_framework_manifest.json",
+        "required_profile": "paper_unified",
+        "matching_manifest_count": 4,
+        "candidate_manifest_count": 4,
+        "manifest_count": 4,
+        "matching_manifests": [
+          "reasoningDataset/packet-level/ustc-binary/fold0/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/ustc-binary/fold1/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/ustc-binary/fold2/packet_framework_manifest.json",
+          "reasoningDataset/packet-level/ustc-binary/result_bound/packet_framework_manifest.json"
+        ],
+        "required_result_path": "reasoningDataset/packet-level/ustc-binary/paper_default_result.json",
+        "fold_manifest_count": 3,
+        "completed_folds": [
+          0,
+          1,
+          2
+        ],
+        "result_bound_manifest_count": 1,
+        "result_bound_manifests": [
+          "reasoningDataset/packet-level/ustc-binary/result_bound/packet_framework_manifest.json"
+        ]
+      },
+      "accuracy": 1.0,
+      "macro_f1": 1.0,
+      "num_samples": 609332,
+      "metric_status": "pass",
+      "publication_status": "pass",
+      "status": "pass"
+    }
+  ],
+  "candidate_rankings": [
+    {
+      "dataset": "vpn-app",
+      "path": "reasoningDataset/vpn-app/content_group_candidate_ranking.json",
+      "num_candidates": 411,
+      "num_ok": 343,
+      "best_path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+      "best_accuracy": 0.7511961722488039,
+      "best_macro_f1": 0.7522269064093092,
+      "best_content_group_accuracy_lower": 0.7318466833895055,
+      "best_content_group_macro_f1_lower": 0.7103191986989955,
+      "best_content_group_target_met": false
+    },
+    {
+      "dataset": "tls-120",
+      "path": "reasoningDataset/tls-120/content_group_candidate_ranking_crossfold.json",
+      "num_candidates": 63,
+      "num_ok": 55,
+      "best_path": "reasoningDataset/tls-120/test_crossfold_consensus_rgssi_auto_confidence.json",
+      "best_accuracy": 0.8475134292150407,
+      "best_macro_f1": 0.8304026568985646,
+      "best_content_group_accuracy_lower": 0.8401490209669035,
+      "best_content_group_macro_f1_lower": 0.8226585116912618,
+      "best_content_group_target_met": true
+    }
+  ],
+  "ablation_summary": {
+    "num_ablations": 13,
+    "helpful_count": 5,
+    "harmful_count": 3,
+    "neutral_or_uncertain_count": 5,
+    "helpful": [
+      {
+        "dataset": "tls-120",
+        "stage": "unified-slot stacker",
+        "delta_accuracy": 0.008230809218506274,
+        "delta_macro_f1": 0.012763436507321368,
+        "delta_accuracy_ci95": [
+          0.0035890660197539365,
+          0.012389533876277947
+        ],
+        "delta_macro_f1_ci95": [
+          0.007389965197312873,
+          0.017358947582208656
+        ],
+        "effect": "helpful",
+        "note": "trainable slot stacker upper/probe",
+        "selector": "-"
+      },
+      {
+        "dataset": "tls-120",
+        "stage": "guarded slot-stacker selector",
+        "delta_accuracy": 0.0036388840755501306,
+        "delta_macro_f1": 0.0037956549132758255,
+        "delta_accuracy_ci95": [
+          0.0017328019407382156,
+          0.005631606307399065
+        ],
+        "delta_macro_f1_ci95": [
+          0.0018301038827947093,
+          0.005830570600141319
+        ],
+        "effect": "helpful",
+        "note": "low-shift stacker switch",
+        "selector": "threshold_switch:slot_stacker"
+      },
+      {
+        "dataset": "tls-120",
+        "stage": "soft expert gate",
+        "delta_accuracy": 0.00649800727776817,
+        "delta_macro_f1": 0.007348387904340781,
+        "delta_accuracy_ci95": [
+          0.003985444463697804,
+          0.009056056142782879
+        ],
+        "delta_macro_f1_ci95": [
+          0.004805857488986371,
+          0.009846202329855377
+        ],
+        "effect": "helpful",
+        "note": "trainable expert weighting",
+        "selector": "soft_expert_gate"
+      },
+      {
+        "dataset": "tls-120",
+        "stage": "soft-gate calibrated selector",
+        "delta_accuracy": 0.008750649800727817,
+        "delta_macro_f1": 0.00996310933613298,
+        "delta_accuracy_ci95": [
+          0.006019320741639242,
+          0.011746231155778889
+        ],
+        "delta_macro_f1_ci95": [
+          0.007067507606603716,
+          0.01340238919650288
+        ],
+        "effect": "helpful",
+        "note": "class-bias calibrated soft gate",
+        "selector": "class_bias_calibration"
+      },
+      {
+        "dataset": "tls-120",
+        "stage": "coverage-audited distill student selector",
+        "delta_accuracy": 0.006324727083694359,
+        "delta_macro_f1": 0.010678572607279557,
+        "delta_accuracy_ci95": [
+          0.0020793623288858365,
+          0.010269017501299604
+        ],
+        "delta_macro_f1_ci95": [
+          0.006330064418286835,
+          0.015362380191224344
+        ],
+        "effect": "helpful",
+        "note": "student candidate admitted through unified expert slots",
+        "selector": "class_bias_calibration"
+      }
+    ],
+    "harmful": [
+      {
+        "dataset": "vpn-app",
+        "stage": "unsafe reliability fusion",
+        "delta_accuracy": -0.053229665071770293,
+        "delta_macro_f1": -0.09244758582697532,
+        "delta_accuracy_ci95": [
+          -0.06758373205741625,
+          -0.03947368421052633
+        ],
+        "delta_macro_f1_ci95": [
+          -0.11253970552817236,
+          -0.07353683683990542
+        ],
+        "effect": "harmful",
+        "note": "validation gain, target shift",
+        "selector": "reliability_fusion"
+      },
+      {
+        "dataset": "vpn-app",
+        "stage": "calibration-enabled selector",
+        "delta_accuracy": -0.014952153110047828,
+        "delta_macro_f1": -0.03168676805350812,
+        "delta_accuracy_ci95": [
+          -0.02064892344497605,
+          -0.008971291866028741
+        ],
+        "delta_macro_f1_ci95": [
+          -0.044889428690870765,
+          -0.01815992687953454
+        ],
+        "effect": "harmful",
+        "note": "extra candidate, still unsafe",
+        "selector": "threshold_switch:emb_lr"
+      },
+      {
+        "dataset": "tls-120",
+        "stage": "coverage-audited distill student fusion",
+        "delta_accuracy": -0.04721885288511529,
+        "delta_macro_f1": -0.06683659519162932,
+        "delta_accuracy_ci95": [
+          -0.05614278287991681,
+          -0.03898371166175706
+        ],
+        "delta_macro_f1_ci95": [
+          -0.07820154970553542,
+          -0.057628274187722
+        ],
+        "effect": "harmful",
+        "note": "single-student graph/seq distillation; lower than consensus teacher",
+        "selector": "graph=0.55, seq=0.45"
+      }
+    ]
+  },
+  "strict_shared_core_v2": {
+    "required_schema": "strict_shared_core_v2",
+    "required_datasets": [
+      "vpn-app",
+      "tls-120"
+    ],
+    "required_tasks": [
+      "packet-level",
+      "flow-level"
+    ],
+    "canonical_results": [
+      {
+        "dataset": "vpn-app",
+        "task": "packet-level",
+        "path": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+        "exists": true,
+        "status": null,
+        "shared_core_config_sha256": null,
+        "session_novelty": null,
+        "session_novelty_sha256": null,
+        "session_novelty_verified": false,
+        "passed": false,
+        "error": null
+      },
+      {
+        "dataset": "tls-120",
+        "task": "packet-level",
+        "path": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+        "exists": true,
+        "status": null,
+        "shared_core_config_sha256": null,
+        "session_novelty": null,
+        "session_novelty_sha256": null,
+        "session_novelty_verified": false,
+        "passed": false,
+        "error": null
+      },
+      {
+        "dataset": "vpn-app",
+        "task": "flow-level",
+        "path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+        "exists": true,
+        "status": null,
+        "shared_core_config_sha256": null,
+        "session_novelty": null,
+        "session_novelty_sha256": null,
+        "session_novelty_verified": false,
+        "passed": false,
+        "error": null
+      },
+      {
+        "dataset": "tls-120",
+        "task": "flow-level",
+        "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json",
+        "exists": true,
+        "status": null,
+        "shared_core_config_sha256": null,
+        "session_novelty": null,
+        "session_novelty_sha256": null,
+        "session_novelty_verified": false,
+        "passed": false,
+        "error": null
+      }
+    ],
+    "all_results_have_strict_provenance": false,
+    "all_session_novelty_evidence_verified": false,
+    "single_shared_core_config": false,
+    "shared_core_config_sha256": null,
+    "ready": false
+  },
+  "sweet_protocol_comparison": {
+    "source": {
+      "paper": "The Sweet Danger of Sugar-- Debunking Representation Learning",
+      "split": "per-flow",
+      "metrics": [
+        "accuracy",
+        "macro_f1"
+      ],
+      "tables": [
+        3,
+        4,
+        9
+      ]
+    },
+    "comparison_policy": {
+      "current_method_protocol": "downstream_adapted_lora",
+      "primary_comparator": "end_to_end",
+      "frozen_comparator_is_secondary": true
+    },
+    "results": [
+      {
+        "task": "packet-level",
+        "dataset": "vpn-app",
+        "path": "reasoningDataset/packet-level/vpn-app/paper_default_result.json",
+        "our_protocol": "downstream_adapted_lora",
+        "publication_provenance": {},
+        "strict_shared_core_v2_result": false,
+        "primary_comparator": "end_to_end",
+        "accuracy": 0.9066244022994682,
+        "macro_f1": 0.8112461556528934,
+        "predeclared_target": {
+          "accuracy": 0.9,
+          "macro_f1": 0.76,
+          "met": true
+        },
+        "sweet": {
+          "frozen_representation": {
+            "model": "Pcap-Encoder",
+            "table": 3,
+            "accuracy": 0.835,
+            "macro_f1": 0.71,
+            "delta_accuracy": 0.0716244022994682,
+            "delta_macro_f1": 0.10124615565289341,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          },
+          "end_to_end": {
+            "model": "Pcap-Encoder (unfrozen)",
+            "table": 4,
+            "accuracy": 0.856,
+            "macro_f1": 0.748,
+            "delta_accuracy": 0.050624402299468185,
+            "delta_macro_f1": 0.06324615565289338,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          }
+        },
+        "headline_sweet_claim": "exceeds_protocol_matched_end_to_end"
+      },
+      {
+        "task": "flow-level",
+        "dataset": "vpn-app",
+        "path": "reasoningDataset/vpn-app/test_crossfold_consensus_auto_confidence.json",
+        "our_protocol": "downstream_adapted_lora",
+        "publication_provenance": {},
+        "strict_shared_core_v2_result": false,
+        "primary_comparator": "end_to_end",
+        "accuracy": 0.7511961722488039,
+        "macro_f1": 0.7522269064093092,
+        "predeclared_target": {
+          "accuracy": 0.75,
+          "macro_f1": 0.65,
+          "met": true
+        },
+        "sweet": {
+          "frozen_representation": {
+            "model": "Pcap-Encoder",
+            "table": 9,
+            "accuracy": 0.692,
+            "macro_f1": 0.622,
+            "delta_accuracy": 0.05919617224880391,
+            "delta_macro_f1": 0.13022690640930923,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          },
+          "end_to_end": {
+            "model": "YaTC (best paired AC/F1 among reported unfrozen models)",
+            "table": 9,
+            "accuracy": 0.6,
+            "macro_f1": 0.548,
+            "delta_accuracy": 0.15119617224880388,
+            "delta_macro_f1": 0.20422690640930918,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          }
+        },
+        "headline_sweet_claim": "exceeds_protocol_matched_end_to_end"
+      },
+      {
+        "task": "packet-level",
+        "dataset": "tls-120",
+        "path": "reasoningDataset/packet-level/tls-120/paper_default_result.json",
+        "our_protocol": "downstream_adapted_lora",
+        "publication_provenance": {},
+        "strict_shared_core_v2_result": false,
+        "primary_comparator": "end_to_end",
+        "accuracy": 0.8744011667996404,
+        "macro_f1": 0.8479274094708068,
+        "predeclared_target": {
+          "accuracy": 0.85,
+          "macro_f1": 0.78,
+          "met": true
+        },
+        "sweet": {
+          "frozen_representation": {
+            "model": "Pcap-Encoder",
+            "table": 3,
+            "accuracy": 0.71,
+            "macro_f1": 0.637,
+            "delta_accuracy": 0.16440116679964045,
+            "delta_macro_f1": 0.2109274094708068,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          },
+          "end_to_end": {
+            "model": "Pcap-Encoder (unfrozen)",
+            "table": 4,
+            "accuracy": 0.773,
+            "macro_f1": 0.692,
+            "delta_accuracy": 0.1014011667996404,
+            "delta_macro_f1": 0.15592740947080685,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          }
+        },
+        "headline_sweet_claim": "exceeds_protocol_matched_end_to_end"
+      },
+      {
+        "task": "flow-level",
+        "dataset": "tls-120",
+        "path": "reasoningDataset/tls-120/test_crossfold_consensus_auto_confidence.json",
+        "our_protocol": "downstream_adapted_lora",
+        "publication_provenance": {},
+        "strict_shared_core_v2_result": false,
+        "primary_comparator": "end_to_end",
+        "accuracy": 0.8461271876624502,
+        "macro_f1": 0.8291911492056544,
+        "predeclared_target": {
+          "accuracy": 0.78,
+          "macro_f1": 0.7,
+          "met": true
+        },
+        "sweet": {
+          "frozen_representation": {
+            "model": "Pcap-Encoder",
+            "table": 9,
+            "accuracy": 0.713,
+            "macro_f1": 0.681,
+            "delta_accuracy": 0.13312718766245024,
+            "delta_macro_f1": 0.14819114920565435,
+            "exceeds_accuracy": true,
+            "exceeds_macro_f1": true,
+            "exceeds_both": true
+          },
+          "end_to_end": {
+            "model": "netFound (unfrozen)",
+            "table": 9,
+            "accuracy": 0.908,
+            "macro_f1": 0.897,
+            "delta_accuracy": -0.06187281233754982,
+            "delta_macro_f1": -0.06780885079434562,
+            "exceeds_accuracy": false,
+            "exceeds_macro_f1": false,
+            "exceeds_both": false
+          }
+        },
+        "headline_sweet_claim": "does_not_exceed_protocol_matched_end_to_end"
+      }
+    ],
+    "summary": {
+      "all_results_strict_shared_core_v2": false,
+      "all_results_exceed_end_to_end_accuracy_and_macro_f1": false,
+      "strict_unified_method_exceeds_all_end_to_end": false
+    }
+  },
+  "readiness": {
+    "legacy_protocol_audit_ready": false,
+    "strict_shared_core_v2_ready": false,
+    "session_novelty_evidence_ready": false,
+    "sweet_end_to_end_all_tasks_exceeded": false,
+    "paper_unified_profile_ready": false,
+    "flow_point_targets_ready": true,
+    "flow_ci_targets_ready": false,
+    "flow_content_group_ci_targets_ready": false,
+    "packet_publication_defaults_ready": true,
+    "audit_gates": {
+      "unified_framework_status": "pass",
+      "paper_defaults_ok": true,
+      "shared_core_match": true,
+      "paper_unified_flow_manifest_passes": 4,
+      "paper_unified_packet_manifest_passes": 24,
+      "flow_scope": [
+        "vpn-app",
+        "tls-120"
+      ],
+      "packet_scope": [
+        "vpn-app",
+        "tls-120",
+        "vpn-service",
+        "vpn-binary",
+        "ustc-app",
+        "ustc-binary"
+      ],
+      "flow_default_count": 2,
+      "packet_default_count": 6,
+      "flow_defaults_pass": true,
+      "packet_defaults_pass": true
+    },
+    "ccf_a_risk_level": "high",
+    "ccf_a_risks": [
+      "VPN/TLS packet/flow canonical results do not yet share complete strict_shared_core_v2 publication provenance.",
+      "At least one current VPN/TLS task result does not exceed the protocol-matched SWEET end-to-end accuracy and macro-F1 pair.",
+      "At least one flow dataset misses the content-grouped bootstrap lower-bound gate.",
+      "At least one flow dataset passes point targets but not the ordinary bootstrap lower-bound gate.",
+      "The legacy unified/defaults protocol audit is not fully passing."
+    ],
+    "recommended_main_claim": "Candidate unified shortcut-resistant packet-to-flow framework; historical packet-level scores and flow-level point gains remain non-headline evidence until strict_shared_core_v2 cross-task provenance, fixed-consensus, and CI gates pass."
+  }
+}
