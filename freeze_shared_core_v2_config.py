@@ -677,6 +677,27 @@ def freeze_config(
             )
     packet_hierarchy_weights = hierarchy_weights
     flow_hierarchy_weights = hierarchy_weights
+    if hierarchy_weights is not None:
+        balance_selected = selected_class_weight_config(balance_report)
+        fallback_strength = (
+            0.0
+            if balance_selected["class_weight_basis"] == "packet"
+            else float(balance_selected["class_weight_strength"])
+        )
+        packet_hierarchy_weights = {
+            dataset: (
+                hierarchy_weights[dataset]
+                if dataset in hierarchy_weights
+                else {
+                    "class_weight_basis": "flow",
+                    "class_weight_strength": fallback_strength,
+                    "numeric_parameter_source": (
+                        "cross_dataset_balance_gate_global_fallback"
+                    ),
+                }
+            )
+            for dataset in PACKET_TASK_DATASETS
+        }
     if packet_hierarchy_derivation is not None:
         if hierarchy_report is None or hierarchy_report.get("shared_algorithm") != (
             "bounded_effective_flow_class_risk_power_eta"

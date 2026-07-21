@@ -291,6 +291,13 @@ def test_freeze_binds_hierarchy_numeric_overrides_before_paired_screen(tmp_path)
     assert frozen["dataset_numeric_hyperparameter_overrides"][
         "packet-level-classification"
     ]["vpn-app"]["class_weight_strength"] == 0.5
+    packet_overrides = frozen["dataset_numeric_hyperparameter_overrides"][
+        "packet-level-classification"
+    ]
+    assert set(packet_overrides) == set(
+        frozen["task_datasets"]["packet-level-classification"]
+    )
+    assert packet_overrides["ustc-app"]["class_weight_strength"] == 0.5
     assert frozen["selection_evidence"]["hierarchy_class_weight"][
         "sha256"
     ] == hashlib.sha256(hierarchy_path.read_bytes()).hexdigest()
