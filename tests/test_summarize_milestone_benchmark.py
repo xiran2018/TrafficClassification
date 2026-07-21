@@ -18,7 +18,14 @@ def write_json(path: Path, payload: dict) -> Path:
 
 def result(path: Path, task: str) -> Path:
     metrics = {"num_samples": 10, "accuracy": 0.8, "macro_f1": 0.7}
-    payload = {"metrics": metrics if task == "packet" else {"flow_level": metrics}}
+    flow_metrics = {
+        "accuracy": 0.8,
+        "macro_f1": 0.7,
+        "calibration": {"num_samples": 10},
+    }
+    payload = {
+        "metrics": metrics if task == "packet" else {"flow_level": flow_metrics}
+    }
     return write_json(path, payload)
 
 

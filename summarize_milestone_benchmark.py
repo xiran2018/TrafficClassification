@@ -47,8 +47,16 @@ def metric_summary(payload: dict[str, Any], task: str) -> dict[str, Any]:
     metrics = payload.get("metrics") or {}
     if task == "flow":
         metrics = metrics.get("flow_level") or {}
+    num_samples = metrics.get("num_samples")
+    if num_samples is None:
+        num_samples = (metrics.get("calibration") or {}).get("num_samples")
+    if num_samples is None and task == "flow":
+        labels = payload.get("flow_y_true") or []
+        num_samples = len(labels) if labels else None
+    if num_samples is None:
+        raise ValueError(f"{task} result does not report its sample count")
     return {
-        "num_samples": int(metrics["num_samples"]),
+        "num_samples": int(num_samples),
         "accuracy": float(metrics["accuracy"]),
         "macro_f1": float(metrics["macro_f1"]),
     }
