@@ -117,11 +117,17 @@ def amendment_preregistration(tmp_path):
     evidence = {
         "test_labels_used": False,
         "summary": {
+            "num_classes": 2,
             "minimum_packet_class_count": 3,
             "maximum_packet_class_count": 3,
             "minimum_flow_class_count": 1,
             "maximum_flow_class_count": 2,
+            "effective_number_beta": 0.9999,
         },
+        "classes": [
+            {"label_id": 0, "packet_count": 3, "flow_count": 2},
+            {"label_id": 1, "packet_count": 3, "flow_count": 1},
+        ],
     }
     evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
     payload = preregistration()

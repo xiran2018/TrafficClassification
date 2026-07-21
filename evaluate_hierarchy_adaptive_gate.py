@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hierarchy_class_weights import hierarchy_class_weights
+
 
 ARM_PARAMETERS = {
     "packet_full": {"alpha": 0.0, "gamma": 1.0},
@@ -60,6 +62,9 @@ def verify_train_only_amendment_evidence(prereg: dict[str, Any]) -> dict[str, An
     if amendment is None:
         return None
     search_space = followup_search_space(prereg)
+    rule = amendment["execution_rule"]
+    duplicate = rule["duplicate_grid_point"]
+    duplicate_of = rule["duplicate_of"]
     verified: dict[str, Any] = {}
     for dataset, expected in sorted((amendment.get("evidence") or {}).items()):
         path = Path(str(expected.get("path") or ""))
@@ -82,6 +87,35 @@ def verify_train_only_amendment_evidence(prereg: dict[str, Any]) -> dict[str, An
         ):
             if int(summary[field]) != int(expected[field]):
                 raise ValueError(f"{dataset} evidence summary mismatch for {field}")
+        classes = report.get("classes") or []
+        packet_counts = {
+            int(row["label_id"]): int(row["packet_count"]) for row in classes
+        }
+        flow_counts = {
+            int(row["label_id"]): int(row["flow_count"]) for row in classes
+        }
+        if len(packet_counts) != int(summary["num_classes"]):
+            raise ValueError(f"{dataset} class rows are incomplete")
+        duplicate_weights = hierarchy_class_weights(
+            packet_counts,
+            flow_counts,
+            alpha=float(duplicate["alpha"]),
+            gamma=float(duplicate["gamma"]),
+            beta=float(summary["effective_number_beta"]),
+        )
+        canonical_weights = hierarchy_class_weights(
+            packet_counts,
+            flow_counts,
+            alpha=float(duplicate_of["alpha"]),
+            gamma=float(duplicate_of["gamma"]),
+            beta=float(summary["effective_number_beta"]),
+        )
+        maximum_difference = max(
+            abs(duplicate_weights[label] - canonical_weights[label])
+            for label in duplicate_weights
+        )
+        if maximum_difference > 1e-12:
+            raise ValueError(f"{dataset} duplicate hierarchy weights are not equivalent")
         verified[dataset] = {
             "path": str(path.resolve()),
             "sha256": expected_hash,
@@ -90,6 +124,9 @@ def verify_train_only_amendment_evidence(prereg: dict[str, Any]) -> dict[str, An
                 int(summary["minimum_flow_class_count"]),
                 int(summary["maximum_flow_class_count"]),
             ],
+            "duplicate_parameterization_max_abs_weight_difference": (
+                maximum_difference
+            ),
         }
     if not verified:
         raise ValueError("identifiability amendment has no evidence")
