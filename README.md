@@ -5118,17 +5118,20 @@ flow, so their corresponding alias exposure is zero and unique-anchor positive
 coverage is already 100%; this is a task-data boundary, not permission to use a
 different loss implementation.
 
-The bounded next candidate is therefore **identity-safe, cross-flow-paired
-SupCon**, not a memory bank or another expert. It retains duplicate rows in CE
-so every flow keeps equal classification exposure, deduplicates all
-contrastive roles by `packet_uid`, and packs two distinct same-class flows as
-an indivisible unit whenever possible. Every flow is still visited exactly
-once per epoch. With eight flows per batch, the audit preserves exactly
+The next comparison first enables **identity-safe SupCon under the unchanged
+random-flow batches**. It retains duplicate rows in CE so every flow keeps
+equal classification exposure, but only one occurrence of each `packet_uid`
+may take any contrastive role. Only if this isolated change passes the held-out
+gate does a second **cross-flow-paired** candidate pack two distinct same-class
+flows as an indivisible unit. Every flow is still visited exactly once per
+epoch. With eight flows per batch, the pairing audit preserves exactly
 `590/2651` VPN/TLS batches per epoch, lowers alias positive-mass share to
 `21.77%/14.06%`, and increases identity-safe positive coverage to
-`99.95%/99.96%`. The same sampler/objective applies to Flow data,
-where identity dedup naturally becomes a no-op and distinct same-flow packets
-remain valid positives.
+`99.95%/99.96%`. The same sampler/objective applies to Flow data, where
+identity dedup naturally becomes a no-op and distinct same-flow packets remain
+valid positives. A memory bank or another expert is not introduced unless
+both bounded candidates fail and a new validation-only hypothesis is
+pre-registered.
 
 This mechanism must not be described as the first field augmentation or the
 first flow contrastive objective. TrafficFormer already randomizes selected
@@ -5136,12 +5139,14 @@ header fields, MIETT already pulls packets from one flow together, and SWEET
 already identifies explicit and implicit flow-ID shortcuts. The narrower
 testable contribution is that equal-flow sampling can introduce an
 **objective-level identity shortcut** by representing one packet copy as a
-multi-instance same-flow pair, together with a relation-complete sampler that
-removes aliases without losing supervised positive coverage. It enters the
-queue only after the running A/B/C screens freeze their winner. Promotion first
-requires the same VPN/TLS Packet held-out dual gate above, followed by matched
-Flow held-out non-inferiority under the identical implementation and step
-budget. No test prediction may select either stage.
+multi-instance same-flow pair, together with an identity-safe relation sampler
+that restores real positive coverage. The two candidates enter the queue only
+after the running A/B/C screens freeze their winner and are evaluated
+sequentially, so alias removal and relation pairing remain separately
+attributable. Each promotion first requires the same VPN/TLS Packet held-out
+dual gate above, followed by matched Flow held-out non-inferiority under the
+identical implementation and step budget. No test prediction may select either
+stage.
 
 `train_tower1_multitask.py` now supports `--class_weight_basis {packet,flow}` and `--class_weight_strength ALPHA`. For normalized class-balanced weight `w_c`, the applied weight is proportional to `w_c ** ALPHA` and is renormalized to mean one. `ALPHA=0` disables class reweighting and `ALPHA=1` applies full correction. Both the packet-level and flow-level runners expose the same mechanism, so this is a shared Tower-1 objective rather than a dataset-specific classifier trick.
 
