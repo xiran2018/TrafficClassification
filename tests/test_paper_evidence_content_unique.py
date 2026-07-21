@@ -142,7 +142,7 @@ def test_paper_audit_gates_surface_flow_and_packet_scopes_in_markdown():
     assert "Paper Audit Gates" in md
     assert "vpn-app, tls-120" in md
     assert "vpn-app, tls-120, ustc-app" in md
-    assert "| pass | True | True | 2 | 6 | True/2 | True/3 |" in md
+    assert "| pass | True | True | 2 | 6 | True/2 | True/3 | True |" in md
 
 
 def test_paper_audit_gates_fail_when_packet_default_not_publication_ready():
@@ -159,3 +159,35 @@ def test_paper_audit_gates_fail_when_packet_default_not_publication_ready():
     assert gates["paper_defaults_ok"] is False
     assert gates["flow_defaults_pass"] is True
     assert gates["packet_defaults_pass"] is False
+
+
+def test_paper_audit_gates_do_not_replace_strict_zero_counts_with_stale_defaults():
+    gates = paper_audit_gates(
+        {
+            "status": "review",
+            "framework": {
+                "paper_unified_flow_manifest_passes": 0,
+                "paper_unified_packet_manifest_passes": 0,
+                "flow_scope": [],
+                "packet_scope": [],
+            },
+        },
+        {
+            "ok": True,
+            "unified_framework": {
+                "shared_core_matches_defaults": True,
+                "paper_unified_flow_manifest_passes": 4,
+                "paper_unified_packet_manifest_passes": 24,
+                "flow_scope": ["stale-flow"],
+                "packet_scope": ["stale-packet"],
+            },
+            "flow_datasets": [{"ok": True}],
+            "packet_datasets": [{"publication_status": "pass"}],
+        },
+    )
+
+    assert gates["paper_unified_flow_manifest_passes"] == 0
+    assert gates["paper_unified_packet_manifest_passes"] == 0
+    assert gates["flow_scope"] == []
+    assert gates["packet_scope"] == []
+    assert gates["strict_reproduction_complete"] is False

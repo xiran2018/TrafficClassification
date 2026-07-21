@@ -152,11 +152,11 @@
     "interpretation": "The paper-facing profile is `paper_unified`. All datasets pass through the same shared packet-to-flow core modules, backbone, base expert, validation-gated selector, bootstrap guard, target-shift guard, cross-fold consensus option, and candidate expert/calibration family. For consensus results, per-fold safety guards are inherited from the selected fold candidates and the consensus itself is label-free on the shared test set. When unified expert slots are configured, missing dataset-specific experts are routed as identity candidates. Dataset-specific validation may activate, gate off, or leave candidate experts as identity. When multi-view pooling is evaluated, learned branch-gate weights are reported as trainable module evidence."
   },
   "paper_audit_gates": {
-    "unified_framework_status": "pass",
-    "paper_defaults_ok": true,
+    "unified_framework_status": "review",
+    "paper_defaults_ok": false,
     "shared_core_match": true,
-    "paper_unified_flow_manifest_passes": 4,
-    "paper_unified_packet_manifest_passes": 24,
+    "paper_unified_flow_manifest_passes": 0,
+    "paper_unified_packet_manifest_passes": 0,
     "flow_scope": [
       "vpn-app",
       "tls-120"
@@ -172,7 +172,8 @@
     "flow_default_count": 2,
     "packet_default_count": 6,
     "flow_defaults_pass": true,
-    "packet_defaults_pass": true
+    "packet_defaults_pass": false,
+    "strict_reproduction_complete": false
   },
   "claims": [
     {

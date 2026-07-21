@@ -338,22 +338,37 @@ def paper_audit_gates(unified_audit: Dict[str, Any], defaults_audit: Dict[str, A
     defaults_framework = defaults_audit.get("unified_framework") or {}
     flow_rows = defaults_audit.get("flow_datasets") or defaults_audit.get("datasets") or []
     packet_rows = defaults_audit.get("packet_datasets") or []
-    return {
+
+    def authoritative(key: str) -> Any:
+        # Zero and an empty scope are valid strict-audit results. Fall back only
+        # for legacy audits that do not expose the field at all.
+        return framework[key] if key in framework else defaults_framework.get(key)
+
+    flow_manifest_passes = authoritative("paper_unified_flow_manifest_passes")
+    packet_manifest_passes = authoritative("paper_unified_packet_manifest_passes")
+    gates = {
         "unified_framework_status": unified_audit.get("status"),
         "paper_defaults_ok": defaults_audit.get("ok"),
         "shared_core_match": defaults_framework.get("shared_core_matches_defaults"),
-        "paper_unified_flow_manifest_passes": framework.get("paper_unified_flow_manifest_passes")
-        or defaults_framework.get("paper_unified_flow_manifest_passes"),
-        "paper_unified_packet_manifest_passes": framework.get("paper_unified_packet_manifest_passes")
-        or defaults_framework.get("paper_unified_packet_manifest_passes"),
-        "flow_scope": framework.get("flow_scope") or defaults_framework.get("flow_scope"),
-        "packet_scope": framework.get("packet_scope") or defaults_framework.get("packet_scope"),
+        "paper_unified_flow_manifest_passes": flow_manifest_passes,
+        "paper_unified_packet_manifest_passes": packet_manifest_passes,
+        "flow_scope": authoritative("flow_scope"),
+        "packet_scope": authoritative("packet_scope"),
         "flow_default_count": len(flow_rows),
         "packet_default_count": len(packet_rows),
         "flow_defaults_pass": bool(flow_rows) and all(row.get("ok") is True for row in flow_rows),
         "packet_defaults_pass": bool(packet_rows)
         and all(row.get("publication_status") == "pass" for row in packet_rows),
     }
+    gates["strict_reproduction_complete"] = bool(
+        gates["unified_framework_status"] == "pass"
+        and gates["paper_defaults_ok"] is True
+        and int(flow_manifest_passes or 0) > 0
+        and int(packet_manifest_passes or 0) > 0
+        and gates["flow_defaults_pass"]
+        and gates["packet_defaults_pass"]
+    )
+    return gates
 
 
 def render_markdown(pack: Dict[str, Any]) -> str:
@@ -395,9 +410,9 @@ def render_markdown(pack: Dict[str, Any]) -> str:
             "",
             "## Paper Audit Gates",
             "",
-            "| Unified Audit | Defaults Audit | Shared Core | Flow Manifests | Packet Manifests | Flow Defaults | Packet Defaults |",
-            "|---|---|---|---:|---:|---:|---:|",
-            "| {unified} | {defaults} | {shared} | {flow_manifest} | {packet_manifest} | {flow_pass}/{flow_count} | {packet_pass}/{packet_count} |".format(
+            "| Unified Audit | Defaults Audit | Shared Core | Flow Manifests | Packet Manifests | Flow Defaults | Packet Defaults | Strict Reproduction |",
+            "|---|---|---|---:|---:|---:|---:|---|",
+            "| {unified} | {defaults} | {shared} | {flow_manifest} | {packet_manifest} | {flow_pass}/{flow_count} | {packet_pass}/{packet_count} | {strict} |".format(
                 unified=gates.get("unified_framework_status"),
                 defaults=gates.get("paper_defaults_ok"),
                 shared=gates.get("shared_core_match"),
@@ -407,6 +422,7 @@ def render_markdown(pack: Dict[str, Any]) -> str:
                 flow_count=gates.get("flow_default_count", "-"),
                 packet_pass=gates.get("packet_defaults_pass"),
                 packet_count=gates.get("packet_default_count", "-"),
+                strict=gates.get("strict_reproduction_complete"),
             ),
             "",
             "Flow scope: `{}`".format(", ".join(gates.get("flow_scope") or [])),

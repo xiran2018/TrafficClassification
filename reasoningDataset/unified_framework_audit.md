@@ -1,6 +1,8 @@
 # Unified Framework Audit
 
 Status: `review`
+Exact common-reference v2: `not_ready`
+Unified method v2: `not_ready`
 
 Expected profile fingerprints:
 

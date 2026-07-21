@@ -478,6 +478,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -549,6 +550,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -616,6 +618,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -675,6 +678,7 @@
         "expected_framework_profile_fingerprint": null,
         "matches_framework_profile_fingerprint": true,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -734,6 +738,7 @@
         "expected_framework_profile_fingerprint": null,
         "matches_framework_profile_fingerprint": true,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -748,56 +753,54 @@
         "stage": "all",
         "fold": 0,
         "run_tag": "paper_unified_anchor_t1e8_valbest_fold0",
-        "dry_run": true,
+        "dry_run": false,
         "completed": false,
-        "execution_status": "dry_run",
+        "execution_status": "not_completed",
         "input_unit": "flow_packet_sequence",
         "published_result_paths": [
+          "reasoningDataset/tls-120/valid_seq_metrics_flow_rawproj_paper_unified_anchor_t1e8_valbest_fold0_native_shared_content_paper_unified_anchor_t1e8_valbest_fold0_stage8_flowaware_paper_unified_anchor_t1e8_valbest_fold0_probs.json",
           "reasoningDataset/tls-120/test_seq_metrics_flow_rawproj_paper_unified_anchor_t1e8_valbest_fold0_native_shared_content_paper_unified_anchor_t1e8_valbest_fold0_stage8_flowaware_paper_unified_anchor_t1e8_valbest_fold0_probs.json"
         ],
         "shared_core_modules": [
-          "per_flow_split_guard",
-          "field_aware_header_policy",
-          "current_packet_structural_encoder",
-          "current_packet_byte_payload_encoder",
+          "label_free_protocol_content_pretraining",
+          "field_aware_header_intervention",
           "semantic_tower1_channel",
+          "current_packet_structural_encoder",
           "shared_intervention_view_fusion",
-          "shared_packet_channel_fusion",
-          "semantic_structural_gate",
-          "content_stability_guard",
-          "cross_fold_stability",
+          "bounded_tri_channel_router",
+          "per_flow_split_guard",
+          "content_group_empirical_risk",
           "validation_only_selection",
-          "label_free_calibration_guard"
+          "fixed_cross_fold_consensus"
         ],
         "shared_module_status": {
-          "per_flow_split_guard": "enforced",
-          "field_aware_header_policy": "unverified",
-          "current_packet_structural_encoder": "present",
-          "current_packet_byte_payload_encoder": "present",
+          "label_free_protocol_content_pretraining": "native_flow_multitask_v1",
+          "field_aware_header_intervention": "unverified",
           "semantic_tower1_channel": "present",
+          "current_packet_structural_encoder": "strict_current_packet_13d",
           "shared_intervention_view_fusion": "required_representation_level",
-          "shared_packet_channel_fusion": "strict_current_packet_tri_channel",
-          "semantic_structural_gate": "learned_joint_fusion",
-          "content_stability_guard": "content_group_training",
-          "cross_fold_stability": "runner_compatible",
+          "bounded_tri_channel_router": "semantic_anchor_residual_0_25",
+          "per_flow_split_guard": "enforced",
+          "content_group_empirical_risk": "group_mean",
           "validation_only_selection": "enforced",
-          "label_free_calibration_guard": "disabled_in_main"
+          "fixed_cross_fold_consensus": "equal_log_mean"
         },
         "task_module_status": {
           "packet_to_window_flow_aggregator": "mean",
           "flow_level_classifier": "seq"
         },
-        "matches_shared_core": false,
-        "matches_model_shared_core": false,
-        "matches_shared_protocol_guards": false,
+        "matches_shared_core": true,
+        "matches_model_shared_core": true,
+        "matches_shared_protocol_guards": true,
         "matches_shared_status": false,
-        "framework_profile_fingerprint": "c2bae42d0406dbb5aa6e5dc7fbad5b57275fb30a40a3001e5b0de3b7bd48005c",
+        "framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
-        "matches_framework_profile_fingerprint": false,
+        "matches_framework_profile_fingerprint": true,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
-        "status": "shared_core_mismatch"
+        "status": "shared_status_mismatch"
       },
       {
         "path": "reasoningDataset/tls-120/stage8_flowaware_manifest_result_bound_paper_unified_test_crossfold_consensus_auto_confidence.json",
@@ -850,6 +853,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -967,6 +971,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1024,6 +1029,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_status_mismatch"
@@ -1085,6 +1091,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1146,6 +1153,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1207,6 +1215,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1346,6 +1355,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1405,6 +1415,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1468,6 +1479,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1531,6 +1543,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1596,6 +1609,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1655,6 +1669,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1714,6 +1729,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1773,6 +1789,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1832,6 +1849,7 @@
         "expected_framework_profile_fingerprint": null,
         "matches_framework_profile_fingerprint": true,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1891,6 +1909,7 @@
         "expected_framework_profile_fingerprint": null,
         "matches_framework_profile_fingerprint": true,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -1952,6 +1971,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2035,6 +2055,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2108,6 +2129,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2169,6 +2191,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2184,8 +2207,8 @@
         "fold": 2,
         "run_tag": "paper_unified_anchor_t1e8_valbest_fold2",
         "dry_run": false,
-        "completed": false,
-        "execution_status": "not_completed",
+        "completed": true,
+        "execution_status": "planned_or_partial",
         "input_unit": "flow_packet_sequence",
         "published_result_paths": [
           "reasoningDataset/vpn-app/test_seq_metrics_flow_rawproj_paper_unified_anchor_t1e8_valbest_fold2_native_shared_content_paper_unified_anchor_t1e8_valbest_fold2_stage8_flowaware_paper_unified_anchor_t1e8_valbest_fold2_probs.json"
@@ -2206,7 +2229,7 @@
         ],
         "shared_module_status": {
           "per_flow_split_guard": "enforced",
-          "field_aware_header_policy": "unverified",
+          "field_aware_header_policy": "factual_full_plus_mask_ip_port_intervention",
           "current_packet_structural_encoder": "present",
           "current_packet_byte_payload_encoder": "present",
           "semantic_tower1_channel": "present",
@@ -2230,6 +2253,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2291,6 +2315,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2352,6 +2377,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2413,6 +2439,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2472,6 +2499,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2533,6 +2561,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2592,6 +2621,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2647,6 +2677,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2710,6 +2741,7 @@
         "expected_framework_profile_fingerprint": "4e2a352938050900210e82ea7b94f03f21eac9eaa84d493eb697b3a561bb2548",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -2765,6 +2797,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -2818,6 +2851,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -2871,6 +2905,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -2926,6 +2961,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -2979,6 +3015,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3032,6 +3069,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3085,6 +3123,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3140,6 +3179,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3193,6 +3233,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3246,6 +3287,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3299,6 +3341,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3354,6 +3397,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3413,6 +3457,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": true,
         "status": "shared_core_mismatch"
@@ -3466,6 +3511,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3519,6 +3565,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3574,6 +3621,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3627,6 +3675,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3680,6 +3729,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3733,6 +3783,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3788,6 +3839,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3841,6 +3893,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3894,6 +3947,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -3947,6 +4001,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -4002,6 +4057,7 @@
         "expected_framework_profile_fingerprint": "d5dcbd2a487d8233947ab31a7a6c7e29d2d659f91f57be3a57d244b72680cf86",
         "matches_framework_profile_fingerprint": false,
         "shared_core_config": "",
+        "shared_core_method_sha256": "",
         "shared_core_config_sha256": "",
         "matches_task_main_path": false,
         "status": "shared_core_mismatch"
@@ -4013,6 +4069,7 @@
     "configuration_provenance": {
       "claim": "one_frozen_shared_core_config_across_datasets_tasks_and_folds",
       "status": "not_ready",
+      "unified_method_status": "not_ready",
       "required_datasets": [
         "vpn-app",
         "tls-120"
@@ -4026,34 +4083,45 @@
         "flow-level:vpn-app": {
           "completed_folds": [],
           "fingerprints": [],
+          "method_fingerprints": [],
           "manifest_paths": [],
-          "status": "missing_or_inconsistent"
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
         },
         "flow-level:tls-120": {
           "completed_folds": [],
           "fingerprints": [],
+          "method_fingerprints": [],
           "manifest_paths": [],
-          "status": "missing_or_inconsistent"
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
         },
         "packet-level:vpn-app": {
           "completed_folds": [],
           "fingerprints": [],
+          "method_fingerprints": [],
           "manifest_paths": [],
-          "status": "missing_or_inconsistent"
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
         },
         "packet-level:tls-120": {
           "completed_folds": [],
           "fingerprints": [],
+          "method_fingerprints": [],
           "manifest_paths": [],
-          "status": "missing_or_inconsistent"
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
         }
       },
       "observed_fingerprints": [],
-      "cross_task_cross_dataset_fingerprint_match": false
+      "observed_method_fingerprints": [],
+      "cross_task_cross_dataset_fingerprint_match": false,
+      "cross_task_cross_dataset_method_match": false
     },
     "checkpoint_provenance": {
       "claim": "checkpoint_proven_exact_shared_packet_module_for_every_dataset_fold",
       "status": "not_ready",
+      "unified_method_status": "not_ready",
       "required_datasets": [
         "vpn-app",
         "tls-120"
@@ -4067,18 +4135,116 @@
         "vpn-app": {
           "completed_folds": [],
           "fingerprints": [],
+          "method_fingerprints": [],
           "report_paths": [],
-          "status": "missing_or_inconsistent"
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
         },
         "tls-120": {
           "completed_folds": [],
           "fingerprints": [],
+          "method_fingerprints": [],
           "report_paths": [],
-          "status": "missing_or_inconsistent"
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
         }
       },
       "observed_fingerprints": [],
-      "cross_dataset_fingerprint_match": false
+      "observed_method_fingerprints": [],
+      "cross_dataset_fingerprint_match": false,
+      "cross_dataset_method_match": false
+    }
+  },
+  "unified_method_v2": {
+    "status": "not_ready",
+    "claim": "one_shared_module_algorithm_and_training_protocol_with_independently_optimized_numeric_hyperparameters",
+    "configuration_provenance": {
+      "claim": "one_frozen_shared_core_config_across_datasets_tasks_and_folds",
+      "status": "not_ready",
+      "unified_method_status": "not_ready",
+      "required_datasets": [
+        "vpn-app",
+        "tls-120"
+      ],
+      "required_folds": [
+        0,
+        1,
+        2
+      ],
+      "groups": {
+        "flow-level:vpn-app": {
+          "completed_folds": [],
+          "fingerprints": [],
+          "method_fingerprints": [],
+          "manifest_paths": [],
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
+        },
+        "flow-level:tls-120": {
+          "completed_folds": [],
+          "fingerprints": [],
+          "method_fingerprints": [],
+          "manifest_paths": [],
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
+        },
+        "packet-level:vpn-app": {
+          "completed_folds": [],
+          "fingerprints": [],
+          "method_fingerprints": [],
+          "manifest_paths": [],
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
+        },
+        "packet-level:tls-120": {
+          "completed_folds": [],
+          "fingerprints": [],
+          "method_fingerprints": [],
+          "manifest_paths": [],
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
+        }
+      },
+      "observed_fingerprints": [],
+      "observed_method_fingerprints": [],
+      "cross_task_cross_dataset_fingerprint_match": false,
+      "cross_task_cross_dataset_method_match": false
+    },
+    "checkpoint_provenance": {
+      "claim": "checkpoint_proven_exact_shared_packet_module_for_every_dataset_fold",
+      "status": "not_ready",
+      "unified_method_status": "not_ready",
+      "required_datasets": [
+        "vpn-app",
+        "tls-120"
+      ],
+      "required_folds": [
+        0,
+        1,
+        2
+      ],
+      "groups": {
+        "vpn-app": {
+          "completed_folds": [],
+          "fingerprints": [],
+          "method_fingerprints": [],
+          "report_paths": [],
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
+        },
+        "tls-120": {
+          "completed_folds": [],
+          "fingerprints": [],
+          "method_fingerprints": [],
+          "report_paths": [],
+          "status": "missing_or_inconsistent",
+          "unified_method_status": "missing_or_inconsistent"
+        }
+      },
+      "observed_fingerprints": [],
+      "observed_method_fingerprints": [],
+      "cross_dataset_fingerprint_match": false,
+      "cross_dataset_method_match": false
     }
   },
   "status": "review"

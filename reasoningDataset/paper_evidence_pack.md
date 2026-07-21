@@ -11,9 +11,9 @@ Framework consistency: `True`
 
 ## Paper Audit Gates
 
-| Unified Audit | Defaults Audit | Shared Core | Flow Manifests | Packet Manifests | Flow Defaults | Packet Defaults |
-|---|---|---|---:|---:|---:|---:|
-| pass | True | True | 4 | 24 | True/2 | True/6 |
+| Unified Audit | Defaults Audit | Shared Core | Flow Manifests | Packet Manifests | Flow Defaults | Packet Defaults | Strict Reproduction |
+|---|---|---|---:|---:|---:|---:|---|
+| review | False | True | 0 | 0 | True/2 | False/6 | False |
 
 Flow scope: `vpn-app, tls-120`
 
