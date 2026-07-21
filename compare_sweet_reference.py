@@ -16,6 +16,9 @@ SWEET_SOURCE_AUDIT = {
     "paper": SWEET_PAPER,
     "venue": "ACM SIGCOMM 2025",
     "source_document": "The Sweet Danger of Sugar-- Debunking Representation Learning8.pdf",
+    "source_document_sha256": (
+        "b99e571822b15c0ccd90c3aea654b91833c012b5970e8b874447cd37f68277ba"
+    ),
     "verified_from_local_pdf_on": "2026-07-22",
     "split": "per-flow",
     "metrics": ["accuracy", "macro_f1"],

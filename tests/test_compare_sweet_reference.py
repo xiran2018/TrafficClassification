@@ -22,6 +22,9 @@ def test_extract_metrics_supports_packet_and_flow_shapes():
 
 def test_sweet_references_match_sigcomm_tables_3_4_and_9():
     assert SWEET_SOURCE_AUDIT["venue"] == "ACM SIGCOMM 2025"
+    assert SWEET_SOURCE_AUDIT["source_document_sha256"] == (
+        "b99e571822b15c0ccd90c3aea654b91833c012b5970e8b874447cd37f68277ba"
+    )
     assert SWEET_SOURCE_AUDIT["split"] == "per-flow"
     assert SWEET_SOURCE_AUDIT["metrics"] == ["accuracy", "macro_f1"]
     assert set(SWEET_SOURCE_AUDIT["tables"]) == {"3", "4", "9"}
