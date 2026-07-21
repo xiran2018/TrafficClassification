@@ -4,8 +4,9 @@
 This script fuses several prediction JSON files into one `flow_ids` +
 `flow_prob` teacher file that `train_tower2.py --distill_targets_json` can
 consume. Use `--split valid` for paper-safe supervised distillation targets
-created from validation predictions. Use `--split test` only for explicitly
-declared transductive/unlabeled-target ablations.
+created from validation predictions. Use `--split heldout` with checkpoint-bound
+OOF evidence for direct `test_tower2.py` outputs. Use `--split test` only for
+explicitly declared transductive/unlabeled-target ablations.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ import numpy as np
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 from probability_metrics import calibration_metrics
+from write_oof_teacher_evidence import canonical_ids_sha256, validate_oof_evidence
 
 
 def normalize_prob(prob: np.ndarray) -> np.ndarray:
@@ -47,6 +49,8 @@ def split_keys(split: str) -> Tuple[str, str, str]:
         return "valid_flow_ids", "valid_y_true", "valid_prob"
     if split == "test":
         return "flow_ids", "flow_y_true", "flow_prob"
+    if split == "heldout":
+        return "flow_ids", "flow_y_true", "flow_prob"
     raise ValueError(split)
 
 
@@ -59,6 +63,16 @@ def parse_input(raw: List[str]) -> Tuple[str, str]:
 def load_payload(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_oof_evidence(named: List[List[str]] | None) -> Dict[str, Dict[str, Any]]:
+    evidence_by_name: Dict[str, Dict[str, Any]] = {}
+    for raw in named or []:
+        name, path = parse_input(raw)
+        if name in evidence_by_name:
+            raise ValueError(f"Duplicate OOF evidence name: {name}")
+        evidence_by_name[name] = {"path": path}
+    return evidence_by_name
 
 
 def extract_split(data: Dict[str, Any], split: str) -> Tuple[List[str], np.ndarray | None, np.ndarray]:
@@ -117,7 +131,14 @@ def select_mode(probs: List[np.ndarray], requested: str, threshold: float) -> st
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", nargs=2, action="append", metavar=("NAME", "JSON"), required=True)
-    ap.add_argument("--split", choices=["valid", "test"], default="valid")
+    ap.add_argument(
+        "--oof_evidence",
+        nargs=2,
+        action="append",
+        metavar=("NAME", "JSON"),
+        help="Checkpoint-bound OOF sidecar for the correspondingly named input.",
+    )
+    ap.add_argument("--split", choices=["valid", "heldout", "test"], default="valid")
     ap.add_argument("--align", choices=["intersection", "union"], default="intersection", help="intersection fuses same-flow candidates; union builds OOF teachers from different validation folds.")
     ap.add_argument("--mode", choices=["mean", "log_mean", "vote", "vote_priority", "auto_confidence"], default="auto_confidence")
     ap.add_argument("--confidence_threshold", type=float, default=0.9)
@@ -128,6 +149,11 @@ def main() -> None:
         default=1,
         help="Drop flows with fewer source predictions. Use 2+ for a multi-teacher target; this alone does not prove OOF exclusion.",
     )
+    ap.add_argument(
+        "--require_oof_exclusion_proof",
+        action="store_true",
+        help="Fail unless every contributing prediction for every output flow has valid OOF evidence.",
+    )
     ap.add_argument("--min_input_accuracy", type=float, default=0.0, help="Reject labeled teacher inputs below this split accuracy.")
     ap.add_argument("--min_input_macro_f1", type=float, default=0.0, help="Reject labeled teacher inputs below this split macro-F1.")
     ap.add_argument("--output_json", required=True)
@@ -136,17 +162,41 @@ def main() -> None:
 
     if args.split == "test" and not args.allow_test_split:
         raise ValueError("--split test requires --allow_test_split; prefer --split valid for paper-safe distillation.")
+    if args.split == "heldout" and not args.require_oof_exclusion_proof:
+        raise ValueError("--split heldout requires --require_oof_exclusion_proof")
     if args.min_teachers_per_flow <= 0:
         raise ValueError("--min_teachers_per_flow must be positive")
 
     named = [parse_input(raw) for raw in args.input]
+    if len({name for name, _ in named}) != len(named):
+        raise ValueError("--input names must be unique")
+    evidence_by_name = load_oof_evidence(args.oof_evidence)
+    unknown_evidence = sorted(set(evidence_by_name) - {name for name, _ in named})
+    if unknown_evidence:
+        raise ValueError(f"OOF evidence has no matching input: {unknown_evidence}")
     payloads = [(name, load_payload(path), path) for name, path in named]
     extracted = []
     ids_by_input = []
     for name, data, path in payloads:
         ids, y, prob = extract_split(data, args.split)
+        evidence_row = evidence_by_name.get(name)
+        oof_proven = False
+        if evidence_row is not None:
+            validate_oof_evidence(Path(evidence_row["path"]), Path(path), ids)
+            oof_proven = True
         index = {fid: i for i, fid in enumerate(ids)}
-        extracted.append({"name": name, "path": path, "ids": ids, "y": y, "prob": prob, "index": index})
+        extracted.append(
+            {
+                "name": name,
+                "path": path,
+                "ids": ids,
+                "y": y,
+                "prob": prob,
+                "index": index,
+                "oof_proven": oof_proven,
+                "oof_evidence": None if evidence_row is None else evidence_row["path"],
+            }
+        )
         ids_by_input.append(set(ids))
     if args.align == "intersection":
         selected_ids = sorted(set.intersection(*ids_by_input))
@@ -182,6 +232,8 @@ def main() -> None:
             "path": path,
             "num_available_flows": len(ids),
             "mean_confidence": float(prob_all.max(axis=1).mean()),
+            "oof_exclusion_proven": bool(entry["oof_proven"]),
+            "oof_evidence": entry["oof_evidence"],
         }
         if y_all is not None:
             row["metrics"] = compute_metrics(y_all, prob_all)
@@ -198,10 +250,14 @@ def main() -> None:
         fused = fuse_probs(probs, mode)
         y_out = y_ref
         teacher_counts = np.full(len(selected_ids), len(extracted), dtype=np.int64)
+        oof_teacher_counts = np.full(
+            len(selected_ids), sum(int(entry["oof_proven"]) for entry in extracted), dtype=np.int64
+        )
     else:
         fused_rows = []
         y_rows = []
         count_rows = []
+        oof_count_rows = []
         for fid in selected_ids:
             fid_probs = []
             fid_labels = []
@@ -218,9 +274,17 @@ def main() -> None:
                 raise ValueError(f"Conflicting labels for flow_id={fid}: {sorted(set(fid_labels))}")
             fused_rows.append(fuse_probs(fid_probs, mode).squeeze(0))
             count_rows.append(len(fid_probs))
+            oof_count_rows.append(
+                sum(
+                    int(entry["oof_proven"])
+                    for entry in extracted
+                    if fid in entry["index"]
+                )
+            )
             y_rows.append(fid_labels[0] if fid_labels else -1)
         fused = normalize_prob(np.stack(fused_rows, axis=0))
         teacher_counts = np.asarray(count_rows, dtype=np.int64)
+        oof_teacher_counts = np.asarray(oof_count_rows, dtype=np.int64)
         y_out = None if not y_rows or all(y < 0 for y in y_rows) else np.asarray(y_rows, dtype=np.int64)
     keep = teacher_counts >= int(args.min_teachers_per_flow)
     if args.min_teacher_confidence > 0:
@@ -228,25 +292,36 @@ def main() -> None:
     kept_ids = [fid for fid, ok in zip(selected_ids, keep) if ok]
     fused = fused[keep]
     kept_teacher_counts = teacher_counts[keep]
+    kept_oof_teacher_counts = oof_teacher_counts[keep]
     y_out = None if y_out is None else y_out[keep]
     if not kept_ids:
         raise ValueError(
             "No teacher targets remain after confidence and teacher-count filtering."
         )
+    all_oof_proven = bool(
+        len(kept_ids) and np.all(kept_oof_teacher_counts == kept_teacher_counts)
+    )
+    if args.require_oof_exclusion_proof and not all_oof_proven:
+        raise ValueError(
+            "Not every contributing teacher has checkpoint-bound OOF exclusion proof."
+        )
 
     multiplicity = {
         "flow_ids": kept_ids,
         "teacher_counts": kept_teacher_counts.astype(int).tolist(),
+        "oof_teacher_counts": kept_oof_teacher_counts.astype(int).tolist(),
         "minimum": int(kept_teacher_counts.min()) if len(kept_teacher_counts) else 0,
         "maximum": int(kept_teacher_counts.max()) if len(kept_teacher_counts) else 0,
         "mean": float(kept_teacher_counts.mean()) if len(kept_teacher_counts) else 0.0,
         "multi_teacher_flow_count": int(np.sum(kept_teacher_counts >= 2)),
         "multi_teacher_flow_rate": float(np.mean(kept_teacher_counts >= 2)) if len(kept_teacher_counts) else 0.0,
         "all_output_flows_multi_teacher": bool(len(kept_teacher_counts) and np.all(kept_teacher_counts >= 2)),
-        "oof_exclusion_proven": False,
-        "oof_multi_teacher_consensus_proven": False,
+        "oof_exclusion_proven": all_oof_proven,
+        "oof_multi_teacher_consensus_proven": bool(
+            all_oof_proven and np.all(kept_teacher_counts >= 2)
+        ),
         "provenance_note": (
-            "Source prediction multiplicity is measured, but this builder does not prove that every source model excluded each target flow from training."
+            "OOF is true only when every contributing source has a checkpoint-bound oof_teacher_evidence_v1 sidecar."
         ),
     }
 
@@ -258,6 +333,7 @@ def main() -> None:
         "confidence_threshold": args.confidence_threshold,
         "min_teacher_confidence": args.min_teacher_confidence,
         "min_teachers_per_flow": args.min_teachers_per_flow,
+        "require_oof_exclusion_proof": args.require_oof_exclusion_proof,
         "min_input_accuracy": args.min_input_accuracy,
         "min_input_macro_f1": args.min_input_macro_f1,
         "num_inputs": len(inputs),
@@ -265,7 +341,10 @@ def main() -> None:
         "num_selected_flows": len(selected_ids),
         "num_output_flows": len(kept_ids),
         "mean_input_confidence": float(np.mean([row["mean_confidence"] for row in inputs])),
-        "paper_safe_note": "valid split is suitable for supervised paper-safe distillation; test split is transductive only.",
+        "paper_safe_note": (
+            "heldout is paper-safe only with revalidated checkpoint-bound OOF evidence; "
+            "valid uses explicit validation fields; test is transductive only."
+        ),
     }
     payload: Dict[str, Any] = {
         "flow_ids": kept_ids,

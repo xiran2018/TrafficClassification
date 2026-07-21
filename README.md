@@ -5585,6 +5585,57 @@ and Packet/Flow. Until that protocol is implemented and ablated, historical
 consensus distillation remains supporting negative evidence rather than a core
 module.
 
+The Flow-side infrastructure now supports checkpoint-bound OOF proof for the
+future inner-fold experiment. New `train_tower2.py` checkpoints embed SHA-256
+evidence for their training/validation datasets and trainer source;
+`test_tower2.py` prediction JSONs bind the checkpoint and evaluation dataset.
+Generate one sidecar per independently initialized teacher that predicts the
+same held-out inner fold:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python write_oof_teacher_evidence.py \
+    --prediction_json /tmp/inner0_seed0_valid_predictions.json \
+    --checkpoint /tmp/inner0_seed0/best.pt \
+    --train_dataset /tmp/inner0/train_seq_dataset.pt \
+    --evaluation_dataset /tmp/inner0/valid_seq_dataset.pt \
+    --output_json /tmp/inner0_seed0_oof_evidence.json
+```
+
+The writer verifies four bindings before setting
+`oof_exclusion_proven=true`: the checkpoint embeds the supplied training-set
+hash; the prediction embeds the checkpoint hash; the prediction embeds the
+evaluation-set hash; and the checkpoint-bound training flow IDs have zero
+overlap with all prediction/evaluation flow IDs. Build a strict teacher only
+when every contributing model has such a sidecar:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python build_consensus_distill_targets.py \
+    --input seed0 /tmp/inner0_seed0_valid_predictions.json \
+    --input seed1 /tmp/inner0_seed1_valid_predictions.json \
+    --oof_evidence seed0 /tmp/inner0_seed0_oof_evidence.json \
+    --oof_evidence seed1 /tmp/inner0_seed1_oof_evidence.json \
+    --split heldout --align intersection --mode log_mean \
+    --min_teachers_per_flow 2 --require_oof_exclusion_proof \
+    --output_json /tmp/inner0_strict_oof_teacher.json
+```
+
+Here `--split heldout` reads the direct prediction fields produced for the
+**inner validation fold** and is accepted only with strict OOF evidence; it is
+not the outer shared test set. The builder re-hashes the checkpoint, training
+dataset, evaluation dataset, and prediction, then recomputes flow-set
+disjointness instead of trusting the sidecar flags. The resulting target
+records aligned `teacher_counts` and `oof_teacher_counts` for every flow and
+sets `oof_multi_teacher_consensus_proven=true` only when all counts are at
+least two and equal. Tower2 strict loading uses
+`--distill_min_teachers_per_flow 2` together with
+`--distill_require_oof_exclusion_proof` and fails before training otherwise.
+This is currently Flow-side research infrastructure, not an active unified
+module. Promotion requires the analogous Packet student protocol plus matched
+VPN/TLS Packet/Flow ablations; until then the frozen strict-v2 method keeps
+distillation disabled.
+
 The strict-v2 frozen file is a deliberately stronger **common-reference
 hyperparameter experiment**: its values override command-line defaults in both
 runners and are recorded with one config fingerprint. It fixes architecture,

@@ -19,6 +19,7 @@ from train_tower2 import (
     apply_hierarchical_logits,
     build_class_to_coarse,
     parse_label_groups,
+    file_evidence,
 )
 from models.flow_transformer import FlowTransformerClassifier
 from models.flow_graph_transformer import FlowGraphTransformerClassifier
@@ -29,6 +30,28 @@ from probability_metrics import calibration_metrics
 def checkpoint_flow_stat_meta_dim(ckpt: dict) -> int:
     """Read the persisted statistics contract with legacy compatibility."""
     return int(ckpt.get("flow_stat_meta_dim", ckpt.get("meta_feature_dim", 0)))
+
+
+def prediction_provenance(
+    checkpoint_path: str,
+    dataset_path: str,
+    paired_dataset_path: str,
+    checkpoint: dict,
+) -> dict:
+    payload = {
+        "schema": "tower2_prediction_provenance_v1",
+        "checkpoint": file_evidence(checkpoint_path),
+        "evaluation_dataset": file_evidence(dataset_path),
+        "checkpoint_training_input_evidence": checkpoint.get(
+            "training_input_evidence", {}
+        ),
+        "checkpoint_binds_training_dataset": bool(
+            checkpoint.get("training_input_evidence", {}).get("train_dataset")
+        ),
+    }
+    if paired_dataset_path:
+        payload["paired_evaluation_dataset"] = file_evidence(paired_dataset_path)
+    return payload
 
 
 def load_model(ckpt_path: str, device: str):
@@ -827,6 +850,12 @@ def main():
                     "flow_y_pred": flow_pred,
                     "flow_prob": flow_prob.tolist() if flow_logits_all else [],
                     "flow_ids": out_flow_ids,
+                    "provenance": prediction_provenance(
+                        args.checkpoint,
+                        args.dataset,
+                        args.paired_view_dataset,
+                        ckpt,
+                    ),
                 },
                 f,
                 indent=2,

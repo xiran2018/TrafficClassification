@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -26,6 +27,42 @@ from models.counterfactual_flow_fusion import (
 
 
 VPN_APP_GROUPS = "0,2,5,6,10,14;1,4;3,8,9;7,11,13,15;12"
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_evidence(path: str | Path) -> Dict[str, Any]:
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise ValueError(f"provenance input is not a file: {resolved}")
+    return {
+        "path": str(resolved),
+        "sha256": sha256_file(resolved),
+        "size_bytes": int(resolved.stat().st_size),
+    }
+
+
+def tower2_training_input_evidence(args) -> Dict[str, Any]:
+    evidence: Dict[str, Any] = {
+        "train_dataset": file_evidence(args.dataset),
+        "trainer_source": file_evidence(Path(__file__).resolve()),
+    }
+    optional = {
+        "valid_dataset": getattr(args, "valid_dataset", ""),
+        "paired_train_dataset": getattr(args, "paired_view_dataset", ""),
+        "paired_valid_dataset": getattr(args, "paired_valid_dataset", ""),
+        "distillation_targets": getattr(args, "distill_targets_json", ""),
+    }
+    for name, path in optional.items():
+        if path:
+            evidence[name] = file_evidence(path)
+    return evidence
 
 
 def sinusoidal_position_encoding(length: int, dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -3288,6 +3325,7 @@ def save_ckpt(
         "counterfactual_orthogonality_weight": args.counterfactual_orthogonality_weight,
         "counterfactual_head_only": args.counterfactual_head_only,
         "counterfactual_routing_weight": args.counterfactual_routing_weight,
+        "training_input_evidence": getattr(args, "training_input_evidence", {}),
     }
     if edge_attr_dim is not None:
         payload["edge_attr_dim"] = edge_attr_dim
@@ -3500,6 +3538,12 @@ def main():
     args = ap.parse_args()
     if args.distill_min_teachers_per_flow <= 0:
         ap.error("--distill_min_teachers_per_flow must be positive")
+    args.training_input_evidence = tower2_training_input_evidence(args)
+    print(
+        "tower2_training_input_evidence "
+        + json.dumps(args.training_input_evidence, sort_keys=True),
+        flush=True,
+    )
     identifiability_modes = sum(
         int(enabled)
         for enabled in (
