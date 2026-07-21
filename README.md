@@ -5137,6 +5137,15 @@ valid positives. A memory bank or another expert is not introduced unless
 both bounded candidates fail and a new validation-only hypothesis is
 pre-registered.
 
+`models/identity_safe_contrastive.py` contains the dormant D1 loss primitive.
+Its tests prove that changing an alias embedding cannot change the loss, alias
+rows receive zero contrastive gradient, no-positive batches return a
+differentiable zero, and invalid temperatures/weights are rejected. The module
+is deliberately not imported by `models/qwen_packet_multitask.py` or
+`train_tower1_multitask.py` while A/B/C are running. Its presence is therefore
+implementation preparation, not evidence that the current checkpoint used D1;
+activation requires a new source fingerprint and matched from-scratch runs.
+
 The same SHA-bound audit was repeated on all three ready-made training folds,
 not selected from fold 0. Every random/paired replay produced exactly
 `epochs * ceil(num_flows / flows_per_batch)` batches. Cross-fold ranges are:
