@@ -1,6 +1,10 @@
 import json
 
-from compare_sweet_reference import compare_result, extract_metrics
+from compare_sweet_reference import (
+    compare_result,
+    extract_metrics,
+    verify_strict_provenance,
+)
 
 
 def test_extract_metrics_supports_packet_and_flow_shapes():
@@ -43,3 +47,37 @@ def test_vpn_packet_can_exceed_both_sweet_reference_tiers(tmp_path):
     assert row["sweet"]["frozen_representation"]["exceeds_both"] is True
     assert row["sweet"]["end_to_end"]["exceeds_both"] is True
     assert row["headline_sweet_claim"] == "exceeds_protocol_matched_end_to_end"
+
+
+def test_strict_provenance_requires_hash_bound_method_and_novelty_evidence(tmp_path):
+    method = tmp_path / "method_archive.json"
+    novelty = tmp_path / "session_novelty.json"
+    method.write_text('{"status":"verified"}', encoding="utf-8")
+    novelty.write_text('{"status":"reported"}', encoding="utf-8")
+
+    import hashlib
+
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    provenance = {
+        "status": "strict_shared_core_v2",
+        "shared_core_config_sha256": "a" * 64,
+        "fixed_consensus": "equal_log_mean_three_folds",
+        "method_archive_manifest": str(method),
+        "method_archive_manifest_sha256": digest(method),
+        "session_novelty": str(novelty),
+        "session_novelty_sha256": digest(novelty),
+    }
+    assert verify_strict_provenance(provenance)["status"] == "pass"
+
+    method.write_text('{"status":"mutated"}', encoding="utf-8")
+    rejected = verify_strict_provenance(provenance)
+    assert rejected["status"] == "fail"
+    assert "method_archive_manifest_hash_mismatch" in rejected["reasons"]
+
+
+def test_status_string_alone_is_not_strict_provenance():
+    result = verify_strict_provenance({"status": "strict_shared_core_v2"})
+    assert result["status"] == "fail"
+    assert "missing_shared_core_fingerprint" in result["reasons"]

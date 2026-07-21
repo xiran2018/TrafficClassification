@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,37 @@ def load_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_strict_provenance(provenance: dict[str, Any]) -> dict[str, Any]:
+    reasons = []
+    if provenance.get("status") != "strict_shared_core_v2":
+        reasons.append("wrong_status")
+    fingerprint = str(provenance.get("shared_core_config_sha256") or "")
+    if len(fingerprint) != 64:
+        reasons.append("missing_shared_core_fingerprint")
+    if provenance.get("fixed_consensus") != "equal_log_mean_three_folds":
+        reasons.append("wrong_fixed_consensus")
+    for name in ("method_archive_manifest", "session_novelty"):
+        path = Path(str(provenance.get(name) or ""))
+        expected = str(provenance.get(f"{name}_sha256") or "")
+        if not path.is_file():
+            reasons.append(f"missing_{name}")
+        elif len(expected) != 64 or sha256_file(path) != expected:
+            reasons.append(f"{name}_hash_mismatch")
+    return {
+        "status": "pass" if not reasons else "fail",
+        "reasons": reasons,
+        "shared_core_config_sha256": fingerprint or None,
+    }
+
+
 def extract_metrics(payload: dict[str, Any], task: str) -> tuple[float, float]:
     values = payload.get("metrics") or payload.get("test_metrics") or {}
     if task == "flow-level":
@@ -111,6 +143,7 @@ def compare_result(task: str, dataset: str, path: str) -> dict[str, Any]:
     payload = load_json(path)
     accuracy, macro_f1 = extract_metrics(payload, task)
     provenance = payload.get("publication_provenance") or {}
+    provenance_verification = verify_strict_provenance(provenance)
     references = SWEET_REFERENCES[task][dataset]
     spec = (PACKET_LEVEL_RESULTS if task == "packet-level" else FLOW_LEVEL_RESULTS)[dataset]
     target_accuracy = spec.target_accuracy
@@ -121,7 +154,8 @@ def compare_result(task: str, dataset: str, path: str) -> dict[str, Any]:
         "path": path,
         "our_protocol": "downstream_adapted_lora",
         "publication_provenance": provenance,
-        "strict_shared_core_v2_result": provenance.get("status") == "strict_shared_core_v2",
+        "publication_provenance_verification": provenance_verification,
+        "strict_shared_core_v2_result": provenance_verification["status"] == "pass",
         "primary_comparator": "end_to_end",
         "accuracy": accuracy,
         "macro_f1": macro_f1,
