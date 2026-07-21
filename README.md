@@ -175,7 +175,10 @@ detected before spending the complete cross-dataset evaluation budget.
 `summarize_milestone_benchmark.py` then verifies both cross-task audits,
 configuration and source fingerprints, and writes the consolidated report to
 `milestone_dev_shared_core_v2/milestone_development_benchmark.json`; the report
-sets `unbiased_final_claim_allowed=false` by construction.
+sets `unbiased_final_claim_allowed=false` by construction. Each task row also
+reports the preregistered project target and separate deltas from SWEET's
+frozen-representation and protocol-matched end-to-end references; those fields
+are reporting-only and cannot change the frozen method.
 
 Before the full benchmark Test is released, the four Packet application
 datasets that do not participate in VPN/TLS method selection run one

@@ -120,6 +120,11 @@ def test_summarize_marks_test_as_development_benchmark(tmp_path):
         "accuracy": 0.8,
         "macro_f1": 0.7,
     }
+    comparison = report["datasets"]["vpn-app"]["packet"]["comparison"]
+    assert comparison["predeclared_target"]["met"] is False
+    assert comparison["sweet"]["end_to_end"]["delta_accuracy"] == pytest.approx(
+        -0.056
+    )
 
 
 def test_summarize_rejects_cross_task_source_drift(tmp_path):

@@ -8,6 +8,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from compare_sweet_reference import SWEET_REFERENCES, compare_metrics
+from unified_framework_spec import FLOW_LEVEL_RESULTS, PACKET_LEVEL_RESULTS
+
 
 DATASETS = ("vpn-app", "tls-120")
 TAG = "milestone_dev_fold0"
@@ -73,6 +76,42 @@ def require_stable_source(manifest: dict[str, Any], path: Path) -> str:
     ):
         raise ValueError(f"algorithm source stability failed: {path}")
     return launch
+
+
+def benchmark_comparison(
+    dataset: str, task: str, metrics: dict[str, Any]
+) -> dict[str, Any]:
+    task_name = "packet-level" if task == "packet" else "flow-level"
+    references = SWEET_REFERENCES[task_name][dataset]
+    specification = (
+        PACKET_LEVEL_RESULTS if task == "packet" else FLOW_LEVEL_RESULTS
+    )[dataset]
+    accuracy = float(metrics["accuracy"])
+    macro_f1 = float(metrics["macro_f1"])
+    target_accuracy = specification.target_accuracy
+    target_macro_f1 = specification.target_macro_f1
+    comparisons = {
+        name: compare_metrics(accuracy, macro_f1, reference)
+        for name, reference in references.items()
+    }
+    return {
+        "predeclared_target": {
+            "accuracy": target_accuracy,
+            "macro_f1": target_macro_f1,
+            "met": bool(
+                target_accuracy is not None
+                and target_macro_f1 is not None
+                and accuracy >= target_accuracy
+                and macro_f1 >= target_macro_f1
+            ),
+        },
+        "sweet": comparisons,
+        "headline_sweet_claim": (
+            "exceeds_protocol_matched_end_to_end"
+            if comparisons["end_to_end"]["exceeds_both"]
+            else "does_not_exceed_protocol_matched_end_to_end"
+        ),
+    }
 
 
 def validate_manifest(
@@ -176,14 +215,18 @@ def summarize(root: Path, repo: Path, config_path: Path) -> dict[str, Any]:
 
         packet_result = result_path(packet_manifest, "test_unified_packet_single_head")
         flow_result = result_path(flow_manifest, "test_seq_metrics")
+        packet_metrics = metric_summary(load_json(packet_result), "packet")
+        flow_metrics = metric_summary(load_json(flow_result), "flow")
         report["datasets"][dataset] = {
             "packet": {
-                "metrics": metric_summary(load_json(packet_result), "packet"),
+                "metrics": packet_metrics,
+                "comparison": benchmark_comparison(dataset, "packet", packet_metrics),
                 "result": str(packet_result),
                 "result_sha256": file_sha256(packet_result),
             },
             "flow": {
-                "metrics": metric_summary(load_json(flow_result), "flow"),
+                "metrics": flow_metrics,
+                "comparison": benchmark_comparison(dataset, "flow", flow_metrics),
                 "result": str(flow_result),
                 "result_sha256": file_sha256(flow_result),
             },
@@ -206,16 +249,19 @@ def markdown(report: dict[str, Any]) -> str:
         "",
         "These Test results were produced after validation freeze, but may guide later method development. They are not an unbiased final paper claim.",
         "",
-        "| Dataset | Task | Samples | Accuracy | Macro-F1 |",
-        "|---|---|---:|---:|---:|",
+        "| Dataset | Task | Samples | Accuracy | Macro-F1 | Target | Sweet end-to-end |",
+        "|---|---|---:|---:|---:|---:|---:|",
     ]
     for dataset in DATASETS:
         for task in ("packet", "flow"):
             metrics = report["datasets"][dataset][task]["metrics"]
+            comparison = report["datasets"][dataset][task]["comparison"]
             lines.append(
                 f"| {dataset} | {task} | {metrics['num_samples']} | "
                 f"{metrics['accuracy'] * 100:.2f}% | "
-                f"{metrics['macro_f1'] * 100:.2f}% |"
+                f"{metrics['macro_f1'] * 100:.2f}% | "
+                f"{'PASS' if comparison['predeclared_target']['met'] else 'FAIL'} | "
+                f"{'PASS' if comparison['sweet']['end_to_end']['exceeds_both'] else 'FAIL'} |"
             )
     lines.extend(
         [
