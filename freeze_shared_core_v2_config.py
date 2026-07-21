@@ -295,6 +295,10 @@ def validate_hierarchy_selection(
     hierarchy_path: Path,
     balance_path: Path,
 ) -> dict[str, dict[str, Any]]:
+    shared_algorithm = hierarchy_report.get("shared_algorithm")
+    bounded_algorithm = shared_algorithm == (
+        "bounded_effective_flow_class_risk_power_eta"
+    )
     if not (
         hierarchy_report.get("schema")
         == "hierarchy_adaptive_class_weight_selection_v1"
@@ -302,10 +306,32 @@ def validate_hierarchy_selection(
         == "frozen_numeric_hyperparameters_from_validation"
         and hierarchy_report.get("selection_scope") == SELECTION_SCOPE
         and hierarchy_report.get("test_labels_used") is False
-        and hierarchy_report.get("shared_algorithm")
-        == "normalized_effective_flow_class_risk_power_eta"
+        and shared_algorithm
+        in {
+            "normalized_effective_flow_class_risk_power_eta",
+            "bounded_effective_flow_class_risk_power_eta",
+        }
     ):
         raise ValueError("invalid hierarchy class-weight selection")
+    if bounded_algorithm:
+        numeric = hierarchy_report.get("numeric_protocol_selection") or {}
+        decisions = numeric.get("datasets") or {}
+        if not (
+            numeric.get("schema") == "bounded_hierarchy_risk_selection_v1"
+            and numeric.get("selected") == "candidate"
+            and numeric.get("candidate_promoted_for_all_datasets") is True
+            and numeric.get("promotion_scope")
+            == "same_bounded_risk_algorithm_must_pass_every_dataset"
+            and math.isclose(
+                float(numeric.get("maximum_drop", -1.0)),
+                0.003,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and set(decisions) == REQUIRED_DATASETS
+            and all(row.get("passes") is True for row in decisions.values())
+        ):
+            raise ValueError("bounded hierarchy rule did not pass its global gate")
     class_input = (hierarchy_report.get("inputs") or {}).get(
         "class_weight_selection"
     ) or {}
@@ -323,7 +349,11 @@ def validate_hierarchy_selection(
     output: dict[str, dict[str, Any]] = {}
     for dataset, row in datasets.items():
         eta = float(row.get("selected_eta", -1.0))
-        if eta not in {0.0, 0.25, 0.5, 1.0}:
+        if bounded_algorithm:
+            eta_supported = 0.0 <= eta <= 1.0
+        else:
+            eta_supported = eta in {0.0, 0.25, 0.5, 1.0}
+        if not eta_supported:
             raise ValueError(f"unsupported hierarchy eta for {dataset}: {eta}")
         parameters = row.get("training_hyperparameters") or {}
         if not (
@@ -337,20 +367,40 @@ def validate_hierarchy_selection(
         ):
             raise ValueError(f"hierarchy parameters disagree for {dataset}")
         arms = row.get("arms") or {}
-        selected_arm = arms.get(str(eta)) or {}
-        if selected_arm.get("eligible") is not True:
-            raise ValueError(f"selected hierarchy eta is ineligible for {dataset}")
-        eligible = [item for item in arms.values() if item.get("eligible") is True]
-        recomputed = max(
-            eligible,
-            key=lambda item: (
-                float(item["macro_f1"]),
-                float(item["accuracy"]),
-                -float(item["eta"]),
-            ),
-        )
-        if not math.isclose(float(recomputed["eta"]), eta, abs_tol=1e-12):
-            raise ValueError(f"hierarchy selection ranking disagrees for {dataset}")
+        if bounded_algorithm:
+            selected_arm = arms.get("bounded_risk") or {}
+            decision = hierarchy_report["numeric_protocol_selection"]["datasets"][
+                dataset
+            ]
+            if not (
+                selected_arm.get("eligible") is True
+                and selected_arm.get("noninferiority_passed") is True
+                and decision.get("passes") is True
+                and math.isclose(
+                    float(selected_arm.get("eta", -1.0)),
+                    eta,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise ValueError(
+                    f"bounded hierarchy eta is not globally eligible for {dataset}"
+                )
+        else:
+            selected_arm = arms.get(str(eta)) or {}
+            if selected_arm.get("eligible") is not True:
+                raise ValueError(f"selected hierarchy eta is ineligible for {dataset}")
+            eligible = [item for item in arms.values() if item.get("eligible") is True]
+            recomputed = max(
+                eligible,
+                key=lambda item: (
+                    float(item["macro_f1"]),
+                    float(item["accuracy"]),
+                    -float(item["eta"]),
+                ),
+            )
+            if not math.isclose(float(recomputed["eta"]), eta, abs_tol=1e-12):
+                raise ValueError(f"hierarchy selection ranking disagrees for {dataset}")
         evidence = row.get("selected_training_evidence") or {}
         metric = row.get("selected_validation_metric") or {}
         if not (
@@ -375,8 +425,8 @@ def validate_hierarchy_selection(
         observed_config = training_config(
             evidence, f"hierarchy selected evidence {dataset}"
         )
-        expected_basis = "packet" if eta == 0.0 else "flow"
-        expected_strength = 1.0 if eta == 0.0 else eta
+        expected_basis = "packet" if eta == 0.0 and not bounded_algorithm else "flow"
+        expected_strength = 1.0 if eta == 0.0 and not bounded_algorithm else eta
         require_config(
             observed_config,
             {

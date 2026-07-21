@@ -285,6 +285,120 @@ def test_freeze_binds_hierarchy_numeric_overrides_before_paired_screen(tmp_path)
     ] == hashlib.sha256(hierarchy_path.read_bytes()).hexdigest()
 
 
+def test_freeze_accepts_globally_noninferior_bounded_hierarchy_rule(tmp_path):
+    balance = report(tmp_path, "bounded_balance", "candidate")
+    trainer_sha = balance["training_implementation_consistency"][
+        "trainer_source_sha256"
+    ]
+    balance["multi_arm_selection"] = {
+        "selected_config": {
+            "class_weight_basis": "flow",
+            "class_weight_strength": 0.5,
+        },
+        "factorial_config_integrity": {"required": True, "status": "pass"},
+        "all_arm_training_implementation_consistency": {
+            "trainer_source_sha256": trainer_sha,
+        },
+    }
+    bounded_runs = report(
+        tmp_path,
+        "bounded_runs",
+        "candidate",
+        candidate_strength=0.4,
+    )
+    paired = report(
+        tmp_path,
+        "bounded_paired",
+        "candidate",
+        screen="paired",
+        paired_basis="flow",
+        paired_strength=0.4,
+    )
+    balance_path = write_report(tmp_path / "bounded_balance.json", balance)
+    hierarchy = {
+        "schema": "hierarchy_adaptive_class_weight_selection_v1",
+        "status": "frozen_numeric_hyperparameters_from_validation",
+        "selection_scope": "heldout_validation_only",
+        "test_labels_used": False,
+        "shared_algorithm": "bounded_effective_flow_class_risk_power_eta",
+        "inputs": {
+            "class_weight_selection": {
+                "path": str(balance_path.resolve()),
+                "sha256": hashlib.sha256(balance_path.read_bytes()).hexdigest(),
+            }
+        },
+        "numeric_protocol_selection": {
+            "schema": "bounded_hierarchy_risk_selection_v1",
+            "selected": "candidate",
+            "candidate_promoted_for_all_datasets": True,
+            "promotion_scope": (
+                "same_bounded_risk_algorithm_must_pass_every_dataset"
+            ),
+            "maximum_drop": 0.003,
+            "datasets": {
+                dataset: {"passes": True}
+                for dataset in ("vpn-app", "tls-120")
+            },
+        },
+        "datasets": {},
+    }
+    for dataset in ("vpn-app", "tls-120"):
+        evidence = deepcopy(
+            bounded_runs["training_completion_evidence"]["candidate"]["datasets"][
+                dataset
+            ]
+        )
+        hierarchy["datasets"][dataset] = {
+            "selected_eta": 0.4,
+            "training_hyperparameters": {
+                "class_weight_basis": "flow",
+                "class_weight_strength": 0.4,
+            },
+            "arms": {
+                "reference": {
+                    "eta": 0.5,
+                    "accuracy": 0.8,
+                    "macro_f1": 0.61,
+                    "eligible": True,
+                },
+                "bounded_risk": {
+                    "eta": 0.4,
+                    "accuracy": 0.8,
+                    "macro_f1": 0.61,
+                    "eligible": True,
+                    "noninferiority_passed": True,
+                },
+            },
+            "selected_validation_metric": {
+                "path": evidence["metric_path"],
+                "sha256": evidence["metric_sha256"],
+            },
+            "selected_training_evidence": evidence,
+        }
+    hierarchy_path = write_report(tmp_path / "bounded_hierarchy.json", hierarchy)
+    paired_path = write_report(tmp_path / "bounded_paired.json", paired)
+
+    frozen = freeze_config(
+        balance,
+        paired,
+        balance_path=balance_path,
+        paired_path=paired_path,
+        hierarchy_report=hierarchy,
+        hierarchy_path=hierarchy_path,
+    )
+
+    for task in (
+        "packet-level-classification",
+        "flow-level-classification",
+    ):
+        assert frozen["dataset_numeric_hyperparameter_overrides"][task][
+            "tls-120"
+        ]["class_weight_strength"] == pytest.approx(0.4)
+    assert frozen["selection_evidence"]["hierarchy_class_weight"][
+        "shared_algorithm"
+    ] == "bounded_effective_flow_class_risk_power_eta"
+
+
 def test_freeze_promotes_paired_invariance_only_when_both_datasets_pass(tmp_path):
     balance = report(tmp_path, "balance", "baseline")
     paired = bind_paired_baseline(
