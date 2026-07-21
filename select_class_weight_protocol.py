@@ -24,6 +24,8 @@ ARM_CONFIGS = {
     "flow_full": {"class_weight_basis": "flow", "class_weight_strength": 1.0},
 }
 
+DECLARED_FACTORIAL_FIELDS = {"class_weight_basis", "class_weight_strength"}
+
 
 def _contract_config(row: dict[str, Any]) -> dict[str, Any]:
     path = Path(str(row.get("provenance_path") or ""))
@@ -72,6 +74,52 @@ def _implementation_consistency(completions: dict[str, dict[str, Any]]) -> dict[
         "trainer_source_sha256": hashes[0] if len(hashes) == 1 else None,
         "observed_trainer_source_sha256": hashes,
         "all_runs_stable_through_completion": stable,
+    }
+
+
+def _factorial_config_integrity(
+    completions: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Prove that each dataset's arms differ only in declared factors."""
+    datasets = sorted(completions["packet_full"]["datasets"])
+    evidence: dict[str, Any] = {}
+    passed = True
+    for dataset in datasets:
+        configs = {
+            arm: _contract_config(completion["datasets"][dataset])
+            for arm, completion in completions.items()
+        }
+        controlled = {
+            arm: {
+                key: value
+                for key, value in config.items()
+                if key not in DECLARED_FACTORIAL_FIELDS
+            }
+            for arm, config in configs.items()
+        }
+        baseline = controlled["packet_full"]
+        mismatched_fields: dict[str, list[str]] = {}
+        all_fields = sorted(set().union(*(set(config) for config in controlled.values())))
+        for arm in ("flow_sqrt", "flow_full"):
+            differences = [
+                key
+                for key in all_fields
+                if baseline.get(key) != controlled[arm].get(key)
+            ]
+            if differences:
+                mismatched_fields[arm] = differences
+        dataset_passed = not mismatched_fields
+        passed = passed and dataset_passed
+        evidence[dataset] = {
+            "status": "pass" if dataset_passed else "fail",
+            "reference_arm": "packet_full",
+            "mismatched_fields": mismatched_fields,
+        }
+    return {
+        "required": True,
+        "status": "pass" if passed else "fail",
+        "declared_factorial_fields": sorted(DECLARED_FACTORIAL_FIELDS),
+        "datasets": evidence,
     }
 
 
@@ -184,6 +232,11 @@ def main() -> None:
     implementation = _implementation_consistency(completions)
     if implementation["status"] != "pass":
         raise ValueError("all class-weight arms must use one stable trainer source")
+    factorial_integrity = _factorial_config_integrity(completions)
+    if factorial_integrity["status"] != "pass":
+        raise ValueError(
+            "class-weight arms differ outside the declared factorial fields"
+        )
 
     preregistration = Path(args.preregistration)
     prereg = json.loads(preregistration.read_text(encoding="utf-8"))
@@ -266,6 +319,7 @@ def main() -> None:
             "candidates": candidates,
             "all_arm_training_completion_evidence": completions,
             "all_arm_training_implementation_consistency": implementation,
+            "factorial_config_integrity": factorial_integrity,
         },
     }
     output = Path(args.output_json)

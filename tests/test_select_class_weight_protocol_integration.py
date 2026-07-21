@@ -160,3 +160,6 @@ def test_complete_three_arm_artifacts_select_one_shared_full_protocol(
     assert result["multi_arm_selection"][
         "all_arm_training_implementation_consistency"
     ]["num_runs"] == 6
+    assert result["multi_arm_selection"]["factorial_config_integrity"][
+        "status"
+    ] == "pass"
