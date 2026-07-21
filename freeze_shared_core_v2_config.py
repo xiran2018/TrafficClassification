@@ -200,6 +200,46 @@ def require_config(
             )
 
 
+def selected_class_weight_config(balance_report: dict[str, Any]) -> dict[str, Any]:
+    selected_role = balance_report["selected"]
+    rows = balance_report["training_completion_evidence"][selected_role]["datasets"]
+    observed = {
+        (
+            training_config(row, f"balance {selected_role} {dataset}").get(
+                "class_weight_basis"
+            ),
+            float(
+                training_config(row, f"balance {selected_role} {dataset}").get(
+                    "class_weight_strength", -1.0
+                )
+            ),
+        )
+        for dataset, row in rows.items()
+    }
+    if len(observed) != 1:
+        raise ValueError("balance-selected class-weight protocol differs by dataset")
+    basis, strength = observed.pop()
+    allowed = {("packet", 1.0), ("flow", 0.5), ("flow", 1.0)}
+    if (basis, strength) not in allowed:
+        raise ValueError(
+            f"unsupported balance-selected class-weight protocol: {(basis, strength)}"
+        )
+    declared = (balance_report.get("multi_arm_selection") or {}).get(
+        "selected_config"
+    )
+    if declared is not None and not (
+        declared.get("class_weight_basis") == basis
+        and math.isclose(
+            float(declared.get("class_weight_strength", -1.0)),
+            strength,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError("multi-arm selected_config disagrees with selected artifacts")
+    return {"class_weight_basis": basis, "class_weight_strength": strength}
+
+
 def validate_experiment_chain(
     balance_report: dict[str, Any], paired_report: dict[str, Any]
 ) -> None:
@@ -212,6 +252,24 @@ def validate_experiment_chain(
         "no_sft": True,
     }
     balance_completion = balance_report["training_completion_evidence"]
+    candidate_configs = {
+        (
+            training_config(row, f"balance candidate {dataset}").get(
+                "class_weight_basis"
+            ),
+            float(
+                training_config(row, f"balance candidate {dataset}").get(
+                    "class_weight_strength", -1.0
+                )
+            ),
+        )
+        for dataset, row in balance_completion["candidate"]["datasets"].items()
+    }
+    if len(candidate_configs) != 1:
+        raise ValueError("balance candidate class-weight protocol differs by dataset")
+    candidate_basis, candidate_strength = candidate_configs.pop()
+    if candidate_basis != "flow" or candidate_strength not in {0.5, 1.0}:
+        raise ValueError("balance candidate must be a declared flow-weight protocol")
     expected_balance = {
         "baseline": {
             **common,
@@ -222,8 +280,8 @@ def validate_experiment_chain(
         },
         "candidate": {
             **common,
-            "class_weight_basis": "flow",
-            "class_weight_strength": 0.5,
+            "class_weight_basis": candidate_basis,
+            "class_weight_strength": candidate_strength,
             "paired_consistency_weight": 0.0,
             "paired_cls_weight": 0.0,
         },
@@ -257,8 +315,9 @@ def validate_experiment_chain(
                 f"balance-selected run for {dataset}"
             )
 
-    selected_basis = "flow" if selected_role == "candidate" else "packet"
-    selected_strength = 0.5 if selected_role == "candidate" else 1.0
+    selected_weight = selected_class_weight_config(balance_report)
+    selected_basis = selected_weight["class_weight_basis"]
+    selected_strength = selected_weight["class_weight_strength"]
     paired_expected = {
         **common,
         "class_weight_basis": selected_basis,
@@ -288,7 +347,7 @@ def freeze_config(
     validate_selection(paired_report, "paired selection")
     validate_experiment_chain(balance_report, paired_report)
 
-    use_flow_weights = balance_report["selected"] == "candidate"
+    selected_weight = selected_class_weight_config(balance_report)
     use_paired_invariance = paired_report["selected"] == "candidate"
     tower1 = {
         "base_model": "Qwen/Qwen2.5-7B-Instruct",
@@ -322,8 +381,8 @@ def freeze_config(
         "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
         "class_weighting": "effective",
         "class_weight_beta": 0.9999,
-        "class_weight_basis": "flow" if use_flow_weights else "packet",
-        "class_weight_strength": 0.5 if use_flow_weights else 1.0,
+        "class_weight_basis": selected_weight["class_weight_basis"],
+        "class_weight_strength": selected_weight["class_weight_strength"],
         "paired_consistency_weight": 0.05 if use_paired_invariance else 0.0,
         "paired_cls_weight": 0.2 if use_paired_invariance else 0.0,
         "paired_logit_kl_weight": 0.5,

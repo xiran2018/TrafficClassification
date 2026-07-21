@@ -16,6 +16,8 @@ def report(
     *,
     screen="balance",
     paired_basis="packet",
+    candidate_strength=0.5,
+    paired_strength=None,
 ):
     promoted = selected == "candidate"
     payload = {
@@ -50,11 +52,15 @@ def report(
                 if kind == "provenance":
                     if screen == "balance":
                         basis = "flow" if role == "candidate" else "packet"
-                        strength = 0.5 if role == "candidate" else 1.0
+                        strength = candidate_strength if role == "candidate" else 1.0
                         paired_enabled = False
                     else:
                         basis = paired_basis
-                        strength = 0.5 if basis == "flow" else 1.0
+                        strength = (
+                            paired_strength
+                            if paired_strength is not None
+                            else (0.5 if basis == "flow" else 1.0)
+                        )
                         paired_enabled = role == "candidate"
                     config = {
                         "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
@@ -209,6 +215,41 @@ def test_freeze_promotes_paired_invariance_only_when_both_datasets_pass(tmp_path
     assert frozen["tower1"]["class_weight_basis"] == "packet"
     assert frozen["tower1"]["paired_consistency_weight"] == 0.05
     assert frozen["tower1"]["paired_cls_weight"] == 0.2
+
+
+def test_freeze_supports_preregistered_full_flow_correction(tmp_path):
+    balance = report(
+        tmp_path,
+        "balance_full",
+        "candidate",
+        candidate_strength=1.0,
+    )
+    balance["multi_arm_selection"] = {
+        "selected_config": {
+            "class_weight_basis": "flow",
+            "class_weight_strength": 1.0,
+        }
+    }
+    paired = bind_paired_baseline(
+        report(
+            tmp_path,
+            "paired_full",
+            "candidate",
+            screen="paired",
+            paired_basis="flow",
+            paired_strength=1.0,
+        ),
+        balance,
+    )
+    frozen = freeze_config(
+        balance,
+        paired,
+        balance_path=write_report(tmp_path / "balance_full.json", balance),
+        paired_path=write_report(tmp_path / "paired_full.json", paired),
+    )
+    assert frozen["tower1"]["class_weight_basis"] == "flow"
+    assert frozen["tower1"]["class_weight_strength"] == 1.0
+    assert frozen["tower1"]["paired_consistency_weight"] == 0.05
 
 
 def test_freeze_rejects_single_dataset_or_non_validation_selection(tmp_path):
