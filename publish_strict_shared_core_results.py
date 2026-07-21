@@ -168,10 +168,13 @@ def validated_audits(dataset: str, audit_root: Path) -> tuple[list[Path], str]:
         if (
             payload.get("runtime_mechanism_evidence_required") is not True
             or payload.get("flow_native_extraction_evidence_required") is not True
+            or payload.get("algorithm_source_evidence_required") is not True
             or (payload.get("runtime_mechanism_evidence") or {}).get("status")
             != "pass"
             or (payload.get("flow_native_extraction_evidence") or {}).get("status")
             != "pass"
+            or payload.get("algorithm_source_evidence_verified") is not True
+            or not payload.get("algorithm_source_fingerprint")
         ):
             raise ValueError(
                 f"strict checkpoint audit has no passing runtime mechanism evidence: {path}"

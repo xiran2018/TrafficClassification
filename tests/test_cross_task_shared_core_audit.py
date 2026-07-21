@@ -160,6 +160,14 @@ def manifest(
         "fold": fold,
         "shared_core_config_sha256": fingerprint,
         "shared_core_method_sha256": method_fingerprint,
+        "algorithm_source_evidence": {
+            "schema": "algorithm_source_stability_evidence_v1",
+            "status": "pass",
+            "scope": "all_non_test_python_sources",
+            "launch_fingerprint": "f" * 64,
+            "completion_fingerprint": "f" * 64,
+            "changed_paths": [],
+        },
         "content_group_loss_reduction": "group_mean",
         "byte_content_group_loss_reduction": "group_mean",
         "tower1_training_contract": contract,
@@ -494,6 +502,35 @@ def test_required_runtime_evidence_controls_cross_task_audit_status():
         **kwargs,
     )
     assert complete["status"] == "pass"
+
+
+def test_required_runtime_evidence_rejects_source_tree_drift():
+    flow_manifest = manifest("flow-level")
+    flow_manifest["framework"]["notes"]["algorithm_source_evidence"][
+        "completion_fingerprint"
+    ] = "e" * 64
+    flow_manifest["framework"]["notes"]["algorithm_source_evidence"][
+        "changed_paths"
+    ] = ["models/unified_packet_encoder.py"]
+    report = audit_cross_task_fold(
+        manifest("packet-level"),
+        flow_manifest,
+        packet_checkpoint=packet_checkpoint(),
+        packet_native_checkpoint=native_checkpoint(),
+        flow_checkpoint=flow_checkpoint(),
+        flow_native_checkpoint=native_checkpoint(),
+        packet_native_sha256="packet-native-sha",
+        packet_result=mechanism_result("packet"),
+        flow_result=mechanism_result("flow"),
+        flow_native_extraction_manifests=extraction_manifests(),
+        flow_native_checkpoint_path="flow-native.pt",
+        flow_native_sha256="flow-native-sha",
+        require_mechanism_evidence=True,
+    )
+
+    assert report["status"] == "not_ready"
+    assert report["algorithm_source_evidence_required"] is True
+    assert report["algorithm_source_evidence_verified"] is False
 
 
 def test_cross_task_audit_rejects_contextual_native_packet_extraction():

@@ -29,6 +29,10 @@ from embedding_shard_utils import (
     jsonl_row_count,
     merge_embedding_shards as merge_embedding_shard_outputs,
 )
+from method_source_provenance import (
+    complete_source_stability,
+    source_tree_snapshot,
+)
 
 
 def format_cmd(cmd: List[str]) -> str:
@@ -1303,6 +1307,26 @@ def require_paper_unified_inputs(args) -> None:
 def write_manifest(args, completed: bool = False) -> None:
     root = Path("reasoningDataset") / args.dataset
     root.mkdir(parents=True, exist_ok=True)
+    source_root = Path(__file__).resolve().parent
+    if not hasattr(args, "_algorithm_source_launch"):
+        args._algorithm_source_launch = source_tree_snapshot(source_root)
+    if completed:
+        source_evidence = complete_source_stability(
+            args._algorithm_source_launch, source_root
+        )
+    else:
+        source_evidence = {
+            "schema": "algorithm_source_stability_evidence_v1",
+            "status": "running",
+            "scope": "all_non_test_python_sources",
+            "launch_fingerprint": args._algorithm_source_launch["fingerprint"],
+            "completion_fingerprint": None,
+            "num_launch_files": args._algorithm_source_launch["num_files"],
+            "num_completion_files": 0,
+            "changed_paths": [],
+            "launch_snapshot": args._algorithm_source_launch,
+        }
+    effective_completed = completed and source_evidence["status"] == "pass"
     manifest_path = root / f"stage8_flowaware_manifest_{result_suffix(args)}.json"
     existing_payload = None
     if manifest_path.exists():
@@ -1334,6 +1358,7 @@ def write_manifest(args, completed: bool = False) -> None:
         ),
     )
     payload = vars(args).copy()
+    payload.pop("_algorithm_source_launch", None)
     payload["splits"] = selected_splits(args.splits)
     payload["cuda_available_at_launch"] = cuda_available()
     policy_evidence = embedding_policy_evidence(args)
@@ -1372,6 +1397,7 @@ def write_manifest(args, completed: bool = False) -> None:
             ),
             "shared_core_config_sha256": getattr(args, "shared_core_config_sha256", ""),
             "shared_core_overrides": getattr(args, "shared_core_overrides", {}),
+            "algorithm_source_evidence": source_evidence,
             "window_size": args.window_size,
             "stride": args.stride,
             "model_types": selected_model_types(args),
@@ -1442,11 +1468,16 @@ def write_manifest(args, completed: bool = False) -> None:
             "embedding_header_policy_evidence": policy_evidence,
             "intervention_header_policy_evidence": intervention_evidence,
             "dry_run": args.dry_run,
-            "completed": completed,
+            "completed": effective_completed,
         },
     )
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+    if completed and source_evidence["status"] != "pass":
+        raise RuntimeError(
+            "executable Python sources changed during flow pipeline execution: "
+            + ", ".join(source_evidence["changed_paths"])
+        )
 
 
 def commands(args) -> Iterable[List[str]]:

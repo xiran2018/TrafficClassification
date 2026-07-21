@@ -32,6 +32,10 @@ from embedding_shard_utils import (
     jsonl_row_count,
     merge_embedding_shards,
 )
+from method_source_provenance import (
+    complete_source_stability,
+    source_tree_snapshot,
+)
 
 
 DATASET_DIRS = {
@@ -387,6 +391,26 @@ def write_framework_manifest(
     completed: bool = False,
 ) -> None:
     artifacts.mkdir(parents=True, exist_ok=True)
+    source_root = Path(__file__).resolve().parent
+    if not hasattr(args, "_algorithm_source_launch"):
+        args._algorithm_source_launch = source_tree_snapshot(source_root)
+    if completed:
+        source_evidence = complete_source_stability(
+            args._algorithm_source_launch, source_root
+        )
+    else:
+        source_evidence = {
+            "schema": "algorithm_source_stability_evidence_v1",
+            "status": "running",
+            "scope": "all_non_test_python_sources",
+            "launch_fingerprint": args._algorithm_source_launch["fingerprint"],
+            "completion_fingerprint": None,
+            "num_launch_files": args._algorithm_source_launch["num_files"],
+            "num_completion_files": 0,
+            "changed_paths": [],
+            "launch_snapshot": args._algorithm_source_launch,
+        }
+    effective_completed = completed and source_evidence["status"] == "pass"
     tower1_checkpoint_dir = (
         Path(args.checkpoint_root) / f"{args.dataset}_fold{args.fold}"
     )
@@ -448,6 +472,7 @@ def write_framework_manifest(
                 ),
                 "shared_core_config_sha256": getattr(args, "shared_core_config_sha256", ""),
                 "shared_core_overrides": getattr(args, "shared_core_overrides", {}),
+                "algorithm_source_evidence": source_evidence,
                 "input_layout": "class_packet_pcaps",
                 "semantic_packet_context_policy": args.packet_context_policy,
                 "semantic_embedding_policy_evidence": semantic_policy_evidence,
@@ -551,7 +576,7 @@ def write_framework_manifest(
                 ),
                 "shared_test_dir": args.shared_test_dir,
                 "dry_run": args.dry_run,
-                "completed": completed,
+                "completed": effective_completed,
             },
         ),
     }
@@ -566,6 +591,11 @@ def write_framework_manifest(
         )
     with open(artifacts / manifest_name, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+    if completed and source_evidence["status"] != "pass":
+        raise RuntimeError(
+            "executable Python sources changed during packet pipeline execution: "
+            + ", ".join(source_evidence["changed_paths"])
+        )
 
 
 def main() -> None:

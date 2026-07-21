@@ -354,6 +354,29 @@ def audit_cross_task_fold(
 ) -> dict[str, Any]:
     packet_notes = framework_notes(packet_manifest)
     flow_notes = framework_notes(flow_manifest)
+    packet_source_evidence = packet_notes.get("algorithm_source_evidence") or {}
+    flow_source_evidence = flow_notes.get("algorithm_source_evidence") or {}
+    packet_source_fingerprint = packet_source_evidence.get("launch_fingerprint")
+    flow_source_fingerprint = flow_source_evidence.get("launch_fingerprint")
+    algorithm_source_verified = bool(
+        packet_source_evidence.get("schema")
+        == "algorithm_source_stability_evidence_v1"
+        and flow_source_evidence.get("schema")
+        == "algorithm_source_stability_evidence_v1"
+        and packet_source_evidence.get("status") == "pass"
+        and flow_source_evidence.get("status") == "pass"
+        and packet_source_evidence.get("scope") == "all_non_test_python_sources"
+        and flow_source_evidence.get("scope") == "all_non_test_python_sources"
+        and isinstance(packet_source_fingerprint, str)
+        and len(packet_source_fingerprint) == 64
+        and packet_source_fingerprint == flow_source_fingerprint
+        and packet_source_evidence.get("completion_fingerprint")
+        == packet_source_fingerprint
+        and flow_source_evidence.get("completion_fingerprint")
+        == flow_source_fingerprint
+        and packet_source_evidence.get("changed_paths") == []
+        and flow_source_evidence.get("changed_paths") == []
+    )
     packet_framework = packet_manifest.get("framework") or {}
     flow_framework = flow_manifest.get("framework") or {}
     packet_dataset = packet_framework.get("dataset") or packet_manifest.get("dataset")
@@ -508,6 +531,7 @@ def audit_cross_task_fold(
             or (
                 mechanism["status"] == "pass"
                 and extraction["status"] == "pass"
+                and algorithm_source_verified
             )
         )
     )
@@ -572,6 +596,13 @@ def audit_cross_task_fold(
         "core_audit": core,
         "runtime_mechanism_evidence_required": require_mechanism_evidence,
         "flow_native_extraction_evidence_required": require_mechanism_evidence,
+        "algorithm_source_evidence_required": require_mechanism_evidence,
+        "algorithm_source_evidence_verified": algorithm_source_verified,
+        "algorithm_source_fingerprint": (
+            packet_source_fingerprint if algorithm_source_verified else None
+        ),
+        "packet_algorithm_source_evidence": packet_source_evidence,
+        "flow_algorithm_source_evidence": flow_source_evidence,
         "runtime_mechanism_evidence": mechanism,
         "flow_native_extraction_evidence": extraction,
     }
