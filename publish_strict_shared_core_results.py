@@ -115,6 +115,38 @@ def archive_frozen_method_evidence(
             label=f"{key} selection",
             destination=archive_root / filename,
         )
+    hierarchy_evidence = selection.get("hierarchy_class_weight")
+    if hierarchy_evidence is not None:
+        archived["hierarchy_class_weight"] = archive_hashed_evidence(
+            hierarchy_evidence,
+            label="hierarchy class-weight selection",
+            destination=archive_root / "hierarchy_class_weight_selection.json",
+        )
+        hierarchy_payload = load_json(hierarchy_evidence["path"])
+        if not (
+            hierarchy_payload.get("schema")
+            == "hierarchy_adaptive_class_weight_selection_v1"
+            and hierarchy_payload.get("selection_scope")
+            == "heldout_validation_only"
+            and hierarchy_payload.get("test_labels_used") is False
+        ):
+            raise ValueError("hierarchy class-weight selection is not validation-only")
+        hierarchy_inputs = hierarchy_payload.get("inputs") or {}
+        balance_input = hierarchy_inputs.get("class_weight_selection") or {}
+        if not (
+            balance_input.get("sha256")
+            == (selection.get("balance") or {}).get("sha256")
+        ):
+            raise ValueError("hierarchy selection is not bound to archived balance evidence")
+        for key, filename in (
+            ("gate", "hierarchy_launch_gate.json"),
+            ("preregistration", "hierarchy_preregistration.json"),
+        ):
+            archived[f"hierarchy_{key}"] = archive_hashed_evidence(
+                hierarchy_inputs.get(key) or {},
+                label=f"hierarchy {key}",
+                destination=archive_root / filename,
+            )
 
     archived_method_selection = {}
     method_selection = config.get("method_selection")

@@ -507,6 +507,125 @@ def test_archive_includes_final_d1_d2_and_flow_selection_evidence(tmp_path):
     assert all(Path(row["archived_path"]).is_file() for row in evidence.values())
 
 
+def test_archive_includes_hierarchy_selection_gate_and_preregistration(tmp_path):
+    inputs = prepare_inputs(tmp_path)
+    config_path = inputs[8]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    balance = config["selection_evidence"]["balance"]
+    gate_path = write_json(
+        tmp_path / "hierarchy_gate.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_gate_v1",
+            "test_labels_used": False,
+        },
+    )
+    preregistration_path = write_json(
+        tmp_path / "hierarchy_preregistration.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_preregistration_v1",
+            "test_labels_used": False,
+        },
+    )
+    hierarchy_path = write_json(
+        tmp_path / "hierarchy_selection.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_selection_v1",
+            "selection_scope": "heldout_validation_only",
+            "test_labels_used": False,
+            "inputs": {
+                "class_weight_selection": balance,
+                "gate": {
+                    "path": str(gate_path),
+                    "sha256": file_sha256(gate_path),
+                },
+                "preregistration": {
+                    "path": str(preregistration_path),
+                    "sha256": file_sha256(preregistration_path),
+                },
+            },
+        },
+    )
+    config["selection_evidence"]["hierarchy_class_weight"] = {
+        "path": str(hierarchy_path),
+        "sha256": file_sha256(hierarchy_path),
+    }
+    config.pop("config_sha256")
+    config["config_sha256"] = canonical_sha256(config)
+    write_json(config_path, config)
+
+    archive = archive_frozen_method_evidence(
+        config_path,
+        expected_fingerprint=config["config_sha256"],
+        archive_root=tmp_path / "method_archive",
+    )
+
+    evidence = archive["selection_evidence"]
+    assert {
+        "hierarchy_class_weight",
+        "hierarchy_gate",
+        "hierarchy_preregistration",
+    } <= set(evidence)
+    assert all(
+        Path(evidence[name]["archived_path"]).is_file()
+        for name in (
+            "hierarchy_class_weight",
+            "hierarchy_gate",
+            "hierarchy_preregistration",
+        )
+    )
+
+
+def test_archive_rejects_mutated_hierarchy_gate(tmp_path):
+    inputs = prepare_inputs(tmp_path)
+    config_path = inputs[8]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    balance = config["selection_evidence"]["balance"]
+    gate_path = write_json(
+        tmp_path / "hierarchy_gate.json",
+        {"schema": "hierarchy_adaptive_class_weight_gate_v1", "test_labels_used": False},
+    )
+    preregistration_path = write_json(
+        tmp_path / "hierarchy_preregistration.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_preregistration_v1",
+            "test_labels_used": False,
+        },
+    )
+    hierarchy_path = write_json(
+        tmp_path / "hierarchy_selection.json",
+        {
+            "schema": "hierarchy_adaptive_class_weight_selection_v1",
+            "selection_scope": "heldout_validation_only",
+            "test_labels_used": False,
+            "inputs": {
+                "class_weight_selection": balance,
+                "gate": {"path": str(gate_path), "sha256": file_sha256(gate_path)},
+                "preregistration": {
+                    "path": str(preregistration_path),
+                    "sha256": file_sha256(preregistration_path),
+                },
+            },
+        },
+    )
+    config["selection_evidence"]["hierarchy_class_weight"] = {
+        "path": str(hierarchy_path),
+        "sha256": file_sha256(hierarchy_path),
+    }
+    config.pop("config_sha256")
+    config["config_sha256"] = canonical_sha256(config)
+    write_json(config_path, config)
+    gate_path.write_text('{"test_labels_used":true}', encoding="utf-8")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="hierarchy gate evidence hash mismatch"):
+        archive_frozen_method_evidence(
+            config_path,
+            expected_fingerprint=config["config_sha256"],
+            archive_root=tmp_path / "method_archive",
+        )
+
+
 def test_archive_rejects_mutated_final_d1_evidence(tmp_path):
     inputs = prepare_inputs(tmp_path)
     config_path = inputs[8]
