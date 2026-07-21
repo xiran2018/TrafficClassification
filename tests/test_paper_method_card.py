@@ -10,21 +10,38 @@ def _strict_result(path, fingerprint):
     path.parent.mkdir(parents=True, exist_ok=True)
     novelty = path.parent / f"{path.stem}_session_novelty.json"
     novelty.write_text('{"schema":"session_novelty_evaluation_v1"}', encoding="utf-8")
+    method_archive = path.parent / f"{path.stem}_method_archive.json"
+    method_archive.write_text('{"status":"verified_and_archived"}', encoding="utf-8")
+    audits = []
+    for fold in range(3):
+        audit = path.parent / f"{path.stem}_fold{fold}_audit.json"
+        audit.write_text(json.dumps({"fold": fold, "status": "pass"}), encoding="utf-8")
+        audits.append(audit)
     import hashlib
 
     novelty_sha = hashlib.sha256(novelty.read_bytes()).hexdigest()
+    method_archive_sha = hashlib.sha256(method_archive.read_bytes()).hexdigest()
     path.write_text(
         json.dumps(
             {
                 "publication_provenance": {
                     "status": "strict_shared_core_v2",
                     "shared_core_config_sha256": fingerprint,
-                    "audit_paths": ["fold0.json", "fold1.json", "fold2.json"],
+                    "audit_paths": [str(audit) for audit in audits],
+                    "audit_evidence": [
+                        {
+                            "path": str(audit),
+                            "sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+                        }
+                        for audit in audits
+                    ],
                     "runtime_mechanism_evidence_required": True,
                     "flow_native_extraction_evidence_required": True,
                     "fixed_consensus": "equal_log_mean_three_folds",
                     "session_novelty": str(novelty),
                     "session_novelty_sha256": novelty_sha,
+                    "method_archive_manifest": str(method_archive),
+                    "method_archive_manifest_sha256": method_archive_sha,
                 }
             }
         ),
@@ -52,14 +69,14 @@ def test_strict_publication_status_requires_one_fingerprint_across_four_results(
     monkeypatch.setattr(method_card, "FLOW_LEVEL_RESULTS", flow_specs)
     for specs in (packet_specs, flow_specs):
         for spec in specs.values():
-            _strict_result(tmp_path / spec.path, "shared-sha")
+            _strict_result(tmp_path / spec.path, "a" * 64)
 
     report = method_card.strict_shared_core_publication_status()
 
     assert report["ready"] is True
     assert report["single_shared_core_config"] is True
     assert report["all_session_novelty_evidence_verified"] is True
-    assert report["shared_core_config_sha256"] == "shared-sha"
+    assert report["shared_core_config_sha256"] == "a" * 64
     assert len(report["canonical_results"]) == 4
 
 
@@ -71,9 +88,9 @@ def test_strict_publication_status_rejects_cross_task_fingerprint_mismatch(
     monkeypatch.setattr(method_card, "PACKET_LEVEL_RESULTS", packet_specs)
     monkeypatch.setattr(method_card, "FLOW_LEVEL_RESULTS", flow_specs)
     for spec in packet_specs.values():
-        _strict_result(tmp_path / spec.path, "packet-sha")
+        _strict_result(tmp_path / spec.path, "a" * 64)
     for spec in flow_specs.values():
-        _strict_result(tmp_path / spec.path, "flow-sha")
+        _strict_result(tmp_path / spec.path, "b" * 64)
 
     report = method_card.strict_shared_core_publication_status()
 
@@ -91,7 +108,7 @@ def test_strict_publication_status_requires_session_novelty_provenance(
     monkeypatch.setattr(method_card, "FLOW_LEVEL_RESULTS", flow_specs)
     for specs in (packet_specs, flow_specs):
         for spec in specs.values():
-            _strict_result(tmp_path / spec.path, "shared-sha")
+            _strict_result(tmp_path / spec.path, "a" * 64)
     payload = json.loads(Path(packet_specs["vpn-app"].path).read_text())
     payload["publication_provenance"].pop("session_novelty")
     Path(packet_specs["vpn-app"].path).write_text(json.dumps(payload))

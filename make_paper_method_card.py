@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from compare_sweet_reference import verify_strict_provenance
 from unified_framework_spec import (
     FLOW_LEVEL_RESULTS,
     MODEL_SHARED_CORE_MODULES,
@@ -211,24 +212,19 @@ def strict_shared_core_publication_status() -> Dict[str, Any]:
                 except Exception as exc:
                     error = str(exc)
             fingerprint = provenance.get("shared_core_config_sha256")
-            novelty_path = Path(str(provenance.get("session_novelty") or ""))
-            novelty_hash = provenance.get("session_novelty_sha256")
-            novelty_verified = bool(
-                novelty_path.is_file()
-                and novelty_hash
-                and sha256_file(novelty_path) == novelty_hash
+            provenance_verification = verify_strict_provenance(provenance)
+            novelty_verified = not any(
+                reason.startswith("missing_session_novelty")
+                or reason.startswith("session_novelty_hash_mismatch")
+                for reason in provenance_verification["reasons"]
             )
             if fingerprint:
                 fingerprints.add(str(fingerprint))
             passed = bool(
                 error is None
-                and provenance.get("status") == "strict_shared_core_v2"
-                and provenance.get("fixed_consensus") == "equal_log_mean_three_folds"
+                and provenance_verification["status"] == "pass"
                 and provenance.get("runtime_mechanism_evidence_required") is True
                 and provenance.get("flow_native_extraction_evidence_required") is True
-                and fingerprint
-                and len(provenance.get("audit_paths") or []) == 3
-                and novelty_verified
             )
             rows.append(
                 {
@@ -243,6 +239,7 @@ def strict_shared_core_publication_status() -> Dict[str, Any]:
                         "session_novelty_sha256"
                     ),
                     "session_novelty_verified": novelty_verified,
+                    "publication_provenance_verification": provenance_verification,
                     "passed": passed,
                     "error": error,
                 }
