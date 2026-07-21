@@ -501,6 +501,12 @@ def tower1_training_contract(args: Any, task: str) -> Dict[str, Any]:
                 "tower1_paired_raw_consistency_weight",
             )
         ),
+        "cross_scale_weight": float(
+            getattr(args, "tower1_cross_scale_weight", 0.0)
+        ),
+        "cross_scale_temperature": float(
+            getattr(args, "tower1_cross_scale_temperature", 0.07)
+        ),
         "use_sft": use_sft,
         "disable_packet_information_weights": disable_information_weights,
         "flow_balanced_packet_batches": flow_balanced_batches,
@@ -571,6 +577,10 @@ def tower1_shared_protocol_signature(contract: Dict[str, Any]) -> Dict[str, Any]
         and float(contract.get("paired_logit_kl_weight", 0.0)) > 0.0,
         "paired_raw_consistency": paired_enabled
         and float(contract.get("paired_raw_consistency_weight", 0.0)) > 0.0,
+        "availability_aware_cross_scale": float(
+            contract.get("cross_scale_weight", 0.0)
+        )
+        > 0.0,
         "class_balancing": (
             str(contract.get("class_weighting", "none")) != "none"
             and float(contract.get("class_weight_strength", 0.0)) > 0.0
@@ -582,6 +592,17 @@ def tower1_shared_protocol_signature(contract: Dict[str, Any]) -> Dict[str, Any]
             "context": str(contract.get("flow_proto_context", "")),
         }
         if signature["objectives"]["flow_prototype"]
+        else None
+    )
+    signature["cross_scale_policy"] = (
+        {
+            "packet_identity": "exact",
+            "own_context": "leave_one_out",
+            "singleton_context": "masked",
+            "views": "factual_to_intervened_bidirectional",
+            "same_class_other_flow": "excluded_from_negatives",
+        }
+        if signature["objectives"]["availability_aware_cross_scale"]
         else None
     )
     signature["initialization"] = {
@@ -702,6 +723,10 @@ def tower1_execution_evidence(
             "paired_raw_consistency_weight": float(
                 config.get("paired_raw_consistency_weight", float("nan"))
             ),
+            "cross_scale_weight": float(config.get("cross_scale_weight", 0.0)),
+            "cross_scale_temperature": float(
+                config.get("cross_scale_temperature", 0.07)
+            ),
             "use_sft": not bool(config.get("no_sft")),
             "disable_packet_information_weights": bool(
                 config.get("disable_packet_information_weights")
@@ -722,6 +747,8 @@ def tower1_execution_evidence(
             if key != "packet_context_policy"
         }
         comparable_declaration.setdefault("identity_safe_contrastive", False)
+        comparable_declaration.setdefault("cross_scale_weight", 0.0)
+        comparable_declaration.setdefault("cross_scale_temperature", 0.07)
         declaration_match = method_config == comparable_declaration
         executed_contract = {
             "packet_context_policy": declared_contract.get(

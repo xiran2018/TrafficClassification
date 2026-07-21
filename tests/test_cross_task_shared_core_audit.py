@@ -378,6 +378,7 @@ def test_cross_task_fold_rejects_tower1_objective_or_architecture_drift():
     for overrides in (
         {"contrastive_weight": 0.0},
         {"identity_safe_contrastive": True},
+        {"cross_scale_weight": 0.05},
         {"lora_r": 8},
         {"projection_dim": 128},
         {"class_weight_basis": "packet"},
