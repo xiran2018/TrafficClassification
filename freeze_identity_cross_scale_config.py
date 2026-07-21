@@ -138,6 +138,15 @@ def validate_flow_noninferiority(report: dict[str, Any]) -> None:
         raise ValueError("flow gate selected arm disagrees with dataset gates")
     if report.get("test_labels_used") is not False:
         raise ValueError("flow gate must explicitly exclude test labels")
+    factorial = report.get("factorial_config_integrity") or {}
+    if not (
+        factorial.get("required") is True
+        and factorial.get("status") == "pass"
+        and factorial.get("same_config_per_arm_across_datasets") is True
+        and factorial.get("objective_transitions_valid") is True
+        and not factorial.get("mismatched_sections")
+    ):
+        raise ValueError("flow gate lacks passing factorial config integrity")
 
 
 def validate_cross_scale_exposure(report: dict[str, Any]) -> None:

@@ -173,6 +173,13 @@ def flow_gate(selected="candidate"):
         },
         "selected": selected,
         "test_labels_used": False,
+        "factorial_config_integrity": {
+            "required": True,
+            "status": "pass",
+            "same_config_per_arm_across_datasets": True,
+            "objective_transitions_valid": True,
+            "mismatched_sections": [],
+        },
     }
 
 
