@@ -93,6 +93,16 @@ def _tower2_args(**overrides):
         paired_embedding_suffix="",
         environment_map_json="",
         distill_targets_json="",
+        distill_weight=0.0,
+        distill_class_prior_weight=0.0,
+        distill_temperature=2.0,
+        distill_min_confidence=0.0,
+        distill_max_confidence=0.0,
+        distill_confidence_power=0.0,
+        distill_min_teachers_per_flow=1,
+        distill_require_oof_exclusion_proof=False,
+        distill_min_coverage=0.0,
+        distill_low_coverage_action="warn",
         native_structural_dim=0,
     )
     values.update(overrides)
@@ -107,6 +117,21 @@ def test_stage8_does_not_auto_pass_native_dim_in_concat_mode():
 
     explicit_cmd = tower2_train_cmd(_tower2_args(native_structural_dim=128), "seq")
     assert explicit_cmd[explicit_cmd.index("--native_structural_dim") + 1] == "128"
+
+
+def test_stage8_forwards_strict_distillation_teacher_contract():
+    cmd = tower2_train_cmd(
+        _tower2_args(
+            distill_targets_json="teacher.json",
+            distill_weight=0.05,
+            distill_min_teachers_per_flow=2,
+            distill_require_oof_exclusion_proof=True,
+        ),
+        "seq",
+    )
+
+    assert cmd[cmd.index("--distill_min_teachers_per_flow") + 1] == "2"
+    assert "--distill_require_oof_exclusion_proof" in cmd
 
 
 def test_stage8_forwards_shared_packet_evidence_candidate_and_existing_pair_data():

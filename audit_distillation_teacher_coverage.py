@@ -36,6 +36,39 @@ def load_teacher(path: str) -> dict[str, Any]:
     return data
 
 
+def teacher_contract(
+    teacher: dict[str, Any], min_teachers_per_flow: int, require_oof_exclusion_proof: bool
+) -> dict[str, Any]:
+    flow_ids = [str(fid) for fid in teacher.get("flow_ids", [])]
+    multiplicity = teacher.get("teacher_multiplicity")
+    counts: list[int] = []
+    aligned = False
+    if isinstance(multiplicity, dict):
+        count_ids = [str(fid) for fid in multiplicity.get("flow_ids", [])]
+        raw_counts = multiplicity.get("teacher_counts", [])
+        if len(count_ids) == len(raw_counts) and len(set(count_ids)) == len(count_ids):
+            count_by_id = {fid: int(count) for fid, count in zip(count_ids, raw_counts)}
+            if set(count_by_id) == set(flow_ids):
+                counts = [count_by_id[fid] for fid in flow_ids]
+                aligned = True
+    count_pass = bool(aligned and counts and min(counts) >= int(min_teachers_per_flow))
+    oof_proven = bool(
+        isinstance(multiplicity, dict) and multiplicity.get("oof_exclusion_proven") is True
+    )
+    return {
+        "multiplicity_available_and_aligned": aligned,
+        "minimum_teacher_count": min(counts) if counts else None,
+        "maximum_teacher_count": max(counts) if counts else None,
+        "mean_teacher_count": (sum(counts) / len(counts)) if counts else None,
+        "required_min_teachers_per_flow": int(min_teachers_per_flow),
+        "passes_teacher_count": count_pass,
+        "oof_exclusion_proven": oof_proven,
+        "require_oof_exclusion_proof": bool(require_oof_exclusion_proof),
+        "passes_oof_exclusion": oof_proven or not require_oof_exclusion_proof,
+        "passes": count_pass and (oof_proven or not require_oof_exclusion_proof),
+    }
+
+
 def parse_dataset(raw: list[str]) -> tuple[str, str]:
     if len(raw) != 2:
         raise ValueError("--dataset expects NAME PT_PATH")
@@ -57,11 +90,16 @@ def coverage_row(name: str, dataset_path: str, teacher_ids: set[str], min_covera
     }
 
 
-def recommendation(rows: Iterable[dict[str, Any]], action: str, gate_names: set[str] | None = None) -> str:
+def recommendation(
+    rows: Iterable[dict[str, Any]],
+    action: str,
+    gate_names: set[str] | None = None,
+    teacher_gate_passes: bool = True,
+) -> str:
     rows = [row for row in rows if not gate_names or row.get("name") in gate_names]
     if not rows:
         return "no_datasets"
-    if all(row["passes_min_coverage"] for row in rows):
+    if teacher_gate_passes and all(row["passes_min_coverage"] for row in rows):
         return "flow_id_distillation_safe"
     if action == "fail":
         return "fail_before_training"
@@ -76,11 +114,22 @@ def main() -> None:
     ap.add_argument("--dataset", nargs=2, action="append", required=True, metavar=("NAME", "PT"))
     ap.add_argument("--gate_dataset", action="append", default=[], help="Dataset NAME used for the final coverage recommendation. Defaults to all.")
     ap.add_argument("--min_coverage", type=float, default=0.5)
+    ap.add_argument("--min_teachers_per_flow", type=int, default=1)
+    ap.add_argument(
+        "--require_oof_exclusion_proof",
+        action="store_true",
+        help="Require machine-readable proof that every teacher excluded its target flow. Legacy targets fail this gate.",
+    )
     ap.add_argument("--low_coverage_action", choices=["warn", "disable_flow", "fail"], default="disable_flow")
     ap.add_argument("--output_json", default="")
     args = ap.parse_args()
 
     teacher = load_teacher(args.teacher_json)
+    if args.min_teachers_per_flow <= 0:
+        raise ValueError("--min_teachers_per_flow must be positive")
+    contract = teacher_contract(
+        teacher, args.min_teachers_per_flow, args.require_oof_exclusion_proof
+    )
     teacher_ids = {str(fid) for fid in teacher.get("flow_ids", [])}
     rows = [
         coverage_row(name, path, teacher_ids, args.min_coverage)
@@ -92,11 +141,17 @@ def main() -> None:
         "teacher_flow_count": len(teacher_ids),
         "teacher_metrics": (teacher.get("metrics") or {}).get("flow_level", {}),
         "teacher_config": teacher.get("config", {}),
+        "teacher_contract": contract,
         "min_coverage": float(args.min_coverage),
         "low_coverage_action": args.low_coverage_action,
         "gate_datasets": sorted(gate_names) if gate_names else "all",
         "datasets": rows,
-        "recommendation": recommendation(rows, args.low_coverage_action, gate_names),
+        "recommendation": recommendation(
+            rows,
+            args.low_coverage_action,
+            gate_names,
+            teacher_gate_passes=contract["passes"],
+        ),
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     if args.output_json:

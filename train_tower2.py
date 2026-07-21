@@ -348,7 +348,37 @@ def load_pt(path: str):
         return torch.load(path, map_location="cpu")
 
 
-def load_distillation_targets(path: str, num_classes: int, device: str | torch.device) -> Dict[str, torch.Tensor]:
+def distillation_teacher_counts(
+    data: Dict[str, Any], path: str, min_teachers_per_flow: int, require_oof_exclusion_proof: bool
+) -> Dict[str, int] | None:
+    if min_teachers_per_flow <= 0:
+        raise ValueError("distill_min_teachers_per_flow must be positive")
+    flow_ids = [str(fid) for fid in data.get("flow_ids", [])]
+    multiplicity = data.get("teacher_multiplicity")
+    contract_required = min_teachers_per_flow > 1 or require_oof_exclusion_proof
+    if not isinstance(multiplicity, dict):
+        if contract_required:
+            raise ValueError(f"{path} lacks teacher_multiplicity required by strict distillation")
+        return None
+    count_ids = [str(fid) for fid in multiplicity.get("flow_ids", [])]
+    raw_counts = multiplicity.get("teacher_counts", [])
+    if len(count_ids) != len(raw_counts) or len(set(count_ids)) != len(count_ids):
+        raise ValueError(f"{path} has invalid teacher_multiplicity alignment")
+    counts = {fid: int(count) for fid, count in zip(count_ids, raw_counts)}
+    if set(counts) != set(flow_ids):
+        raise ValueError(f"{path} teacher_multiplicity flow IDs do not match target flow IDs")
+    if require_oof_exclusion_proof and multiplicity.get("oof_exclusion_proven") is not True:
+        raise ValueError(f"{path} does not prove per-flow OOF teacher exclusion")
+    return counts
+
+
+def load_distillation_targets(
+    path: str,
+    num_classes: int,
+    device: str | torch.device,
+    min_teachers_per_flow: int = 1,
+    require_oof_exclusion_proof: bool = False,
+) -> Dict[str, torch.Tensor]:
     """Load flow-id keyed soft targets from a prediction/consensus JSON file."""
     if not path:
         return {}
@@ -360,8 +390,13 @@ def load_distillation_targets(path: str, num_classes: int, device: str | torch.d
         raise ValueError(f"{path} must contain flow_ids and flow_prob for distillation")
     if len(flow_ids) != len(flow_prob):
         raise ValueError(f"{path} has mismatched flow_ids/flow_prob lengths")
+    teacher_counts = distillation_teacher_counts(
+        data, path, min_teachers_per_flow, require_oof_exclusion_proof
+    )
     targets: Dict[str, torch.Tensor] = {}
     for fid, prob in zip(flow_ids, flow_prob):
+        if teacher_counts is not None and teacher_counts[str(fid)] < min_teachers_per_flow:
+            continue
         p = torch.as_tensor(prob, dtype=torch.float32, device=device)
         if p.numel() != num_classes:
             raise ValueError(f"{path} target for flow_id={fid} has {p.numel()} classes, expected {num_classes}")
@@ -370,7 +405,13 @@ def load_distillation_targets(path: str, num_classes: int, device: str | torch.d
     return targets
 
 
-def load_distillation_class_priors(path: str, num_classes: int, device: str | torch.device) -> torch.Tensor | None:
+def load_distillation_class_priors(
+    path: str,
+    num_classes: int,
+    device: str | torch.device,
+    min_teachers_per_flow: int = 1,
+    require_oof_exclusion_proof: bool = False,
+) -> torch.Tensor | None:
     """Average teacher distributions by true class for class-conditional distillation."""
     if not path:
         return None
@@ -378,11 +419,19 @@ def load_distillation_class_priors(path: str, num_classes: int, device: str | to
         data = json.load(f)
     y_true = data.get("flow_y_true", [])
     flow_prob = data.get("flow_prob", [])
+    flow_ids = [str(fid) for fid in data.get("flow_ids", [])]
     if not y_true or not flow_prob or len(y_true) != len(flow_prob):
         return None
+    if len(flow_ids) != len(flow_prob):
+        raise ValueError(f"{path} has mismatched flow_ids/flow_prob lengths")
+    teacher_counts = distillation_teacher_counts(
+        data, path, min_teachers_per_flow, require_oof_exclusion_proof
+    )
     sums = torch.zeros(num_classes, num_classes, dtype=torch.float32, device=device)
     counts = torch.zeros(num_classes, dtype=torch.float32, device=device)
-    for label, prob in zip(y_true, flow_prob):
+    for flow_id, label, prob in zip(flow_ids, y_true, flow_prob):
+        if teacher_counts is not None and teacher_counts[flow_id] < min_teachers_per_flow:
+            continue
         label = int(label)
         if not (0 <= label < num_classes):
             continue
@@ -1670,9 +1719,21 @@ def train_seq(args):
         train_fixed_channel_fusion=args.train_fixed_channel_fusion,
     ).to(args.device)
     maybe_load_init_checkpoint(args, model)
-    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    distill_targets = load_distillation_targets(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     distill_targets = apply_distillation_coverage_policy("train_seq", distill_targets, dataset_flow_ids(tr), args)
-    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    distill_class_priors = load_distillation_class_priors(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     report_class_prior_distillation("train_seq", distill_class_priors)
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -2012,9 +2073,21 @@ def train_seq_flow(args):
     attach_flow_environments(tr_groups, args.environment_map_json, "train_seq_flow")
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, SeqDataset)
     paired_valid_groups = paired_flow_group_lookup(args.paired_valid_dataset, SeqDataset)
-    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    distill_targets = load_distillation_targets(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     distill_targets = apply_distillation_coverage_policy("train_seq_flow", distill_targets, group_flow_ids(tr_groups), args)
-    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    distill_class_priors = load_distillation_class_priors(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     report_class_prior_distillation("train_seq_flow", distill_class_priors)
     sample = (tr_groups or va_groups)[0]["items"][0]
     class_to_coarse, num_coarse_classes, class_groups = build_hierarchical_mapping(args)
@@ -2596,9 +2669,21 @@ def train_graph(args):
         identifiability_residual_init=args.identifiability_residual_init,
     ).to(args.device)
     maybe_load_init_checkpoint(args, model)
-    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    distill_targets = load_distillation_targets(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     distill_targets = apply_distillation_coverage_policy("train_graph", distill_targets, dataset_flow_ids(tr), args)
-    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    distill_class_priors = load_distillation_class_priors(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     report_class_prior_distillation("train_graph", distill_class_priors)
     class_weight = compute_class_weights(dataset_labels(tr), args.num_classes, args.device, args.class_weighting, args.class_weight_beta, args.class_weight_strength)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -2648,9 +2733,21 @@ def train_graph_flow(args):
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
     attach_flow_environments(tr_groups, args.environment_map_json, "train_graph_flow")
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
-    distill_targets = load_distillation_targets(args.distill_targets_json, args.num_classes, args.device)
+    distill_targets = load_distillation_targets(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     distill_targets = apply_distillation_coverage_policy("train_graph_flow", distill_targets, group_flow_ids(tr_groups), args)
-    distill_class_priors = load_distillation_class_priors(args.distill_targets_json, args.num_classes, args.device)
+    distill_class_priors = load_distillation_class_priors(
+        args.distill_targets_json,
+        args.num_classes,
+        args.device,
+        args.distill_min_teachers_per_flow,
+        args.distill_require_oof_exclusion_proof,
+    )
     report_class_prior_distillation("train_graph_flow", distill_class_priors)
     sample = (tr_groups or va_groups)[0]["items"][0]
     edge_attr_dim = int(sample.get("edge_attr", torch.zeros((0, 4))).shape[1])
@@ -3174,6 +3271,8 @@ def save_ckpt(
         "distill_min_confidence": args.distill_min_confidence,
         "distill_max_confidence": args.distill_max_confidence,
         "distill_confidence_power": args.distill_confidence_power,
+        "distill_min_teachers_per_flow": args.distill_min_teachers_per_flow,
+        "distill_require_oof_exclusion_proof": args.distill_require_oof_exclusion_proof,
         "distill_min_coverage": args.distill_min_coverage,
         "distill_low_coverage_action": args.distill_low_coverage_action,
         "environment_map_json": args.environment_map_json,
@@ -3368,6 +3467,17 @@ def main():
     ap.add_argument("--distill_min_confidence", type=float, default=0.0, help="Ignore teacher targets whose max probability is below this confidence.")
     ap.add_argument("--distill_max_confidence", type=float, default=0.0, help="If >0 and <1, soft-cap overconfident teacher targets by mixing them with a uniform prior before temperature softening.")
     ap.add_argument("--distill_confidence_power", type=float, default=0.0, help="If >0, weight distillation samples by teacher max-probability^power.")
+    ap.add_argument(
+        "--distill_min_teachers_per_flow",
+        type=int,
+        default=1,
+        help="Require this many source predictions for each loaded flow target. Values above 1 require teacher_multiplicity metadata.",
+    )
+    ap.add_argument(
+        "--distill_require_oof_exclusion_proof",
+        action="store_true",
+        help="Reject targets unless their multiplicity contract proves per-flow teacher exclusion from training.",
+    )
     ap.add_argument("--distill_min_coverage", type=float, default=0.0, help="Minimum fraction of training flow_ids that must have flow-id teacher targets.")
     ap.add_argument(
         "--distill_low_coverage_action",
@@ -3388,6 +3498,8 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
+    if args.distill_min_teachers_per_flow <= 0:
+        ap.error("--distill_min_teachers_per_flow must be positive")
     identifiability_modes = sum(
         int(enabled)
         for enabled in (

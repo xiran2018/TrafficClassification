@@ -2151,6 +2151,8 @@ fusion rule.
 --distill_temperature FLOAT   soften teacher/student probabilities
 --distill_min_confidence FLOAT
 --distill_confidence_power FLOAT
+--distill_min_teachers_per_flow INT
+--distill_require_oof_exclusion_proof
 --distill_min_coverage FLOAT
 --distill_low_coverage_action warn|disable_flow|fail
 ```
@@ -2256,6 +2258,8 @@ conda run --no-capture-output -n llm-factory \
     --dataset train_seq reasoningDataset/vpn-app/train_tower2_rawproj_change_weight/seq_dataset.pt \
     --dataset valid_seq reasoningDataset/vpn-app/valid_tower2_rawproj_change_weight/seq_dataset.pt \
     --min_coverage 0.50 \
+    --min_teachers_per_flow 2 \
+    --require_oof_exclusion_proof \
     --low_coverage_action disable_flow \
     --output_json reasoningDataset/vpn-app/distill_teacher_coverage_vpn_oof_currentbest_vs_split0_rawproj.json
 
@@ -2265,6 +2269,8 @@ conda run --no-capture-output -n llm-factory \
     --dataset train_seq reasoningDataset/tls-120/train_tower2_rawproj_change_weight/seq_dataset.pt \
     --dataset valid_seq reasoningDataset/tls-120/valid_tower2_rawproj_change_weight/seq_dataset.pt \
     --min_coverage 0.50 \
+    --min_teachers_per_flow 2 \
+    --require_oof_exclusion_proof \
     --low_coverage_action disable_flow \
     --output_json reasoningDataset/tls-120/distill_teacher_coverage_tls_oof_currentbest_vs_split0_rawproj.json
 ```
@@ -2284,6 +2290,18 @@ TLS-120 OOF teacher vs split0 rawproj Tower-2:
   valid coverage=2456/3455 = 0.7109
   recommendation=disable_flow_id_kl_keep_class_prior
 ```
+
+The strict multiplicity/provenance audit also fails both historical files:
+`multiplicity_available_and_aligned=false`,
+`passes_teacher_count=false`, and `oof_exclusion_proven=false`. Their old
+`--align union` metadata records three input files globally, but does not prove
+that any individual flow received multiple predictions. New teacher targets
+record an aligned `teacher_multiplicity` block with one count per output
+`flow_id`; `--min_teachers_per_flow 2` filters single-teacher rows. The builder
+still records `oof_exclusion_proven=false`, because multiplicity alone cannot
+prove that a source model excluded the target flow from training. Consequently,
+`--require_oof_exclusion_proof` deliberately rejects all legacy targets until
+the inner-fold teacher pipeline emits checkpoint-bound exclusion evidence.
 
 VPN split0 one-epoch smoke with coverage gate:
 

@@ -122,6 +122,12 @@ def main() -> None:
     ap.add_argument("--mode", choices=["mean", "log_mean", "vote", "vote_priority", "auto_confidence"], default="auto_confidence")
     ap.add_argument("--confidence_threshold", type=float, default=0.9)
     ap.add_argument("--min_teacher_confidence", type=float, default=0.0, help="Drop fused targets below this max probability.")
+    ap.add_argument(
+        "--min_teachers_per_flow",
+        type=int,
+        default=1,
+        help="Drop flows with fewer source predictions. Use 2+ for a multi-teacher target; this alone does not prove OOF exclusion.",
+    )
     ap.add_argument("--min_input_accuracy", type=float, default=0.0, help="Reject labeled teacher inputs below this split accuracy.")
     ap.add_argument("--min_input_macro_f1", type=float, default=0.0, help="Reject labeled teacher inputs below this split macro-F1.")
     ap.add_argument("--output_json", required=True)
@@ -130,6 +136,8 @@ def main() -> None:
 
     if args.split == "test" and not args.allow_test_split:
         raise ValueError("--split test requires --allow_test_split; prefer --split valid for paper-safe distillation.")
+    if args.min_teachers_per_flow <= 0:
+        raise ValueError("--min_teachers_per_flow must be positive")
 
     named = [parse_input(raw) for raw in args.input]
     payloads = [(name, load_payload(path), path) for name, path in named]
@@ -189,9 +197,11 @@ def main() -> None:
     if args.align == "intersection":
         fused = fuse_probs(probs, mode)
         y_out = y_ref
+        teacher_counts = np.full(len(selected_ids), len(extracted), dtype=np.int64)
     else:
         fused_rows = []
         y_rows = []
+        count_rows = []
         for fid in selected_ids:
             fid_probs = []
             fid_labels = []
@@ -207,15 +217,38 @@ def main() -> None:
             if len(set(fid_labels)) > 1:
                 raise ValueError(f"Conflicting labels for flow_id={fid}: {sorted(set(fid_labels))}")
             fused_rows.append(fuse_probs(fid_probs, mode).squeeze(0))
+            count_rows.append(len(fid_probs))
             y_rows.append(fid_labels[0] if fid_labels else -1)
         fused = normalize_prob(np.stack(fused_rows, axis=0))
+        teacher_counts = np.asarray(count_rows, dtype=np.int64)
         y_out = None if not y_rows or all(y < 0 for y in y_rows) else np.asarray(y_rows, dtype=np.int64)
-    keep = np.ones(fused.shape[0], dtype=bool)
+    keep = teacher_counts >= int(args.min_teachers_per_flow)
     if args.min_teacher_confidence > 0:
-        keep = fused.max(axis=1) >= float(args.min_teacher_confidence)
+        keep &= fused.max(axis=1) >= float(args.min_teacher_confidence)
     kept_ids = [fid for fid, ok in zip(selected_ids, keep) if ok]
     fused = fused[keep]
+    kept_teacher_counts = teacher_counts[keep]
     y_out = None if y_out is None else y_out[keep]
+    if not kept_ids:
+        raise ValueError(
+            "No teacher targets remain after confidence and teacher-count filtering."
+        )
+
+    multiplicity = {
+        "flow_ids": kept_ids,
+        "teacher_counts": kept_teacher_counts.astype(int).tolist(),
+        "minimum": int(kept_teacher_counts.min()) if len(kept_teacher_counts) else 0,
+        "maximum": int(kept_teacher_counts.max()) if len(kept_teacher_counts) else 0,
+        "mean": float(kept_teacher_counts.mean()) if len(kept_teacher_counts) else 0.0,
+        "multi_teacher_flow_count": int(np.sum(kept_teacher_counts >= 2)),
+        "multi_teacher_flow_rate": float(np.mean(kept_teacher_counts >= 2)) if len(kept_teacher_counts) else 0.0,
+        "all_output_flows_multi_teacher": bool(len(kept_teacher_counts) and np.all(kept_teacher_counts >= 2)),
+        "oof_exclusion_proven": False,
+        "oof_multi_teacher_consensus_proven": False,
+        "provenance_note": (
+            "Source prediction multiplicity is measured, but this builder does not prove that every source model excluded each target flow from training."
+        ),
+    }
 
     metrics = compute_metrics(y_out, fused) if y_out is not None else {}
     config = {
@@ -224,6 +257,7 @@ def main() -> None:
         "selected_mode": mode,
         "confidence_threshold": args.confidence_threshold,
         "min_teacher_confidence": args.min_teacher_confidence,
+        "min_teachers_per_flow": args.min_teachers_per_flow,
         "min_input_accuracy": args.min_input_accuracy,
         "min_input_macro_f1": args.min_input_macro_f1,
         "num_inputs": len(inputs),
@@ -236,6 +270,7 @@ def main() -> None:
     payload: Dict[str, Any] = {
         "flow_ids": kept_ids,
         "flow_prob": fused.tolist(),
+        "teacher_multiplicity": multiplicity,
         "inputs": inputs,
         "metrics": {"flow_level": metrics} if metrics else {},
         "config": config,

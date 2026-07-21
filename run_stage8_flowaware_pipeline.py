@@ -835,11 +835,15 @@ def tower2_train_cmd(args, model_type: str) -> List[str]:
             str(args.distill_max_confidence),
             "--distill_confidence_power",
             str(args.distill_confidence_power),
+            "--distill_min_teachers_per_flow",
+            str(args.distill_min_teachers_per_flow),
             "--distill_min_coverage",
             str(args.distill_min_coverage),
             "--distill_low_coverage_action",
             args.distill_low_coverage_action,
         ]
+        if args.distill_require_oof_exclusion_proof:
+            cmd.append("--distill_require_oof_exclusion_proof")
     return cmd
 
 
@@ -1854,6 +1858,8 @@ def main() -> None:
     ap.add_argument("--distill_min_confidence", type=float, default=0.0)
     ap.add_argument("--distill_max_confidence", type=float, default=0.0)
     ap.add_argument("--distill_confidence_power", type=float, default=0.0)
+    ap.add_argument("--distill_min_teachers_per_flow", type=int, default=1)
+    ap.add_argument("--distill_require_oof_exclusion_proof", action="store_true")
     ap.add_argument("--distill_min_coverage", type=float, default=0.0)
     ap.add_argument("--distill_low_coverage_action", choices=["warn", "disable_flow", "fail"], default="warn")
     ap.add_argument("--prior_strengths", default="0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9,0.95,1.0,1.05,1.1,1.15,1.2")
@@ -1933,6 +1939,8 @@ def main() -> None:
     ap.add_argument("--no_progress", action="store_true")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
+    if args.distill_min_teachers_per_flow <= 0:
+        ap.error("--distill_min_teachers_per_flow must be positive")
     if not 0.0 <= args.tower1_class_weight_strength <= 1.0:
         ap.error("--tower1_class_weight_strength must be in [0, 1]")
     if args.tower1_paired_raw_consistency_weight < 0:
