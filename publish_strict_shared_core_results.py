@@ -57,6 +57,28 @@ def atomic_copy(path: str | Path, destination: str | Path) -> None:
     staging.replace(target)
 
 
+def archive_hashed_evidence(
+    evidence: dict[str, Any],
+    *,
+    label: str,
+    destination: Path,
+) -> dict[str, Any]:
+    evidence_path = Path(str(evidence.get("path") or ""))
+    evidence_hash = str(evidence.get("sha256") or "")
+    if not evidence_path.is_file() or sha256_file(evidence_path) != evidence_hash:
+        raise ValueError(f"frozen config {label} evidence hash mismatch")
+    payload = load_json(evidence_path)
+    if payload.get("test_labels_used") is True:
+        raise ValueError(f"frozen config {label} evidence used test labels")
+    atomic_copy(evidence_path, destination)
+    return {
+        "source_path": str(evidence_path),
+        "source_sha256": evidence_hash,
+        "archived_path": str(destination),
+        "archived_sha256": sha256_file(destination),
+    }
+
+
 def archive_frozen_method_evidence(
     config_path: str | Path,
     *,
@@ -88,19 +110,122 @@ def archive_frozen_method_evidence(
         ("balance", "balance_selection.json"),
         ("paired_invariance", "paired_selection.json"),
     ):
-        evidence = selection.get(key) or {}
-        evidence_path = Path(str(evidence.get("path") or ""))
-        evidence_hash = str(evidence.get("sha256") or "")
-        if not evidence_path.is_file() or sha256_file(evidence_path) != evidence_hash:
-            raise ValueError(f"frozen config {key} selection evidence hash mismatch")
-        destination = archive_root / filename
-        atomic_copy(evidence_path, destination)
-        archived[key] = {
-            "source_path": str(evidence_path),
-            "source_sha256": evidence_hash,
-            "archived_path": str(destination),
-            "archived_sha256": sha256_file(destination),
-        }
+        archived[key] = archive_hashed_evidence(
+            selection.get(key) or {},
+            label=f"{key} selection",
+            destination=archive_root / filename,
+        )
+
+    archived_method_selection = {}
+    method_selection = config.get("method_selection")
+    if method_selection is not None:
+        if not isinstance(method_selection, dict):
+            raise ValueError("frozen config method_selection must be an object")
+        if method_selection.get("decision_status") != (
+            "final_after_preregistered_validation"
+        ):
+            raise ValueError("frozen method selection is not final")
+        if method_selection.get("test_labels_used") is not False:
+            raise ValueError("frozen method selection is not validation-only")
+
+        required = ["base_shared_core_config", "d1"]
+        if method_selection.get("packet_selected_identity_safe_contrastive"):
+            required.extend(
+                ["d2_incremental", "d2_overall", "flow_noninferiority"]
+            )
+        for key in required:
+            if not isinstance(method_selection.get(key), dict):
+                raise ValueError(f"frozen method selection is missing {key} evidence")
+
+        evidence_files = (
+            ("base_shared_core_config", "base_shared_core_config.json"),
+            ("d1", "d1_selection.json"),
+            ("d2_incremental", "d2_incremental_selection.json"),
+            ("d2_overall", "d2_overall_selection.json"),
+            ("cross_scale_exposure", "cross_scale_exposure.json"),
+            ("flow_noninferiority", "flow_noninferiority_selection.json"),
+        )
+        for key, filename in evidence_files:
+            evidence = method_selection.get(key)
+            if evidence is None:
+                continue
+            if not isinstance(evidence, dict):
+                raise ValueError(f"frozen method selection {key} evidence is invalid")
+            archived_method_selection[key] = archive_hashed_evidence(
+                evidence,
+                label=f"method selection {key}",
+                destination=archive_root / filename,
+            )
+
+        base_evidence = method_selection["base_shared_core_config"]
+        base_payload = load_json(base_evidence["path"])
+        base_recorded = str(base_payload.get("config_sha256") or "")
+        base_unsigned = dict(base_payload)
+        base_unsigned.pop("config_sha256", None)
+        if not (
+            base_recorded
+            == str(base_evidence.get("config_sha256") or "")
+            == canonical_sha256(base_unsigned)
+        ):
+            raise ValueError("base shared-core config fingerprint mismatch")
+
+        packet_selected_identity = bool(
+            method_selection.get("packet_selected_identity_safe_contrastive")
+        )
+        packet_selected_cross_scale = bool(
+            method_selection.get("packet_selected_availability_aware_cross_scale")
+        )
+        flow_gate_passed = method_selection.get("flow_noninferiority_passed")
+        if packet_selected_identity and flow_gate_passed not in (True, False):
+            raise ValueError("final method selection lacks a Flow gate decision")
+        if not packet_selected_identity and flow_gate_passed is not None:
+            raise ValueError("Flow gate decision is inapplicable when D1 was rejected")
+        if method_selection.get("identity_safe_contrastive") and flow_gate_passed is not True:
+            raise ValueError("identity-safe method was retained without passing Flow gate")
+        if packet_selected_cross_scale and not isinstance(
+            method_selection.get("cross_scale_exposure"), dict
+        ):
+            raise ValueError("cross-scale method lacks exposure evidence")
+
+        d1_selected = load_json(method_selection["d1"]["path"]).get("selected")
+        if (d1_selected == "candidate") != packet_selected_identity:
+            raise ValueError("D1 evidence contradicts the frozen Packet decision")
+        if packet_selected_identity:
+            d2_incremental_selected = load_json(
+                method_selection["d2_incremental"]["path"]
+            ).get("selected")
+            d2_overall_selected = load_json(
+                method_selection["d2_overall"]["path"]
+            ).get("selected")
+            evidence_selected_cross_scale = (
+                d2_incremental_selected == "candidate"
+                and d2_overall_selected == "candidate"
+            )
+            if evidence_selected_cross_scale != packet_selected_cross_scale:
+                raise ValueError("D2 evidence contradicts the frozen Packet decision")
+            flow_selected = load_json(
+                method_selection["flow_noninferiority"]["path"]
+            ).get("selected")
+            if (flow_selected == "candidate") != flow_gate_passed:
+                raise ValueError("Flow evidence contradicts the frozen gate decision")
+
+        final_identity = bool(method_selection.get("identity_safe_contrastive"))
+        final_cross_scale = bool(
+            method_selection.get("availability_aware_cross_scale")
+        )
+        if final_identity != (packet_selected_identity and flow_gate_passed is True):
+            raise ValueError("final identity-safe objective contradicts selection evidence")
+        if final_cross_scale != (packet_selected_cross_scale and final_identity):
+            raise ValueError("final cross-scale objective contradicts selection evidence")
+        expected_method = (
+            "availability_aware_cross_scale"
+            if final_cross_scale
+            else "identity_safe_contrastive"
+            if final_identity
+            else "shared_core_v2_control"
+        )
+        if method_selection.get("selected_method") != expected_method:
+            raise ValueError("selected_method contradicts the frozen objectives")
 
     config_destination = archive_root / "frozen_config.json"
     atomic_copy(source, config_destination)
@@ -112,10 +237,11 @@ def archive_frozen_method_evidence(
         "config_sha256": recorded_fingerprint,
     }
     archive = {
-        "schema": "strict_shared_core_v2_method_archive_v1",
+        "schema": "strict_shared_core_v2_method_archive_v2",
         "status": "verified_and_archived",
         "shared_core_config": archived_config,
         "selection_evidence": archived,
+        "method_selection_evidence": archived_method_selection,
     }
     archive_manifest = archive_root / "archive_manifest.json"
     atomic_write_json(archive_manifest, archive)

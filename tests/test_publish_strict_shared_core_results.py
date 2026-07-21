@@ -3,6 +3,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from publish_strict_shared_core_results import (
+    archive_frozen_method_evidence,
+    canonical_sha256,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -374,3 +379,110 @@ def test_publish_rejects_mutated_frozen_selection_evidence(tmp_path, monkeypatch
     )
     assert completed.returncode != 0
     assert "selection evidence hash mismatch" in completed.stderr
+
+
+def test_archive_includes_final_d1_d2_and_flow_selection_evidence(tmp_path):
+    inputs = prepare_inputs(tmp_path)
+    config_path = inputs[8]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    base = {
+        "schema": "exact_shared_packet_core_v2",
+        "status": "frozen_from_cross_dataset_validation",
+    }
+    base["config_sha256"] = canonical_sha256(base)
+    base_path = write_json(tmp_path / "base_shared_core.json", base)
+    reports = {}
+    for name in (
+        "d1",
+        "d2_incremental",
+        "d2_overall",
+        "cross_scale_exposure",
+        "flow_noninferiority",
+    ):
+        reports[name] = write_json(
+            tmp_path / f"{name}.json",
+            {"test_labels_used": False, "selected": "candidate"},
+        )
+
+    config["method_selection"] = {
+        "decision_status": "final_after_preregistered_validation",
+        "test_labels_used": False,
+        "identity_safe_contrastive": True,
+        "availability_aware_cross_scale": True,
+        "packet_selected_identity_safe_contrastive": True,
+        "packet_selected_availability_aware_cross_scale": True,
+        "flow_noninferiority_passed": True,
+        "selected_method": "availability_aware_cross_scale",
+        "base_shared_core_config": {
+            "path": str(base_path),
+            "sha256": file_sha256(base_path),
+            "config_sha256": base["config_sha256"],
+        },
+        **{
+            name: {"path": str(path), "sha256": file_sha256(path)}
+            for name, path in reports.items()
+        },
+    }
+    config.pop("config_sha256")
+    config["config_sha256"] = canonical_sha256(config)
+    write_json(config_path, config)
+
+    archive = archive_frozen_method_evidence(
+        config_path,
+        expected_fingerprint=config["config_sha256"],
+        archive_root=tmp_path / "method_archive",
+    )
+
+    evidence = archive["method_selection_evidence"]
+    assert archive["schema"] == "strict_shared_core_v2_method_archive_v2"
+    assert set(evidence) == {
+        "base_shared_core_config",
+        "d1",
+        "d2_incremental",
+        "d2_overall",
+        "cross_scale_exposure",
+        "flow_noninferiority",
+    }
+    assert all(Path(row["archived_path"]).is_file() for row in evidence.values())
+
+
+def test_archive_rejects_mutated_final_d1_evidence(tmp_path):
+    inputs = prepare_inputs(tmp_path)
+    config_path = inputs[8]
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    base = {"schema": "exact_shared_packet_core_v2"}
+    base["config_sha256"] = canonical_sha256(base)
+    base_path = write_json(tmp_path / "base.json", base)
+    d1_path = write_json(
+        tmp_path / "d1.json", {"test_labels_used": False, "selected": "baseline"}
+    )
+    config["method_selection"] = {
+        "decision_status": "final_after_preregistered_validation",
+        "test_labels_used": False,
+        "identity_safe_contrastive": False,
+        "availability_aware_cross_scale": False,
+        "packet_selected_identity_safe_contrastive": False,
+        "packet_selected_availability_aware_cross_scale": False,
+        "flow_noninferiority_passed": None,
+        "selected_method": "shared_core_v2_control",
+        "base_shared_core_config": {
+            "path": str(base_path),
+            "sha256": file_sha256(base_path),
+            "config_sha256": base["config_sha256"],
+        },
+        "d1": {"path": str(d1_path), "sha256": file_sha256(d1_path)},
+    }
+    config.pop("config_sha256")
+    config["config_sha256"] = canonical_sha256(config)
+    write_json(config_path, config)
+    d1_path.write_text('{"selected":"mutated"}', encoding="utf-8")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="method selection d1 evidence hash mismatch"):
+        archive_frozen_method_evidence(
+            config_path,
+            expected_fingerprint=config["config_sha256"],
+            archive_root=tmp_path / "method_archive",
+        )
