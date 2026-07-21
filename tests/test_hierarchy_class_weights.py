@@ -3,6 +3,7 @@ import math
 import pytest
 
 from hierarchy_class_weights import (
+    bounded_flow_risk_strength,
     hierarchy_class_weights,
     normalized_effective_weights,
 )
@@ -59,6 +60,55 @@ def test_alpha_and_gamma_remain_distinct_when_packet_counts_are_not_balanced():
     )
 
 
+def test_bounded_strength_saturates_the_requested_weight_ratio():
+    flow_counts = {0: 500, 1: 50, 2: 5}
+    eta = bounded_flow_risk_strength(flow_counts, max_weight_ratio=4.0)
+    unit_packet_counts = {label: 1 for label in flow_counts}
+    weights = hierarchy_class_weights(
+        unit_packet_counts,
+        flow_counts,
+        alpha=1.0,
+        gamma=eta,
+    )
+
+    assert 0.0 < eta < 1.0
+    assert max(weights.values()) / min(weights.values()) == pytest.approx(4.0)
+
+
+def test_bounded_strength_keeps_full_strength_when_risk_is_already_bounded():
+    flow_counts = {0: 12, 1: 11, 2: 10}
+
+    assert bounded_flow_risk_strength(
+        flow_counts, max_weight_ratio=4.0
+    ) == pytest.approx(1.0)
+    assert bounded_flow_risk_strength(
+        flow_counts, max_weight_ratio=4.0, max_strength=0.6
+    ) == pytest.approx(0.6)
+
+
+def test_bounded_strength_is_invariant_to_normalization():
+    flow_counts = {0: 1000, 1: 100, 2: 10}
+    eta = bounded_flow_risk_strength(flow_counts, max_weight_ratio=3.0)
+    base = normalized_effective_weights(flow_counts)
+    powered = {label: weight**eta for label, weight in base.items()}
+
+    assert max(powered.values()) / min(powered.values()) == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("ratio", [1.0, 0.0, -2.0, float("inf")])
+def test_bounded_strength_rejects_invalid_ratio(ratio):
+    with pytest.raises(ValueError, match="max_weight_ratio"):
+        bounded_flow_risk_strength({0: 2, 1: 1}, max_weight_ratio=ratio)
+
+
+@pytest.mark.parametrize("strength", [-0.1, 1.1])
+def test_bounded_strength_rejects_invalid_max_strength(strength):
+    with pytest.raises(ValueError, match="max_strength"):
+        bounded_flow_risk_strength(
+            {0: 2, 1: 1}, max_weight_ratio=4.0, max_strength=strength
+        )
+
+
 @pytest.mark.parametrize(
     ("alpha", "gamma"), [(-0.1, 1.0), (1.1, 1.0), (1.0, -0.1), (1.0, 1.1)]
 )
@@ -67,4 +117,3 @@ def test_rejects_parameters_outside_unit_interval(alpha, gamma):
         hierarchy_class_weights(
             {0: 1, 1: 1}, {0: 1, 1: 1}, alpha=alpha, gamma=gamma
         )
-

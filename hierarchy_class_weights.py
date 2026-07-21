@@ -21,6 +21,31 @@ def normalized_effective_weights(
     return {label: value / mean for label, value in raw.items()}
 
 
+def bounded_flow_risk_strength(
+    flow_counts: Mapping[int, int],
+    *,
+    max_weight_ratio: float,
+    beta: float = 0.9999,
+    max_strength: float = 1.0,
+) -> float:
+    """Choose the strongest flow-risk exponent that respects a ratio bound.
+
+    Raising positive class risks to ``eta`` raises their max/min ratio to the
+    same power.  This gives a closed-form, train-only strength that adapts to
+    class geometry without a dataset-specific search rule.
+    """
+    if not math.isfinite(max_weight_ratio) or max_weight_ratio <= 1.0:
+        raise ValueError("max_weight_ratio must be finite and greater than 1")
+    if not 0.0 <= max_strength <= 1.0:
+        raise ValueError("max_strength must be in [0,1]")
+    weights = normalized_effective_weights(flow_counts, beta=beta)
+    observed_ratio = max(weights.values()) / min(weights.values())
+    if observed_ratio <= 1.0 + 1e-12:
+        return max_strength
+    bounded = math.log(max_weight_ratio) / math.log(observed_ratio)
+    return min(max_strength, max(0.0, bounded))
+
+
 def hierarchy_class_weights(
     packet_counts: Mapping[int, int],
     flow_counts: Mapping[int, int],
@@ -50,4 +75,3 @@ def hierarchy_class_weights(
     }
     mean = sum(raw.values()) / len(raw)
     return {label: value / mean for label, value in raw.items()}
-
