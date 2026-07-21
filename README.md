@@ -5113,10 +5113,14 @@ SupCon normalizes positive weights per valid anchor. They nevertheless show
 that alias rows materially change both sides of the contrastive normalization.
 Blind deduplication is also incomplete because `15.81-17.56%` of unique
 Packet-task anchors would then have no positive in their random mini-batch.
-The currently available Flow-task fold-0 rows contain at least two packets per
-flow, so their corresponding alias exposure is zero and unique-anchor positive
-coverage is already 100%; this is a task-data boundary, not permission to use a
-different loss implementation.
+Across all three currently available Flow-task training splits, VPN contains
+`704/698/703` flows and TLS-120 contains `6910/6910/6910` flows; every flow has
+at least two sampled packets. Their alias exposure is therefore zero and
+unique-anchor positive coverage is already 100%. This is a task-data boundary,
+not permission to use a different loss implementation. Identity dedup is a
+structural no-op there, whereas same-class flow pairing can still change the
+relation distribution and therefore still requires matched Flow
+non-inferiority evidence.
 
 The next comparison first enables **identity-safe SupCon under the unchanged
 random-flow batches**. It retains duplicate rows in CE so every flow keeps
