@@ -33,7 +33,31 @@ def write(path: Path, payload):
     return path
 
 
-def finalize(tmp_path, d1, incremental=None, overall=None):
+def cross_scale_exposure(active_rate=0.6):
+    return {
+        "schema": "cross_scale_sampler_exposure_audit_v1",
+        "scope": "training_inputs_and_exact_sampler_only",
+        "test_predictions_used": False,
+        "identity_policy": "exact_packet_uid_compaction",
+        "context_policy": "leave_one_distinct_packet_out",
+        "reports": {
+            name: {
+                "epochs": 8,
+                "batch_size": 16,
+                "packets_per_flow": 2,
+                "seed": 42,
+                "aggregate": {
+                    "paired_identity_rate": 1.0,
+                    "bidirectional_valid_anchor_rate": active_rate,
+                    "alias_only_false_context_anchor_rate": 0.2,
+                },
+            }
+            for name in ("vpn-app", "tls-120")
+        },
+    }
+
+
+def finalize(tmp_path, d1, incremental=None, overall=None, exposure=None):
     base = {
         "schema": "exact_shared_packet_core_v2",
         "status": "frozen_from_cross_dataset_validation",
@@ -48,6 +72,10 @@ def finalize(tmp_path, d1, incremental=None, overall=None):
         write(tmp_path / "incremental.json", incremental) if incremental else None
     )
     overall_path = write(tmp_path / "overall.json", overall) if overall else None
+    exposure = exposure if exposure is not None else (
+        cross_scale_exposure() if incremental is not None else None
+    )
+    exposure_path = write(tmp_path / "exposure.json", exposure) if exposure else None
     return freeze_method_config(
         base,
         base_path=base_path,
@@ -57,6 +85,8 @@ def finalize(tmp_path, d1, incremental=None, overall=None):
         d2_incremental_path=incremental_path,
         d2_overall=overall,
         d2_overall_path=overall_path,
+        cross_scale_exposure=exposure,
+        cross_scale_exposure_path=exposure_path,
     )
 
 
@@ -129,6 +159,9 @@ def test_both_d2_gates_freeze_cross_scale_for_packet_and_flow(tmp_path):
         "identity_safe_contrastive": True,
         "availability_aware_cross_scale": True,
     }
+    assert payload["method_selection"]["cross_scale_exposure"]["datasets"][
+        "vpn-app"
+    ]["bidirectional_valid_anchor_rate"] == 0.6
     assert_fingerprint(payload)
 
 
@@ -148,6 +181,10 @@ def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
         d2_incremental_path=tmp_path / "incremental.json",
         d2_overall=overall,
         d2_overall_path=tmp_path / "overall.json",
+        cross_scale_exposure=cross_scale_exposure(),
+        cross_scale_exposure_path=write(
+            tmp_path / "exposure_flow.json", cross_scale_exposure()
+        ),
         flow_noninferiority=flow_gate("candidate"),
         flow_noninferiority_path=gate_path,
     )
@@ -164,6 +201,8 @@ def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
         d2_incremental_path=tmp_path / "incremental.json",
         d2_overall=overall,
         d2_overall_path=tmp_path / "overall.json",
+        cross_scale_exposure=cross_scale_exposure(),
+        cross_scale_exposure_path=tmp_path / "exposure_flow.json",
         flow_noninferiority=flow_gate("baseline"),
         flow_noninferiority_path=rejected_gate_path,
     )
@@ -176,3 +215,14 @@ def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
 def test_promoted_d1_requires_complete_d2_decision(tmp_path):
     with pytest.raises(ValueError, match="requires both"):
         finalize(tmp_path, selection("candidate", 0.005))
+
+
+def test_d2_rejects_insufficient_effective_sampler_exposure(tmp_path):
+    with pytest.raises(ValueError, match="insufficient"):
+        finalize(
+            tmp_path,
+            selection("candidate", 0.005),
+            selection("candidate", 0.002),
+            selection("candidate", 0.005),
+            exposure=cross_scale_exposure(active_rate=0.49),
+        )

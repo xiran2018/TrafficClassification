@@ -14,6 +14,7 @@ from shared_core_v2 import load_frozen_shared_core
 
 
 REQUIRED_DATASETS = {"vpn-app", "tls-120"}
+MIN_CROSS_SCALE_ACTIVE_ANCHOR_RATE = 0.5
 
 
 def validate_selection(
@@ -82,6 +83,47 @@ def validate_flow_noninferiority(report: dict[str, Any]) -> None:
         raise ValueError("flow gate must explicitly exclude test labels")
 
 
+def validate_cross_scale_exposure(report: dict[str, Any]) -> None:
+    if report.get("schema") != "cross_scale_sampler_exposure_audit_v1":
+        raise ValueError("cross-scale exposure audit has the wrong schema")
+    if report.get("scope") != "training_inputs_and_exact_sampler_only":
+        raise ValueError("cross-scale exposure audit must be training-input-only")
+    if report.get("test_predictions_used") is not False:
+        raise ValueError("cross-scale exposure audit must exclude test predictions")
+    if report.get("identity_policy") != "exact_packet_uid_compaction":
+        raise ValueError("cross-scale exposure audit has the wrong identity policy")
+    if report.get("context_policy") != "leave_one_distinct_packet_out":
+        raise ValueError("cross-scale exposure audit has the wrong context policy")
+    reports = report.get("reports") or {}
+    if set(reports) != REQUIRED_DATASETS:
+        raise ValueError("cross-scale exposure audit must cover VPN and TLS-120")
+    for dataset, dataset_report in reports.items():
+        aggregate = dataset_report.get("aggregate") or {}
+        if not (
+            int(dataset_report.get("epochs", 0)) == 8
+            and int(dataset_report.get("batch_size", 0)) == 16
+            and int(dataset_report.get("packets_per_flow", 0)) == 2
+            and int(dataset_report.get("seed", -1)) == 42
+            and math.isclose(
+                float(aggregate.get("paired_identity_rate", -1.0)),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and float(
+                aggregate.get("bidirectional_valid_anchor_rate", -1.0)
+            )
+            >= MIN_CROSS_SCALE_ACTIVE_ANCHOR_RATE
+            and float(
+                aggregate.get("alias_only_false_context_anchor_rate", 0.0)
+            )
+            > 0.0
+        ):
+            raise ValueError(
+                f"cross-scale exposure is insufficient or inconsistent for {dataset}"
+            )
+
+
 def freeze_method_config(
     base: dict[str, Any],
     *,
@@ -92,6 +134,8 @@ def freeze_method_config(
     d2_incremental_path: Path | None = None,
     d2_overall: dict[str, Any] | None = None,
     d2_overall_path: Path | None = None,
+    cross_scale_exposure: dict[str, Any] | None = None,
+    cross_scale_exposure_path: Path | None = None,
     flow_noninferiority: dict[str, Any] | None = None,
     flow_noninferiority_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -116,6 +160,9 @@ def freeze_method_config(
             d2_incremental, name="D2 incremental", min_delta=0.002
         )
         validate_selection(d2_overall, name="D2 overall", min_delta=0.005)
+        if cross_scale_exposure is None or cross_scale_exposure_path is None:
+            raise ValueError("D2 requires the exact-sampler exposure audit")
+        validate_cross_scale_exposure(cross_scale_exposure)
         cross_scale = bool(
             d2_incremental["selected"] == "candidate"
             and d2_overall["selected"] == "candidate"
@@ -127,6 +174,8 @@ def freeze_method_config(
             d2_incremental_path,
             d2_overall,
             d2_overall_path,
+            cross_scale_exposure,
+            cross_scale_exposure_path,
         )
     ):
         raise ValueError("D2 evidence is forbidden when D1 was not promoted")
@@ -181,18 +230,40 @@ def freeze_method_config(
             "config_sha256": base_fingerprint,
         },
         "d1": evidence(d1_path, d1),
-            "d2_incremental": (
-                evidence(d2_incremental_path, d2_incremental)
-                if packet_selected_identity_safe
-                and d2_incremental_path
-                and d2_incremental
-                else None
-            ),
-            "d2_overall": (
-                evidence(d2_overall_path, d2_overall)
-                if packet_selected_identity_safe and d2_overall_path and d2_overall
-                else None
-            ),
+        "d2_incremental": (
+            evidence(d2_incremental_path, d2_incremental)
+            if packet_selected_identity_safe
+            and d2_incremental_path
+            and d2_incremental
+            else None
+        ),
+        "d2_overall": (
+            evidence(d2_overall_path, d2_overall)
+            if packet_selected_identity_safe and d2_overall_path and d2_overall
+            else None
+        ),
+        "cross_scale_exposure": (
+            {
+                "path": str(cross_scale_exposure_path.resolve()),
+                "sha256": file_sha256(cross_scale_exposure_path),
+                "minimum_active_anchor_rate": MIN_CROSS_SCALE_ACTIVE_ANCHOR_RATE,
+                "datasets": {
+                    dataset: {
+                        "bidirectional_valid_anchor_rate": row["aggregate"][
+                            "bidirectional_valid_anchor_rate"
+                        ],
+                        "alias_only_false_context_anchor_rate": row["aggregate"][
+                            "alias_only_false_context_anchor_rate"
+                        ],
+                    }
+                    for dataset, row in cross_scale_exposure["reports"].items()
+                },
+            }
+            if packet_selected_identity_safe
+            and cross_scale_exposure_path
+            and cross_scale_exposure
+            else None
+        ),
         "flow_noninferiority": (
             evidence(flow_noninferiority_path, flow_noninferiority)
             if flow_noninferiority_path and flow_noninferiority
@@ -220,6 +291,7 @@ def main() -> None:
     parser.add_argument("--d1_selection", required=True)
     parser.add_argument("--d2_incremental_selection", default="")
     parser.add_argument("--d2_overall_selection", default="")
+    parser.add_argument("--cross_scale_exposure_audit", default="")
     parser.add_argument("--flow_noninferiority_selection", default="")
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
@@ -239,6 +311,11 @@ def main() -> None:
         if args.flow_noninferiority_selection
         else None
     )
+    exposure_path = (
+        Path(args.cross_scale_exposure_audit)
+        if args.cross_scale_exposure_audit
+        else None
+    )
     payload = freeze_method_config(
         load_frozen_shared_core(base_path),
         base_path=base_path,
@@ -250,6 +327,8 @@ def main() -> None:
         d2_incremental_path=d2_incremental_path,
         d2_overall=load_json(d2_overall_path) if d2_overall_path else None,
         d2_overall_path=d2_overall_path,
+        cross_scale_exposure=(load_json(exposure_path) if exposure_path else None),
+        cross_scale_exposure_path=exposure_path,
         flow_noninferiority=load_json(flow_path) if flow_path else None,
         flow_noninferiority_path=flow_path,
     )
