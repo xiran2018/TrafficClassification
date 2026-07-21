@@ -21,6 +21,33 @@ def prepare_inputs(
     flow_accuracy=0.8,
     flow_f1=0.72,
 ):
+    balance = write_json(tmp_path / "balance_selection.json", {"selected": "baseline"})
+    paired = write_json(tmp_path / "paired_selection.json", {"selected": "candidate"})
+    config_payload = {
+        "schema": "exact_shared_packet_core_v2",
+        "status": "frozen_from_cross_dataset_validation",
+        "selection_evidence": {
+            "balance": {
+                "path": str(balance),
+                "sha256": file_sha256(balance),
+            },
+            "paired_invariance": {
+                "path": str(paired),
+                "sha256": file_sha256(paired),
+            },
+        },
+    }
+    import hashlib
+
+    encoded = json.dumps(
+        config_payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+    config_payload["config_sha256"] = fingerprint
+    shared_core_config = write_json(tmp_path / "frozen_config.json", config_payload)
     audit_root = tmp_path / "audits"
     manifest_root = tmp_path / "manifests"
     for fold in range(3):
@@ -30,7 +57,7 @@ def prepare_inputs(
                 "framework": {
                     "notes": {
                         "completed": True,
-                        "shared_core_config_sha256": "shared-v2",
+                        "shared_core_config_sha256": fingerprint,
                     }
                 }
             },
@@ -41,7 +68,7 @@ def prepare_inputs(
                 "status": "pass",
                 "dataset": "vpn-app",
                 "fold": fold,
-                "shared_core_config_sha256": "shared-v2",
+                "shared_core_config_sha256": fingerprint,
                 "runtime_mechanism_evidence_required": True,
                 "flow_native_extraction_evidence_required": True,
                 "runtime_mechanism_evidence": {"status": "pass"},
@@ -55,7 +82,7 @@ def prepare_inputs(
                 "framework": {
                     "notes": {
                         "completed": True,
-                        "shared_core_config_sha256": "shared-v2",
+                        "shared_core_config_sha256": fingerprint,
                     }
                 }
             },
@@ -157,6 +184,7 @@ def prepare_inputs(
         flow_bootstrap,
         packet_novelty,
         flow_novelty,
+        shared_core_config,
     )
 
 
@@ -184,6 +212,7 @@ def run_publish(
         flow_bootstrap,
         packet_novelty,
         flow_novelty,
+        shared_core_config,
     ) = prepare_inputs(
         tmp_path,
         packet_accuracy=packet_accuracy,
@@ -203,6 +232,10 @@ def run_publish(
             str(audit_root),
             "--packet_manifest_root",
             str(manifest_root),
+            "--shared_core_config",
+            str(shared_core_config),
+            "--method_archive_root",
+            str(tmp_path / "reasoningDataset/shared-core-v2"),
             "--packet_candidate",
             str(packet),
             "--flow_candidate",
@@ -245,6 +278,10 @@ def test_publish_requires_audits_and_promotes_fixed_consensus(tmp_path, monkeypa
     assert canonical["publication_provenance"]["status"] == "strict_shared_core_v2"
     assert canonical["publication_provenance"]["session_novelty_sha256"]
     assert Path(canonical["publication_provenance"]["session_novelty"]).is_file()
+    archive = report["frozen_method_evidence"]
+    assert archive["status"] == "verified_and_archived"
+    assert Path(archive["shared_core_config"]["archived_path"]).is_file()
+    assert Path(archive["selection_evidence"]["balance"]["archived_path"]).is_file()
 
 
 def test_flow_target_gap_does_not_replace_canonical_flow_result(tmp_path, monkeypatch):
@@ -287,6 +324,8 @@ def test_publish_rejects_session_novelty_metric_mismatch(tmp_path, monkeypatch):
             "--dataset", "vpn-app",
             "--audit_root", str(inputs[0]),
             "--packet_manifest_root", str(inputs[1]),
+            "--shared_core_config", str(inputs[8]),
+            "--method_archive_root", str(tmp_path / "reasoningDataset/shared-core-v2"),
             "--packet_candidate", str(inputs[2]),
             "--flow_candidate", str(inputs[3]),
             "--packet_bootstrap", str(inputs[4]),
@@ -301,3 +340,34 @@ def test_publish_rejects_session_novelty_metric_mismatch(tmp_path, monkeypatch):
     )
     assert completed.returncode != 0
     assert "overall metrics do not match" in completed.stderr
+
+
+def test_publish_rejects_mutated_frozen_selection_evidence(tmp_path, monkeypatch):
+    inputs = list(prepare_inputs(tmp_path))
+    config = json.loads(inputs[8].read_text(encoding="utf-8"))
+    balance = Path(config["selection_evidence"]["balance"]["path"])
+    balance.write_text('{"selected":"mutated"}', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "publish_strict_shared_core_results.py"),
+            "--dataset", "vpn-app",
+            "--audit_root", str(inputs[0]),
+            "--packet_manifest_root", str(inputs[1]),
+            "--shared_core_config", str(inputs[8]),
+            "--method_archive_root", str(tmp_path / "reasoningDataset/shared-core-v2"),
+            "--packet_candidate", str(inputs[2]),
+            "--flow_candidate", str(inputs[3]),
+            "--packet_bootstrap", str(inputs[4]),
+            "--flow_bootstrap", str(inputs[5]),
+            "--packet_session_novelty", str(inputs[6]),
+            "--flow_session_novelty", str(inputs[7]),
+            "--output_json", str(tmp_path / "publication.json"),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode != 0
+    assert "selection evidence hash mismatch" in completed.stderr

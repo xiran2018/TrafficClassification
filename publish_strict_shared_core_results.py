@@ -38,6 +38,92 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     staging.replace(destination)
 
 
+def canonical_sha256(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def atomic_copy(path: str | Path, destination: str | Path) -> None:
+    source = Path(path)
+    target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    shutil.copy2(source, staging)
+    staging.replace(target)
+
+
+def archive_frozen_method_evidence(
+    config_path: str | Path,
+    *,
+    expected_fingerprint: str,
+    archive_root: str | Path,
+) -> dict[str, Any]:
+    source = Path(config_path)
+    config = load_json(source)
+    if config.get("schema") != "exact_shared_packet_core_v2":
+        raise ValueError("frozen shared-core config has the wrong schema")
+    if config.get("status") != "frozen_from_cross_dataset_validation":
+        raise ValueError("shared-core config was not frozen from validation")
+    recorded_fingerprint = str(config.get("config_sha256") or "")
+    unsigned = dict(config)
+    unsigned.pop("config_sha256", None)
+    recomputed_fingerprint = canonical_sha256(unsigned)
+    if not (
+        recorded_fingerprint == expected_fingerprint == recomputed_fingerprint
+    ):
+        raise ValueError(
+            "frozen shared-core config fingerprint does not match strict audits"
+        )
+
+    archive_root = Path(archive_root)
+    archive_root.mkdir(parents=True, exist_ok=True)
+    archived = {}
+    selection = config.get("selection_evidence") or {}
+    for key, filename in (
+        ("balance", "balance_selection.json"),
+        ("paired_invariance", "paired_selection.json"),
+    ):
+        evidence = selection.get(key) or {}
+        evidence_path = Path(str(evidence.get("path") or ""))
+        evidence_hash = str(evidence.get("sha256") or "")
+        if not evidence_path.is_file() or sha256_file(evidence_path) != evidence_hash:
+            raise ValueError(f"frozen config {key} selection evidence hash mismatch")
+        destination = archive_root / filename
+        atomic_copy(evidence_path, destination)
+        archived[key] = {
+            "source_path": str(evidence_path),
+            "source_sha256": evidence_hash,
+            "archived_path": str(destination),
+            "archived_sha256": sha256_file(destination),
+        }
+
+    config_destination = archive_root / "frozen_config.json"
+    atomic_copy(source, config_destination)
+    archived_config = {
+        "source_path": str(source),
+        "source_file_sha256": sha256_file(source),
+        "archived_path": str(config_destination),
+        "archived_file_sha256": sha256_file(config_destination),
+        "config_sha256": recorded_fingerprint,
+    }
+    archive = {
+        "schema": "strict_shared_core_v2_method_archive_v1",
+        "status": "verified_and_archived",
+        "shared_core_config": archived_config,
+        "selection_evidence": archived,
+    }
+    archive_manifest = archive_root / "archive_manifest.json"
+    atomic_write_json(archive_manifest, archive)
+    archive["archive_manifest"] = str(archive_manifest)
+    archive["archive_manifest_sha256"] = sha256_file(archive_manifest)
+    return archive
+
+
 def metrics(payload: dict[str, Any], task: str) -> tuple[float, float]:
     if task == "flow-level":
         values = (payload.get("metrics") or {}).get("flow_level") or {}
@@ -195,6 +281,14 @@ def main() -> None:
     parser.add_argument("--dataset", choices=["vpn-app", "tls-120"], required=True)
     parser.add_argument("--audit_root", default="reasoningDataset/shared-core-audits")
     parser.add_argument("--packet_manifest_root", required=True)
+    parser.add_argument(
+        "--shared_core_config",
+        default="/tmp/two_tower_runs/shared_core_v2/frozen_config.json",
+    )
+    parser.add_argument(
+        "--method_archive_root",
+        default="reasoningDataset/shared-core-v2",
+    )
     parser.add_argument("--packet_candidate", required=True)
     parser.add_argument("--flow_candidate", required=True)
     parser.add_argument("--packet_bootstrap", required=True)
@@ -210,6 +304,11 @@ def main() -> None:
     fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
 
     audit_paths, fingerprint = validated_audits(args.dataset, Path(args.audit_root))
+    frozen_method_evidence = archive_frozen_method_evidence(
+        args.shared_core_config,
+        expected_fingerprint=fingerprint,
+        archive_root=args.method_archive_root,
+    )
     packet_payload = load_json(args.packet_candidate)
     flow_payload = load_json(args.flow_candidate)
     validate_fixed_consensus(packet_payload, "packet-level")
@@ -347,6 +446,7 @@ def main() -> None:
         "dataset": args.dataset,
         "shared_core_config_sha256": fingerprint,
         "audit_paths": [str(path) for path in audit_paths],
+        "frozen_method_evidence": frozen_method_evidence,
         "uncertainty_evidence": {
             "packet": {
                 "path": args.packet_bootstrap,

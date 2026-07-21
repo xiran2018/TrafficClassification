@@ -5301,6 +5301,8 @@ conda run -n llm-factory python publish_strict_shared_core_results.py \
   --dataset vpn-app \
   --audit_root reasoningDataset/shared-core-audits \
   --packet_manifest_root /tmp/two_tower_runs/strict_shared_core_v2/packet_artifacts \
+  --shared_core_config /tmp/two_tower_runs/shared_core_v2/frozen_config.json \
+  --method_archive_root reasoningDataset/shared-core-v2 \
   --packet_candidate /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_packet_logmean.json \
   --flow_candidate /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_flow_logmean.json \
   --packet_bootstrap /tmp/two_tower_runs/strict_shared_core_v2/vpn-app_strict_packet_cluster_bootstrap.json \
@@ -5325,6 +5327,15 @@ and native-extraction provenance requirements, and fixed-consensus declaration. 
 files without this block, so a stale historical result cannot be relabeled as
 the strict unified method. No fusion rule or fold weight is selected from test
 performance.
+
+Before publishing metrics, the publisher recomputes the internal canonical
+fingerprint of `frozen_config.json`, requires it to match all six strict fold
+audits, and re-hashes both validation selection reports referenced by the
+config. It then archives the exact config and reports under
+`reasoningDataset/shared-core-v2/` with an `archive_manifest.json`. This keeps
+the method-selection evidence available after `/tmp` is cleaned without
+rewriting the frozen config or changing the fingerprint already bound to the
+checkpoints and manifests.
 
 Strict publication additionally requires uncertainty reports generated after
 the three-fold rule is frozen. Packet NPZ files retain the recovered
