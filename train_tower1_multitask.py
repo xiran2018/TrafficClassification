@@ -158,6 +158,8 @@ def tower1_training_config(args) -> dict:
         "paired_cls_weight",
         "paired_logit_kl_weight",
         "paired_raw_consistency_weight",
+        "cross_scale_weight",
+        "cross_scale_temperature",
         "flow_balanced_packet_batches",
         "packets_per_flow",
         "projection_dim",
@@ -175,12 +177,15 @@ def tower1_training_config(args) -> dict:
         "no_sft",
         "seed",
     )
+    backward_compatible_defaults = {
+        "identity_safe_contrastive": False,
+        "cross_scale_weight": 0.0,
+        "cross_scale_temperature": 0.07,
+    }
     config = {
-        key: (
-            getattr(args, key, False)
-            if key == "identity_safe_contrastive"
-            else getattr(args, key)
-        )
+        key: getattr(args, key, backward_compatible_defaults[key])
+        if key in backward_compatible_defaults
+        else getattr(args, key)
         for key in keys
     }
     config["packet_batch_scheduler"] = "epoch_resampled_dataloader_v1"
@@ -652,6 +657,18 @@ def main() -> None:
         default=1.0,
         help="Raw last-token cosine consistency inside Tower-1 paired loss; concat extraction exposes this representation downstream.",
     )
+    ap.add_argument(
+        "--cross_scale_weight",
+        type=float,
+        default=0.0,
+        help="Availability-aware factual-packet/intervened-flow-context loss weight.",
+    )
+    ap.add_argument(
+        "--cross_scale_temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for availability-aware cross-scale retrieval.",
+    )
     ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
     ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
     ap.add_argument("--projection_dim", type=int, default=256)
@@ -684,6 +701,10 @@ def main() -> None:
         ap.error("--class_weight_strength must be in [0, 1]")
     if args.paired_raw_consistency_weight < 0:
         ap.error("--paired_raw_consistency_weight must be non-negative")
+    if args.cross_scale_weight < 0 or args.cross_scale_temperature <= 0:
+        ap.error("cross-scale weight must be non-negative and temperature must be positive")
+    if args.cross_scale_weight > 0 and not args.paired_packet_aux_jsonl:
+        ap.error("--cross_scale_weight requires --paired_packet_aux_jsonl")
 
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -779,7 +800,9 @@ def main() -> None:
             collate_fn=PacketAuxCollator(
                 tokenizer,
                 args.max_packet_length,
-                require_packet_identity=args.identity_safe_contrastive,
+                require_packet_identity=(
+                    args.identity_safe_contrastive or args.cross_scale_weight > 0
+                ),
             ),
         )
         print(
@@ -798,7 +821,9 @@ def main() -> None:
             collate_fn=PacketAuxCollator(
                 tokenizer,
                 args.max_packet_length,
-                require_packet_identity=args.identity_safe_contrastive,
+                require_packet_identity=(
+                    args.identity_safe_contrastive or args.cross_scale_weight > 0
+                ),
             ),
         )
     print(f"packet samples={len(packet_ds)}, packet batches/epoch={len(packet_loader)}", flush=True)
@@ -821,7 +846,9 @@ def main() -> None:
             collate_fn=PacketAuxCollator(
                 tokenizer,
                 args.max_packet_length,
-                require_packet_identity=args.identity_safe_contrastive,
+                require_packet_identity=(
+                    args.identity_safe_contrastive or args.cross_scale_weight > 0
+                ),
             ),
         )
         print(
@@ -875,7 +902,7 @@ def main() -> None:
     pbar = tqdm(range(total_steps), desc="train tower1")
     opt.zero_grad(set_to_none=True)
 
-    running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
+    running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "cross": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
     skipped_nonfinite = 0
     best_key = None
     non_improving_evals = 0
@@ -905,6 +932,8 @@ def main() -> None:
             paired_cls_weight=args.paired_cls_weight,
             paired_logit_kl_weight=args.paired_logit_kl_weight,
             paired_raw_consistency_weight=args.paired_raw_consistency_weight,
+            cross_scale_weight=args.cross_scale_weight,
+            cross_scale_temperature=args.cross_scale_temperature,
         )
         if not torch.isfinite(out.loss):
             skipped_nonfinite += 1
@@ -916,7 +945,8 @@ def main() -> None:
                 f"pkt_cls={float(out.pkt_cls_loss.detach().cpu())} "
                 f"supcon={float(out.supcon_loss.detach().cpu())} "
                 f"proto={float(out.flow_proto_loss.detach().cpu())} "
-                f"pair={float(out.paired_consistency_loss.detach().cpu())}"
+                f"pair={float(out.paired_consistency_loss.detach().cpu())} "
+                f"cross={float(out.cross_scale_loss.detach().cpu())}"
             )
             if args.stop_on_nonfinite_loss:
                 raise FloatingPointError(msg)
@@ -939,6 +969,7 @@ def main() -> None:
             running["con"] += float(out.supcon_loss.detach().cpu())
             running["proto"] += float(out.flow_proto_loss.detach().cpu())
             running["pair"] += float(out.paired_consistency_loss.detach().cpu())
+            running["cross"] += float(out.cross_scale_loss.detach().cpu())
             if sft_batch is not None:
                 running["lm_tokens"] += float(sft_batch.get("valid_label_tokens", torch.zeros(())).detach().cpu())
             if out.packet_logits is not None:
@@ -956,13 +987,14 @@ def main() -> None:
                 "supcon": running["con"] / n,
                 "proto": running["proto"] / n,
                 "pair": running["pair"] / n,
+                "cross": running["cross"] / n,
                 "pkt_acc": running["acc"] / n,
                 "lm_tokens": running["lm_tokens"] / n,
             }
             pbar.set_postfix({k: f"{v:.4f}" for k, v in msg.items()})
             tqdm.write(
                 "step={step}/{total} loss={loss:.4f} lm={lm:.4f} pkt_cls={pkt_cls:.4f} "
-                "supcon={supcon:.4f} proto={proto:.4f} pair={pair:.4f} "
+                "supcon={supcon:.4f} proto={proto:.4f} pair={pair:.4f} cross={cross:.4f} "
                 "pkt_acc={pkt_acc:.4f} lm_tokens/batch={lm_tokens:.1f} "
                 "skipped_nonfinite={skipped}".format(
                     step=step + 1,
@@ -971,7 +1003,7 @@ def main() -> None:
                     **msg,
                 )
             )
-            running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
+            running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "cross": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
 
         if args.save_steps and (step + 1) % args.save_steps == 0:
             save_model(

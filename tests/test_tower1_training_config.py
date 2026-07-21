@@ -38,6 +38,8 @@ def test_training_config_records_sampler_and_paired_objective():
         "paired_cls_weight": 0.2,
         "paired_logit_kl_weight": 0.5,
         "paired_raw_consistency_weight": 1.0,
+        "cross_scale_weight": 0.05,
+        "cross_scale_temperature": 0.07,
         "flow_balanced_packet_batches": True,
         "packets_per_flow": 2,
         "projection_dim": 256,
@@ -64,3 +66,5 @@ def test_training_config_records_sampler_and_paired_objective():
     assert config["paired_consistency_weight"] == 0.05
     assert config["paired_raw_consistency_weight"] == 1.0
     assert config["identity_safe_contrastive"] is True
+    assert config["cross_scale_weight"] == 0.05
+    assert config["cross_scale_temperature"] == 0.07

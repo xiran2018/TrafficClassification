@@ -8,6 +8,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from models.availability_aware_cross_scale import (
+    availability_aware_cross_scale_loss,
+)
 from models.identity_safe_contrastive import (
     identity_safe_flow_aware_contrastive_loss,
 )
@@ -40,6 +43,7 @@ class Tower1LossOutput:
     supcon_loss: torch.Tensor
     flow_proto_loss: torch.Tensor
     paired_consistency_loss: torch.Tensor
+    cross_scale_loss: torch.Tensor
     packet_logits: Optional[torch.Tensor]
     packet_embeddings: Optional[torch.Tensor]
     projected_embeddings: Optional[torch.Tensor]
@@ -169,6 +173,8 @@ class QwenPacketMultiTaskModel(nn.Module):
         paired_cls_weight: float = 0.0,
         paired_logit_kl_weight: float = 0.5,
         paired_raw_consistency_weight: float = 1.0,
+        cross_scale_weight: float = 0.0,
+        cross_scale_temperature: float = 0.07,
     ) -> Tower1LossOutput:
         device = next(self.parameters()).device
         zero = torch.zeros((), device=device)
@@ -177,6 +183,7 @@ class QwenPacketMultiTaskModel(nn.Module):
         supcon_loss = zero
         flow_proto_loss = zero
         paired_consistency_loss = zero
+        cross_scale_loss = zero
         packet_logits = None
         packet_embeddings = None
         projected_embeddings = None
@@ -239,7 +246,9 @@ class QwenPacketMultiTaskModel(nn.Module):
                     positive_mode=flow_proto_positive,
                     context_mode=flow_proto_context,
                 )
-            if paired_consistency_weight > 0 and "paired_input_ids" in packet_batch:
+            if (
+                paired_consistency_weight > 0 or cross_scale_weight > 0
+            ) and "paired_input_ids" in packet_batch:
                 paired_mask = packet_batch.get("paired_mask")
                 if paired_mask is None:
                     paired_mask = torch.ones_like(labels, dtype=torch.bool)
@@ -249,16 +258,32 @@ class QwenPacketMultiTaskModel(nn.Module):
                     paired_embeddings, paired_projected, paired_logits = self.encode_packets(
                         packet_batch["paired_input_ids"], packet_batch["paired_attention_mask"]
                     )
-                    paired_consistency_loss = paired_view_consistency_loss(
-                        projected_embeddings[paired_mask],
-                        paired_projected[paired_mask],
-                        packet_logits[paired_mask],
-                        paired_logits[paired_mask],
-                        logit_kl_weight=paired_logit_kl_weight,
-                        raw_z=packet_embeddings[paired_mask],
-                        paired_raw_z=paired_embeddings[paired_mask],
-                        raw_consistency_weight=paired_raw_consistency_weight,
-                    )
+                    if paired_consistency_weight > 0:
+                        paired_consistency_loss = paired_view_consistency_loss(
+                            projected_embeddings[paired_mask],
+                            paired_projected[paired_mask],
+                            packet_logits[paired_mask],
+                            paired_logits[paired_mask],
+                            logit_kl_weight=paired_logit_kl_weight,
+                            raw_z=packet_embeddings[paired_mask],
+                            paired_raw_z=paired_embeddings[paired_mask],
+                            raw_consistency_weight=paired_raw_consistency_weight,
+                        )
+                    if cross_scale_weight > 0:
+                        packet_ids = packet_batch.get("packet_ids")
+                        if flow_ids is None or packet_ids is None:
+                            raise ValueError(
+                                "cross-scale consistency requires flow_ids and packet_ids"
+                            )
+                        cross_scale_loss = availability_aware_cross_scale_loss(
+                            projected_embeddings,
+                            paired_projected,
+                            labels,
+                            flow_ids.long(),
+                            packet_ids.long(),
+                            intervention_mask=paired_mask,
+                            temperature=cross_scale_temperature,
+                        )
                     if paired_cls_weight > 0:
                         paired_ce_each = F.cross_entropy(paired_logits[paired_mask], labels[paired_mask], reduction="none")
                         paired_weights = weights[paired_mask] if weights is not None else None
@@ -274,6 +299,7 @@ class QwenPacketMultiTaskModel(nn.Module):
             + contrastive_weight * supcon_loss
             + flow_proto_weight * flow_proto_loss
             + paired_consistency_weight * paired_consistency_loss
+            + cross_scale_weight * cross_scale_loss
         )
         return Tower1LossOutput(
             loss,
@@ -282,6 +308,7 @@ class QwenPacketMultiTaskModel(nn.Module):
             supcon_loss,
             flow_proto_loss,
             paired_consistency_loss,
+            cross_scale_loss,
             packet_logits,
             packet_embeddings,
             projected_embeddings,
