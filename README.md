@@ -5631,6 +5631,9 @@ sets `oof_multi_teacher_consensus_proven=true` only when all counts are at
 least two and equal. Tower2 strict loading uses
 `--distill_min_teachers_per_flow 2` together with
 `--distill_require_oof_exclusion_proof` and fails before training otherwise.
+The runtime loader independently requires aligned per-flow `teacher_counts`
+and `oof_teacher_counts`; a file-level OOF boolean without equal per-flow
+counts, or without the multi-teacher proof flag, cannot pass the strict gate.
 This is currently Flow-side research infrastructure, not an active unified
 module. Promotion requires the analogous Packet student protocol plus matched
 VPN/TLS Packet/Flow ablations; until then the frozen strict-v2 method keeps

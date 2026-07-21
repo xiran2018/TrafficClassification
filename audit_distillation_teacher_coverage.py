@@ -42,7 +42,9 @@ def teacher_contract(
     flow_ids = [str(fid) for fid in teacher.get("flow_ids", [])]
     multiplicity = teacher.get("teacher_multiplicity")
     counts: list[int] = []
+    oof_counts: list[int] = []
     aligned = False
+    oof_aligned = False
     if isinstance(multiplicity, dict):
         count_ids = [str(fid) for fid in multiplicity.get("flow_ids", [])]
         raw_counts = multiplicity.get("teacher_counts", [])
@@ -51,9 +53,32 @@ def teacher_contract(
             if set(count_by_id) == set(flow_ids):
                 counts = [count_by_id[fid] for fid in flow_ids]
                 aligned = True
+                raw_oof_counts = multiplicity.get("oof_teacher_counts", [])
+                if len(raw_oof_counts) == len(count_ids):
+                    oof_by_id = {
+                        fid: int(count)
+                        for fid, count in zip(count_ids, raw_oof_counts)
+                    }
+                    oof_counts = [oof_by_id[fid] for fid in flow_ids]
+                    oof_aligned = True
     count_pass = bool(aligned and counts and min(counts) >= int(min_teachers_per_flow))
     oof_proven = bool(
         isinstance(multiplicity, dict) and multiplicity.get("oof_exclusion_proven") is True
+    )
+    all_contributors_oof = bool(
+        aligned
+        and oof_aligned
+        and counts
+        and all(oof == count for oof, count in zip(oof_counts, counts))
+    )
+    multi_teacher_oof = bool(
+        isinstance(multiplicity, dict)
+        and multiplicity.get("oof_multi_teacher_consensus_proven") is True
+    )
+    strict_oof_pass = bool(
+        oof_proven
+        and all_contributors_oof
+        and (min_teachers_per_flow <= 1 or multi_teacher_oof)
     )
     return {
         "multiplicity_available_and_aligned": aligned,
@@ -62,10 +87,14 @@ def teacher_contract(
         "mean_teacher_count": (sum(counts) / len(counts)) if counts else None,
         "required_min_teachers_per_flow": int(min_teachers_per_flow),
         "passes_teacher_count": count_pass,
+        "oof_counts_available_and_aligned": oof_aligned,
+        "minimum_oof_teacher_count": min(oof_counts) if oof_counts else None,
+        "all_contributing_teachers_oof": all_contributors_oof,
         "oof_exclusion_proven": oof_proven,
+        "oof_multi_teacher_consensus_proven": multi_teacher_oof,
         "require_oof_exclusion_proof": bool(require_oof_exclusion_proof),
-        "passes_oof_exclusion": oof_proven or not require_oof_exclusion_proof,
-        "passes": count_pass and (oof_proven or not require_oof_exclusion_proof),
+        "passes_oof_exclusion": strict_oof_pass or not require_oof_exclusion_proof,
+        "passes": count_pass and (strict_oof_pass or not require_oof_exclusion_proof),
     }
 
 

@@ -391,6 +391,8 @@ def distillation_teacher_counts(
     if min_teachers_per_flow <= 0:
         raise ValueError("distill_min_teachers_per_flow must be positive")
     flow_ids = [str(fid) for fid in data.get("flow_ids", [])]
+    if len(set(flow_ids)) != len(flow_ids):
+        raise ValueError(f"{path} has duplicate distillation flow IDs")
     multiplicity = data.get("teacher_multiplicity")
     contract_required = min_teachers_per_flow > 1 or require_oof_exclusion_proof
     if not isinstance(multiplicity, dict):
@@ -404,8 +406,24 @@ def distillation_teacher_counts(
     counts = {fid: int(count) for fid, count in zip(count_ids, raw_counts)}
     if set(counts) != set(flow_ids):
         raise ValueError(f"{path} teacher_multiplicity flow IDs do not match target flow IDs")
-    if require_oof_exclusion_proof and multiplicity.get("oof_exclusion_proven") is not True:
-        raise ValueError(f"{path} does not prove per-flow OOF teacher exclusion")
+    if any(count <= 0 for count in counts.values()):
+        raise ValueError(f"{path} has non-positive teacher multiplicity")
+    if require_oof_exclusion_proof:
+        if multiplicity.get("oof_exclusion_proven") is not True:
+            raise ValueError(f"{path} does not prove per-flow OOF teacher exclusion")
+        raw_oof_counts = multiplicity.get("oof_teacher_counts", [])
+        if len(raw_oof_counts) != len(count_ids):
+            raise ValueError(f"{path} lacks aligned per-flow OOF teacher counts")
+        oof_counts = {
+            fid: int(count) for fid, count in zip(count_ids, raw_oof_counts)
+        }
+        if any(oof_counts[fid] != counts[fid] for fid in counts):
+            raise ValueError(f"{path} has unproven contributing teachers")
+        if (
+            min_teachers_per_flow > 1
+            and multiplicity.get("oof_multi_teacher_consensus_proven") is not True
+        ):
+            raise ValueError(f"{path} does not prove multi-teacher OOF consensus")
     return counts
 
 

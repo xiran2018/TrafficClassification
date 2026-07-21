@@ -75,6 +75,24 @@ def test_multi_teacher_still_fails_when_oof_exclusion_is_unproven():
     assert strict["passes"] is False
 
 
+def test_oof_boolean_without_aligned_per_flow_counts_fails_strict_contract():
+    teacher = {
+        "flow_ids": ["a", "b"],
+        "teacher_multiplicity": {
+            "flow_ids": ["a", "b"],
+            "teacher_counts": [2, 2],
+            "oof_exclusion_proven": True,
+            "oof_multi_teacher_consensus_proven": True,
+        },
+    }
+
+    contract = teacher_contract(teacher, 2, require_oof_exclusion_proof=True)
+
+    assert contract["oof_counts_available_and_aligned"] is False
+    assert contract["passes_oof_exclusion"] is False
+    assert contract["passes"] is False
+
+
 def test_legacy_teacher_without_multiplicity_cannot_pass_teacher_count_gate():
     contract = teacher_contract(
         {"flow_ids": ["a"]}, 1, require_oof_exclusion_proof=False
@@ -129,6 +147,53 @@ def test_train_loader_filters_by_aligned_teacher_count(tmp_path):
             min_teachers_per_flow=2,
             require_oof_exclusion_proof=True,
         )
+
+
+def test_train_loader_requires_every_contributing_teacher_to_be_oof(tmp_path):
+    path = tmp_path / "teacher.json"
+    write_teacher(
+        path,
+        {
+            "flow_ids": ["a", "b"],
+            "teacher_counts": [2, 2],
+            "oof_teacher_counts": [2, 1],
+            "oof_exclusion_proven": True,
+            "oof_multi_teacher_consensus_proven": True,
+        },
+    )
+
+    with pytest.raises(ValueError, match="unproven contributing teachers"):
+        load_distillation_targets(
+            str(path),
+            2,
+            "cpu",
+            min_teachers_per_flow=2,
+            require_oof_exclusion_proof=True,
+        )
+
+
+def test_train_loader_accepts_aligned_multi_teacher_oof_contract(tmp_path):
+    path = tmp_path / "teacher.json"
+    write_teacher(
+        path,
+        {
+            "flow_ids": ["b", "a"],
+            "teacher_counts": [2, 3],
+            "oof_teacher_counts": [2, 3],
+            "oof_exclusion_proven": True,
+            "oof_multi_teacher_consensus_proven": True,
+        },
+    )
+
+    targets = load_distillation_targets(
+        str(path),
+        2,
+        "cpu",
+        min_teachers_per_flow=2,
+        require_oof_exclusion_proof=True,
+    )
+
+    assert set(targets) == {"a", "b"}
 
 
 def test_distillation_teacher_confidence_soft_cap_preserves_probability_rows():
