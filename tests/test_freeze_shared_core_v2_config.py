@@ -215,6 +215,39 @@ def test_freeze_promotes_paired_invariance_only_when_both_datasets_pass(tmp_path
     assert frozen["tower1"]["class_weight_basis"] == "packet"
     assert frozen["tower1"]["paired_consistency_weight"] == 0.05
     assert frozen["tower1"]["paired_cls_weight"] == 0.2
+    assert frozen["selection_evidence"]["paired_invariance"][
+        "factorial_config_integrity"
+    ]["status"] == "pass"
+
+
+def test_freeze_rejects_hidden_paired_training_factor(tmp_path):
+    balance = report(tmp_path, "balance_hidden_paired", "baseline")
+    paired = bind_paired_baseline(
+        report(
+            tmp_path,
+            "paired_hidden_factor",
+            "candidate",
+            screen="paired",
+            paired_basis="packet",
+        ),
+        balance,
+    )
+    row = paired["training_completion_evidence"]["candidate"]["datasets"][
+        "tls-120"
+    ]
+    provenance = Path(row["provenance_path"])
+    contract = json.loads(provenance.read_text(encoding="utf-8"))
+    contract["training_config"]["lr"] = 2e-5
+    provenance.write_text(json.dumps(contract), encoding="utf-8")
+    row["provenance_sha256"] = hashlib.sha256(provenance.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="declared intervention factors"):
+        freeze_config(
+            balance,
+            paired,
+            balance_path=write_report(tmp_path / "balance_hidden.json", balance),
+            paired_path=write_report(tmp_path / "paired_hidden.json", paired),
+        )
 
 
 def test_freeze_supports_preregistered_full_flow_correction(tmp_path):

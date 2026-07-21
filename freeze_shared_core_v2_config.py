@@ -11,6 +11,11 @@ from typing import Any
 
 
 REQUIRED_DATASETS = {"vpn-app", "tls-120"}
+PAIRED_FACTORIAL_FIELDS = {
+    "paired_packet_aux_jsonl",
+    "paired_consistency_weight",
+    "paired_cls_weight",
+}
 SELECTION_SCOPE = "heldout_validation_only"
 SELECTION_METRIC = "macro_f1_with_accuracy_guard"
 MIN_MACRO_F1_DELTA = 0.005
@@ -200,6 +205,41 @@ def require_config(
             )
 
 
+def paired_factorial_integrity(
+    paired_report: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify that paired A/B differs only by its declared intervention factors."""
+    completion = paired_report["training_completion_evidence"]
+    evidence: dict[str, Any] = {}
+    passed = True
+    missing = object()
+    for dataset in sorted(REQUIRED_DATASETS):
+        baseline = training_config(
+            completion["baseline"]["datasets"][dataset],
+            f"paired baseline {dataset}",
+        )
+        candidate = training_config(
+            completion["candidate"]["datasets"][dataset],
+            f"paired candidate {dataset}",
+        )
+        keys = sorted((set(baseline) | set(candidate)) - PAIRED_FACTORIAL_FIELDS)
+        mismatched = [
+            key
+            for key in keys
+            if baseline.get(key, missing) != candidate.get(key, missing)
+        ]
+        dataset_passed = not mismatched
+        passed = passed and dataset_passed
+        evidence[dataset] = {
+            "status": "pass" if dataset_passed else "fail",
+            "mismatched_fields": mismatched,
+        }
+    return {
+        "required": True,
+        "status": "pass" if passed else "fail",
+        "declared_factorial_fields": sorted(PAIRED_FACTORIAL_FIELDS),
+        "datasets": evidence,
+    }
 def selected_class_weight_config(balance_report: dict[str, Any]) -> dict[str, Any]:
     selected_role = balance_report["selected"]
     rows = balance_report["training_completion_evidence"][selected_role]["datasets"]
@@ -250,7 +290,7 @@ def selected_class_weight_config(balance_report: dict[str, Any]) -> dict[str, An
 
 def validate_experiment_chain(
     balance_report: dict[str, Any], paired_report: dict[str, Any]
-) -> None:
+) -> dict[str, Any]:
     common = {
         "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
         "class_weighting": "effective",
@@ -342,6 +382,12 @@ def validate_experiment_chain(
             raise ValueError(
                 f"paired candidate {dataset} has no paired intervention input"
             )
+    factorial_integrity = paired_factorial_integrity(paired_report)
+    if factorial_integrity["status"] != "pass":
+        raise ValueError(
+            "paired A/B differs outside the declared intervention factors"
+        )
+    return factorial_integrity
 
 
 def freeze_config(
@@ -353,7 +399,7 @@ def freeze_config(
 ) -> dict[str, Any]:
     validate_selection(balance_report, "balance selection")
     validate_selection(paired_report, "paired selection")
-    validate_experiment_chain(balance_report, paired_report)
+    paired_factorial = validate_experiment_chain(balance_report, paired_report)
 
     selected_weight = selected_class_weight_config(balance_report)
     use_paired_invariance = paired_report["selected"] == "candidate"
@@ -493,6 +539,7 @@ def freeze_config(
                 "sha256": file_sha256(paired_path),
                 "selected": paired_report["selected"],
                 "datasets": paired_report["datasets"],
+                "factorial_config_integrity": paired_factorial,
             },
         },
     }
