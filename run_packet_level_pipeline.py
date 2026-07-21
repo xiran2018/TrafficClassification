@@ -916,6 +916,13 @@ def main() -> None:
         if args.framework_profile != "paper_unified":
             ap.error("--shared_core_config requires --framework_profile paper_unified")
         frozen = load_frozen_shared_core(args.shared_core_config)
+        if not (frozen.get("selection_protocol") or {}).get(
+            "test_evaluation_allowed", True
+        ):
+            ap.error(
+                "provisional shared-core config is restricted to Flow validation "
+                "and cannot run the Packet pipeline"
+            )
         args.shared_core_overrides = apply_frozen_shared_core(
             args,
             "packet-level",

@@ -2024,6 +2024,20 @@ def main() -> None:
         if args.framework_profile != "paper_unified":
             ap.error("--shared_core_config requires --framework_profile paper_unified")
         frozen = load_frozen_shared_core(args.shared_core_config)
+        if not (frozen.get("selection_protocol") or {}).get(
+            "test_evaluation_allowed", True
+        ):
+            requested = {
+                item.strip()
+                for raw in (args.splits, args.eval_splits)
+                for item in raw.split(",")
+                if item.strip()
+            }
+            if "test" in requested:
+                ap.error(
+                    "provisional shared-core config forbids test; use "
+                    "--splits train,valid --eval_splits valid"
+                )
         args.shared_core_overrides = apply_frozen_shared_core(
             args,
             "flow-level",

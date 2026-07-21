@@ -37,6 +37,7 @@ def finalize(tmp_path, d1, incremental=None, overall=None):
     base = {
         "schema": "exact_shared_packet_core_v2",
         "status": "frozen_from_cross_dataset_validation",
+        "selection_protocol": {"test_labels_used": False},
         "tower1": {},
         "task_contract": {},
     }
@@ -57,6 +58,23 @@ def finalize(tmp_path, d1, incremental=None, overall=None):
         d2_overall=overall,
         d2_overall_path=overall_path,
     )
+
+
+def flow_gate(selected="candidate"):
+    promoted = selected == "candidate"
+    return {
+        "schema": "flow_noninferiority_selection_v1",
+        "selection_scope": "heldout_validation_only",
+        "thresholds": {
+            "macro_f1_max_drop": 0.003,
+            "accuracy_max_drop": 0.003,
+        },
+        "datasets": {
+            name: {"passes": promoted} for name in ("vpn-app", "tls-120")
+        },
+        "selected": selected,
+        "test_labels_used": False,
+    }
 
 
 def assert_fingerprint(payload):
@@ -90,6 +108,10 @@ def test_d1_success_d2_failure_freezes_identity_safe_only(tmp_path):
     assert payload["method_selection"]["selected_method"] == "identity_safe_contrastive"
     assert payload["tower1"]["identity_safe_contrastive"] is True
     assert payload["tower1"]["cross_scale_weight"] == 0.0
+    assert payload["method_selection"]["decision_status"] == (
+        "packet_selected_pending_flow_noninferiority"
+    )
+    assert payload["selection_protocol"]["test_evaluation_allowed"] is False
     assert_fingerprint(payload)
 
 
@@ -108,6 +130,47 @@ def test_both_d2_gates_freeze_cross_scale_for_packet_and_flow(tmp_path):
         "availability_aware_cross_scale": True,
     }
     assert_fingerprint(payload)
+
+
+def test_flow_gate_promotes_or_rolls_back_packet_selected_candidate(tmp_path):
+    d1 = selection("candidate", 0.005)
+    incremental = selection("candidate", 0.002)
+    overall = selection("candidate", 0.005)
+    provisional = finalize(tmp_path, d1, incremental, overall)
+
+    gate_path = write(tmp_path / "flow_gate.json", flow_gate("candidate"))
+    promoted = freeze_method_config(
+        provisional,
+        base_path=write(tmp_path / "provisional.json", provisional),
+        d1=d1,
+        d1_path=tmp_path / "d1.json",
+        d2_incremental=incremental,
+        d2_incremental_path=tmp_path / "incremental.json",
+        d2_overall=overall,
+        d2_overall_path=tmp_path / "overall.json",
+        flow_noninferiority=flow_gate("candidate"),
+        flow_noninferiority_path=gate_path,
+    )
+    assert promoted["tower1"]["cross_scale_weight"] == 0.05
+    assert promoted["selection_protocol"]["test_evaluation_allowed"] is True
+
+    rejected_gate_path = write(tmp_path / "flow_gate_rejected.json", flow_gate("baseline"))
+    rejected = freeze_method_config(
+        provisional,
+        base_path=tmp_path / "provisional.json",
+        d1=d1,
+        d1_path=tmp_path / "d1.json",
+        d2_incremental=incremental,
+        d2_incremental_path=tmp_path / "incremental.json",
+        d2_overall=overall,
+        d2_overall_path=tmp_path / "overall.json",
+        flow_noninferiority=flow_gate("baseline"),
+        flow_noninferiority_path=rejected_gate_path,
+    )
+    assert rejected["method_selection"]["selected_method"] == "shared_core_v2_control"
+    assert rejected["tower1"]["identity_safe_contrastive"] is False
+    assert rejected["tower1"]["cross_scale_weight"] == 0.0
+    assert rejected["selection_protocol"]["test_evaluation_allowed"] is True
 
 
 def test_promoted_d1_requires_complete_d2_decision(tmp_path):

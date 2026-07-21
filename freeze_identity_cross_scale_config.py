@@ -61,6 +61,27 @@ def evidence(path: Path, report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def validate_flow_noninferiority(report: dict[str, Any]) -> None:
+    if report.get("schema") != "flow_noninferiority_selection_v1":
+        raise ValueError("flow gate has the wrong schema")
+    if report.get("selection_scope") != "heldout_validation_only":
+        raise ValueError("flow gate must use heldout validation only")
+    if set((report.get("datasets") or {}).keys()) != REQUIRED_DATASETS:
+        raise ValueError("flow gate must contain exactly VPN and TLS-120")
+    thresholds = report.get("thresholds") or {}
+    if not math.isclose(
+        float(thresholds.get("macro_f1_max_drop", -1)), 0.003, abs_tol=1e-12
+    ) or not math.isclose(
+        float(thresholds.get("accuracy_max_drop", -1)), 0.003, abs_tol=1e-12
+    ):
+        raise ValueError("flow gate does not match preregistered thresholds")
+    promoted = all(bool(row.get("passes")) for row in report["datasets"].values())
+    if report.get("selected") != ("candidate" if promoted else "baseline"):
+        raise ValueError("flow gate selected arm disagrees with dataset gates")
+    if report.get("test_labels_used") is not False:
+        raise ValueError("flow gate must explicitly exclude test labels")
+
+
 def freeze_method_config(
     base: dict[str, Any],
     *,
@@ -71,6 +92,8 @@ def freeze_method_config(
     d2_incremental_path: Path | None = None,
     d2_overall: dict[str, Any] | None = None,
     d2_overall_path: Path | None = None,
+    flow_noninferiority: dict[str, Any] | None = None,
+    flow_noninferiority_path: Path | None = None,
 ) -> dict[str, Any]:
     validate_selection(d1, name="D1 identity-safe", min_delta=0.005)
     identity_safe = d1["selected"] == "candidate"
@@ -108,6 +131,25 @@ def freeze_method_config(
     ):
         raise ValueError("D2 evidence is forbidden when D1 was not promoted")
 
+    packet_selected_identity_safe = identity_safe
+    packet_selected_cross_scale = cross_scale
+    flow_gate_passed: bool | None = None
+    if identity_safe and flow_noninferiority is not None:
+        if flow_noninferiority_path is None:
+            raise ValueError("flow gate report path is required")
+        validate_flow_noninferiority(flow_noninferiority)
+        flow_gate_passed = flow_noninferiority["selected"] == "candidate"
+        if not flow_gate_passed:
+            identity_safe = False
+            cross_scale = False
+    elif identity_safe and flow_noninferiority_path is not None:
+        raise ValueError("flow gate report content is required")
+    elif not identity_safe and (
+        flow_noninferiority is not None or flow_noninferiority_path is not None
+    ):
+        raise ValueError("flow gate is not applicable when Packet D1 failed")
+
+    provisional = bool(packet_selected_identity_safe and flow_gate_passed is None)
     payload = deepcopy(base)
     base_fingerprint = str(payload.pop("config_sha256"))
     tower1 = payload["tower1"]
@@ -116,6 +158,11 @@ def freeze_method_config(
     tower1["cross_scale_temperature"] = 0.07
     payload["method_selection"] = {
         "scope": "fold0_validation_only_before_test",
+        "decision_status": (
+            "packet_selected_pending_flow_noninferiority"
+            if provisional
+            else "final_after_packet_and_flow_validation"
+        ),
         "selected_method": (
             "availability_aware_cross_scale"
             if cross_scale
@@ -125,24 +172,35 @@ def freeze_method_config(
         ),
         "identity_safe_contrastive": identity_safe,
         "availability_aware_cross_scale": cross_scale,
+        "packet_selected_identity_safe_contrastive": packet_selected_identity_safe,
+        "packet_selected_availability_aware_cross_scale": packet_selected_cross_scale,
+        "flow_noninferiority_passed": flow_gate_passed,
         "base_shared_core_config": {
             "path": str(base_path.resolve()),
             "sha256": file_sha256(base_path),
             "config_sha256": base_fingerprint,
         },
         "d1": evidence(d1_path, d1),
-        "d2_incremental": (
-            evidence(d2_incremental_path, d2_incremental)
-            if identity_safe and d2_incremental_path and d2_incremental
-            else None
-        ),
-        "d2_overall": (
-            evidence(d2_overall_path, d2_overall)
-            if identity_safe and d2_overall_path and d2_overall
+            "d2_incremental": (
+                evidence(d2_incremental_path, d2_incremental)
+                if packet_selected_identity_safe
+                and d2_incremental_path
+                and d2_incremental
+                else None
+            ),
+            "d2_overall": (
+                evidence(d2_overall_path, d2_overall)
+                if packet_selected_identity_safe and d2_overall_path and d2_overall
+                else None
+            ),
+        "flow_noninferiority": (
+            evidence(flow_noninferiority_path, flow_noninferiority)
+            if flow_noninferiority_path and flow_noninferiority
             else None
         ),
         "test_labels_used": False,
     }
+    payload["selection_protocol"]["test_evaluation_allowed"] = not provisional
     payload["task_contract"]["objective_activation_topology_must_match"] = True
     payload["task_contract"]["selected_tower1_objectives"] = {
         "identity_safe_contrastive": identity_safe,
@@ -162,6 +220,7 @@ def main() -> None:
     parser.add_argument("--d1_selection", required=True)
     parser.add_argument("--d2_incremental_selection", default="")
     parser.add_argument("--d2_overall_selection", default="")
+    parser.add_argument("--flow_noninferiority_selection", default="")
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
@@ -175,6 +234,11 @@ def main() -> None:
     d2_overall_path = (
         Path(args.d2_overall_selection) if args.d2_overall_selection else None
     )
+    flow_path = (
+        Path(args.flow_noninferiority_selection)
+        if args.flow_noninferiority_selection
+        else None
+    )
     payload = freeze_method_config(
         load_frozen_shared_core(base_path),
         base_path=base_path,
@@ -186,6 +250,8 @@ def main() -> None:
         d2_incremental_path=d2_incremental_path,
         d2_overall=load_json(d2_overall_path) if d2_overall_path else None,
         d2_overall_path=d2_overall_path,
+        flow_noninferiority=load_json(flow_path) if flow_path else None,
+        flow_noninferiority_path=flow_path,
     )
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)
