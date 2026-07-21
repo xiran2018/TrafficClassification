@@ -172,10 +172,14 @@ Flow manifests) and does not wait for the four-dataset Packet applicability
 gate. These two results are explicitly a development benchmark. The later
 scope gate and full three-fold launch remain separate, so a poor core result is
 detected before spending the complete cross-dataset evaluation budget.
+`summarize_milestone_benchmark.py` then verifies both cross-task audits,
+configuration and source fingerprints, and writes the consolidated report to
+`milestone_dev_shared_core_v2/milestone_development_benchmark.json`; the report
+sets `unbiased_final_claim_allowed=false` by construction.
 
-Before the full benchmark Test is released, the four Packet application datasets that
-do not participate in VPN/TLS method selection run one locked-Test fold-0
-applicability screen with the already frozen method:
+Before the full benchmark Test is released, the four Packet application
+datasets that do not participate in VPN/TLS method selection run one
+locked-Test fold-0 applicability screen with the already frozen method:
 
 ```text
 vpn-binary, vpn-service, ustc-app, ustc-binary

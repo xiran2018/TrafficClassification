@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Audit and summarize a frozen-method development Test milestone."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+
+DATASETS = ("vpn-app", "tls-120")
+TAG = "milestone_dev_fold0"
+
+
+def load_json(path: str | Path) -> dict[str, Any]:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def manifest_notes(manifest: dict[str, Any]) -> dict[str, Any]:
+    notes = (manifest.get("framework") or {}).get("notes") or {}
+    if not isinstance(notes, dict):
+        raise ValueError("manifest framework.notes must be an object")
+    return notes
+
+
+def result_path(manifest: dict[str, Any], needle: str) -> Path:
+    matches = [
+        Path(str(path))
+        for path in manifest_notes(manifest).get("result_paths") or []
+        if needle in str(path) and str(path).endswith(".json")
+    ]
+    if len(matches) != 1 or not matches[0].is_file():
+        raise ValueError(f"expected one existing result containing {needle!r}: {matches}")
+    return matches[0].resolve()
+
+
+def metric_summary(payload: dict[str, Any], task: str) -> dict[str, Any]:
+    metrics = payload.get("metrics") or {}
+    if task == "flow":
+        metrics = metrics.get("flow_level") or {}
+    return {
+        "num_samples": int(metrics["num_samples"]),
+        "accuracy": float(metrics["accuracy"]),
+        "macro_f1": float(metrics["macro_f1"]),
+    }
+
+
+def require_stable_source(manifest: dict[str, Any], path: Path) -> str:
+    evidence = manifest_notes(manifest).get("algorithm_source_evidence") or {}
+    launch = str(evidence.get("launch_fingerprint") or "")
+    if not (
+        evidence.get("status") == "pass"
+        and len(launch) == 64
+        and evidence.get("completion_fingerprint") == launch
+        and evidence.get("changed_paths") == []
+    ):
+        raise ValueError(f"algorithm source stability failed: {path}")
+    return launch
+
+
+def validate_manifest(
+    manifest: dict[str, Any],
+    path: Path,
+    *,
+    dataset: str,
+    task: str,
+    config_sha: str,
+) -> str:
+    framework = manifest.get("framework") or {}
+    notes = manifest_notes(manifest)
+    if not (
+        manifest.get("dataset") == dataset
+        and int(manifest.get("fold", -1)) == 0
+        and framework.get("task") == task
+        and notes.get("completed") is True
+        and notes.get("shared_core_config_sha256") == config_sha
+    ):
+        raise ValueError(f"mismatched or incomplete {task} manifest: {path}")
+    return require_stable_source(manifest, path)
+
+
+def summarize(root: Path, repo: Path, config_path: Path) -> dict[str, Any]:
+    root = root.resolve()
+    repo = repo.resolve()
+    config_path = config_path.resolve()
+    config = load_json(config_path)
+    config_sha = str(config.get("config_sha256") or "")
+    if not (
+        config.get("method_selection", {}).get("decision_status")
+        == "final_after_preregistered_validation"
+        and config.get("selection_protocol", {}).get("test_evaluation_allowed")
+        is True
+        and config.get("method_selection", {}).get("test_labels_used") is False
+        and len(config_sha) == 64
+    ):
+        raise ValueError("method config is not frozen from validation")
+
+    report: dict[str, Any] = {
+        "schema": "unified_milestone_development_benchmark_v1",
+        "status": "pass",
+        "evaluation_role": "development_benchmark_after_validation_freeze",
+        "may_inform_future_method_design": True,
+        "unbiased_final_claim_allowed": False,
+        "test_labels_used_for_frozen_config_selection": False,
+        "required_final_evaluation": (
+            "new_outer_holdout_or_nested_cross_validation_if_feedback_is_used"
+        ),
+        "method_config": {
+            "path": str(config_path),
+            "file_sha256": file_sha256(config_path),
+            "config_sha256": config_sha,
+            "selected_method": config["method_selection"]["selected_method"],
+        },
+        "datasets": {},
+    }
+    source_fingerprints: set[str] = set()
+    for dataset in DATASETS:
+        audit_path = root / "audits" / dataset / "fold0" / "audit.json"
+        audit = load_json(audit_path)
+        if not (
+            audit.get("status") == "pass"
+            and audit.get("dataset") == dataset
+            and int(audit.get("fold", -1)) == 0
+            and audit.get("shared_core_config_sha256") == config_sha
+        ):
+            raise ValueError(f"cross-task audit failed or mismatched: {audit_path}")
+
+        packet_manifest_path = (
+            root / "packet_artifacts" / dataset / "fold0" / "packet_framework_manifest.json"
+        )
+        packet_manifest = load_json(packet_manifest_path)
+        flow_matches = list(
+            (repo / "reasoningDataset" / dataset).glob(
+                f"stage8_flowaware_manifest_*{TAG}*.json"
+            )
+        )
+        if len(flow_matches) != 1:
+            raise ValueError(f"expected one milestone Flow manifest: {flow_matches}")
+        flow_manifest_path = flow_matches[0].resolve()
+        flow_manifest = load_json(flow_manifest_path)
+        source_fingerprints.add(
+            validate_manifest(
+                packet_manifest,
+                packet_manifest_path,
+                dataset=dataset,
+                task="packet-level",
+                config_sha=config_sha,
+            )
+        )
+        source_fingerprints.add(
+            validate_manifest(
+                flow_manifest,
+                flow_manifest_path,
+                dataset=dataset,
+                task="flow-level",
+                config_sha=config_sha,
+            )
+        )
+
+        packet_result = result_path(packet_manifest, "test_unified_packet_single_head")
+        flow_result = result_path(flow_manifest, "test_seq_metrics")
+        report["datasets"][dataset] = {
+            "packet": {
+                "metrics": metric_summary(load_json(packet_result), "packet"),
+                "result": str(packet_result),
+                "result_sha256": file_sha256(packet_result),
+            },
+            "flow": {
+                "metrics": metric_summary(load_json(flow_result), "flow"),
+                "result": str(flow_result),
+                "result_sha256": file_sha256(flow_result),
+            },
+            "cross_task_audit": {
+                "path": str(audit_path.resolve()),
+                "sha256": file_sha256(audit_path),
+            },
+        }
+    if len(source_fingerprints) != 1:
+        raise ValueError(
+            f"Packet/Flow algorithm source fingerprints differ: {sorted(source_fingerprints)}"
+        )
+    report["algorithm_source_fingerprint"] = next(iter(source_fingerprints))
+    return report
+
+
+def markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# Unified Milestone Development Benchmark",
+        "",
+        "These Test results were produced after validation freeze, but may guide later method development. They are not an unbiased final paper claim.",
+        "",
+        "| Dataset | Task | Samples | Accuracy | Macro-F1 |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for dataset in DATASETS:
+        for task in ("packet", "flow"):
+            metrics = report["datasets"][dataset][task]["metrics"]
+            lines.append(
+                f"| {dataset} | {task} | {metrics['num_samples']} | "
+                f"{metrics['accuracy'] * 100:.2f}% | "
+                f"{metrics['macro_f1'] * 100:.2f}% |"
+            )
+    lines.extend(
+        [
+            "",
+            "If these results influence any later design decision, the final paper evaluation must use a new outer holdout or nested cross-validation.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", required=True)
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--output_json", required=True)
+    parser.add_argument("--output_md", required=True)
+    args = parser.parse_args()
+    report = summarize(Path(args.root), Path(args.repo), Path(args.config))
+    output_json = Path(args.output_json)
+    output_md = Path(args.output_md)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    output_md.write_text(markdown(report), encoding="utf-8")
+    print(json.dumps({"status": "pass", "output_json": str(output_json)}))
+
+
+if __name__ == "__main__":
+    main()
