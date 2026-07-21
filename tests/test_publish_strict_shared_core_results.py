@@ -742,6 +742,46 @@ def test_archive_includes_bounded_hierarchy_upstream_evidence(tmp_path):
         "path": str(flow_derivation_path),
         "sha256": file_sha256(flow_derivation_path),
     }
+    packet_dataset_names = {
+        "vpn-app",
+        "vpn-binary",
+        "vpn-service",
+        "tls-120",
+        "ustc-app",
+        "ustc-binary",
+    }
+    packet_datasets = {}
+    for dataset in packet_dataset_names:
+        source_path = write_json(
+            tmp_path / f"packet_hierarchy_source_{dataset}.json",
+            {
+                "schema": "class_sampling_hierarchy_analysis_v1",
+                "selection_role": "train_only_reporting_not_model_selection",
+                "test_labels_used": False,
+            },
+        )
+        packet_datasets[dataset] = {
+            "input": {
+                "path": str(source_path),
+                "sha256": file_sha256(source_path),
+            }
+        }
+    packet_derivation_path = write_json(
+        tmp_path / "packet_task_hierarchy_derivation.json",
+        {
+            "schema": "bounded_hierarchy_risk_protocol_v1",
+            "status": "derived_from_training_counts_only",
+            "test_labels_used": False,
+            "shared_algorithm": (
+                "largest_flow_risk_power_subject_to_max_min_ratio"
+            ),
+            "datasets": packet_datasets,
+        },
+    )
+    config["selection_evidence"]["packet_task_hierarchy_derivation"] = {
+        "path": str(packet_derivation_path),
+        "sha256": file_sha256(packet_derivation_path),
+    }
     config.pop("config_sha256")
     config["config_sha256"] = canonical_sha256(config)
     write_json(config_path, config)
@@ -759,6 +799,11 @@ def test_archive_includes_bounded_hierarchy_upstream_evidence(tmp_path):
         "flow_task_hierarchy_derivation",
         "flow_task_hierarchy_source_vpn-app",
         "flow_task_hierarchy_source_tls-120",
+        "packet_task_hierarchy_derivation",
+        *{
+            f"packet_task_hierarchy_source_{dataset}"
+            for dataset in packet_dataset_names
+        },
     }
     assert expected <= set(evidence)
     assert all(Path(evidence[name]["archived_path"]).is_file() for name in expected)

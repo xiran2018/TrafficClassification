@@ -214,37 +214,64 @@ def archive_frozen_method_evidence(
                     "bounded hierarchy derivation is not bound to preregistration"
                 )
 
-    flow_derivation_evidence = selection.get("flow_task_hierarchy_derivation")
-    if flow_derivation_evidence is not None:
+    task_derivation_specs = {
+        "packet": {
+            "datasets": {
+                "vpn-app",
+                "vpn-binary",
+                "vpn-service",
+                "tls-120",
+                "ustc-app",
+                "ustc-binary",
+            },
+            "title": "Packet-task",
+        },
+        "flow": {
+            "datasets": {"vpn-app", "tls-120"},
+            "title": "Flow-task",
+        },
+    }
+    for task, spec in task_derivation_specs.items():
+        evidence_key = f"{task}_task_hierarchy_derivation"
+        task_derivation_evidence = selection.get(evidence_key)
+        if task_derivation_evidence is None:
+            continue
         if hierarchy_evidence is None:
-            raise ValueError("Flow hierarchy derivation has no hierarchy selection")
+            raise ValueError(
+                f"{spec['title']} hierarchy derivation has no hierarchy selection"
+            )
         hierarchy_payload = load_json(hierarchy_evidence["path"])
         if hierarchy_payload.get("shared_algorithm") != (
             "bounded_effective_flow_class_risk_power_eta"
         ):
-            raise ValueError("Flow hierarchy derivation requires bounded hierarchy")
-        archived["flow_task_hierarchy_derivation"] = archive_hashed_evidence(
-            flow_derivation_evidence,
-            label="Flow-task train-only hierarchy derivation",
-            destination=archive_root / "flow_task_hierarchy_derivation.json",
+            raise ValueError(
+                f"{spec['title']} hierarchy derivation requires bounded hierarchy"
+            )
+        archived[evidence_key] = archive_hashed_evidence(
+            task_derivation_evidence,
+            label=f"{spec['title']} train-only hierarchy derivation",
+            destination=archive_root / f"{task}_task_hierarchy_derivation.json",
         )
-        flow_derivation = load_json(flow_derivation_evidence["path"])
+        task_derivation = load_json(task_derivation_evidence["path"])
         if not (
-            flow_derivation.get("schema") == "bounded_hierarchy_risk_protocol_v1"
-            and flow_derivation.get("status") == "derived_from_training_counts_only"
-            and flow_derivation.get("test_labels_used") is False
-            and flow_derivation.get("shared_algorithm")
+            task_derivation.get("schema") == "bounded_hierarchy_risk_protocol_v1"
+            and task_derivation.get("status")
+            == "derived_from_training_counts_only"
+            and task_derivation.get("test_labels_used") is False
+            and task_derivation.get("shared_algorithm")
             == "largest_flow_risk_power_subject_to_max_min_ratio"
-            and set(flow_derivation.get("datasets") or {}) == {"vpn-app", "tls-120"}
+            and set(task_derivation.get("datasets") or {}) == spec["datasets"]
         ):
-            raise ValueError("Flow hierarchy derivation is not a train-only protocol")
-        for dataset, row in sorted(flow_derivation["datasets"].items()):
-            archived[f"flow_task_hierarchy_source_{dataset}"] = (
+            raise ValueError(
+                f"{spec['title']} hierarchy derivation is not a train-only protocol"
+            )
+        for dataset, row in sorted(task_derivation["datasets"].items()):
+            archived[f"{task}_task_hierarchy_source_{dataset}"] = (
                 archive_hashed_evidence(
                     row.get("input") or {},
-                    label=f"Flow-task hierarchy source {dataset}",
+                    label=f"{spec['title']} hierarchy source {dataset}",
                     destination=archive_root
-                    / f"flow_task_hierarchy_source_{dataset}.json",
+                    / f"{task}_task_hierarchy_source_{dataset}.json",
                 )
             )
 

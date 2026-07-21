@@ -163,7 +163,18 @@ def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
         paired_path=paired_path,
     )
 
-    assert frozen["datasets"] == ["tls-120", "vpn-app"]
+    assert frozen["datasets"] == [
+        "tls-120",
+        "ustc-app",
+        "ustc-binary",
+        "vpn-app",
+        "vpn-binary",
+        "vpn-service",
+    ]
+    assert frozen["task_datasets"] == {
+        "packet-level-classification": frozen["datasets"],
+        "flow-level-classification": ["tls-120", "vpn-app"],
+    }
     assert frozen["tower1"]["class_weight_basis"] == "flow"
     assert frozen["tower1"]["class_weight_strength"] == 0.5
     assert frozen["tower1"]["paired_consistency_weight"] == 0.0
@@ -409,6 +420,37 @@ def test_freeze_accepts_globally_noninferior_bounded_hierarchy_rule(tmp_path):
     flow_derivation_path = write_report(
         tmp_path / "flow_hierarchy_derivation.json", flow_derivation
     )
+    packet_strengths = {
+        "vpn-app": 0.4,
+        "vpn-binary": 1.0,
+        "vpn-service": 0.6,
+        "tls-120": 0.4,
+        "ustc-app": 0.8,
+        "ustc-binary": 1.0,
+    }
+    packet_derivation = deepcopy(flow_derivation)
+    packet_derivation["datasets"] = {}
+    for dataset, strength in packet_strengths.items():
+        source = write_report(
+            tmp_path / f"{dataset}_packet_train_hierarchy.json",
+            {
+                "schema": "class_sampling_hierarchy_analysis_v1",
+                "selection_role": "train_only_reporting_not_model_selection",
+                "test_labels_used": False,
+            },
+        )
+        packet_derivation["datasets"][dataset] = {
+            "class_weight_basis": "flow",
+            "class_weight_strength": strength,
+            "bounded_effective_weight_ratio": 4.0,
+            "input": {
+                "path": str(source.resolve()),
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            },
+        }
+    packet_derivation_path = write_report(
+        tmp_path / "packet_hierarchy_derivation.json", packet_derivation
+    )
 
     frozen = freeze_config(
         balance,
@@ -417,14 +459,19 @@ def test_freeze_accepts_globally_noninferior_bounded_hierarchy_rule(tmp_path):
         paired_path=paired_path,
         hierarchy_report=hierarchy,
         hierarchy_path=hierarchy_path,
+        packet_hierarchy_derivation=packet_derivation,
+        packet_hierarchy_derivation_path=packet_derivation_path,
         flow_hierarchy_derivation=flow_derivation,
         flow_hierarchy_derivation_path=flow_derivation_path,
     )
 
-    for dataset in ("vpn-app", "tls-120"):
+    for dataset in packet_strengths:
         assert frozen["dataset_numeric_hyperparameter_overrides"][
             "packet-level-classification"
-        ][dataset]["class_weight_strength"] == pytest.approx(0.4)
+        ][dataset]["class_weight_strength"] == pytest.approx(
+            packet_strengths[dataset]
+        )
+    for dataset in ("vpn-app", "tls-120"):
         assert frozen["dataset_numeric_hyperparameter_overrides"][
             "flow-level-classification"
         ][dataset]["class_weight_strength"] == pytest.approx(
@@ -433,6 +480,9 @@ def test_freeze_accepts_globally_noninferior_bounded_hierarchy_rule(tmp_path):
     assert frozen["selection_evidence"]["flow_task_hierarchy_derivation"][
         "sha256"
     ] == hashlib.sha256(flow_derivation_path.read_bytes()).hexdigest()
+    assert set(frozen["task_datasets"]["packet-level-classification"]) == set(
+        packet_strengths
+    )
     assert frozen["selection_evidence"]["hierarchy_class_weight"][
         "shared_algorithm"
     ] == "bounded_effective_flow_class_risk_power_eta"

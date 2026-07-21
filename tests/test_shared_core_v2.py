@@ -595,6 +595,49 @@ def test_dataset_numeric_hierarchy_defaults_are_resolved_and_fingerprinted():
     assert packet.class_weight_strength == 0.0
 
 
+def test_task_dataset_contract_covers_six_packet_and_two_flow_datasets(tmp_path):
+    payload = frozen_payload()
+    packet_datasets = {
+        "vpn-app",
+        "vpn-binary",
+        "vpn-service",
+        "tls-120",
+        "ustc-app",
+        "ustc-binary",
+    }
+    flow_datasets = {"vpn-app", "tls-120"}
+    payload["datasets"] = sorted(packet_datasets | flow_datasets)
+    payload["task_datasets"] = {
+        "packet-level-classification": sorted(packet_datasets),
+        "flow-level-classification": sorted(flow_datasets),
+    }
+    payload["selection_protocol"].update(
+        {
+            "selection_datasets": ["tls-120", "vpn-app"],
+            "application_datasets_by_task": payload["task_datasets"],
+        }
+    )
+    payload["dataset_numeric_hyperparameter_overrides"] = {
+        "packet-level-classification": {
+            dataset: {"class_weight_strength": 0.5}
+            for dataset in packet_datasets
+        },
+        "flow-level-classification": {
+            dataset: {"class_weight_strength": 0.75}
+            for dataset in flow_datasets
+        },
+    }
+    unsigned = {key: value for key, value in payload.items() if key != "config_sha256"}
+    payload["config_sha256"] = canonical_sha256(unsigned)
+    loaded = load_frozen_shared_core(write_payload(tmp_path / "six_packet.json", payload))
+
+    assert resolve_dataset_training_hyperparameters(
+        loaded, "packet-level", "vpn-service"
+    ) == {"class_weight_strength": 0.5}
+    with pytest.raises(ValueError, match="outside the flow-level-classification"):
+        resolve_dataset_training_hyperparameters(loaded, "flow-level", "ustc-app")
+
+
 def test_numeric_override_cannot_disable_objective_or_change_architecture():
     payload = frozen_payload()
     packet = packet_args()

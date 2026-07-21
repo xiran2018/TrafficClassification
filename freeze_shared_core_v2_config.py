@@ -10,7 +10,19 @@ from pathlib import Path
 from typing import Any
 
 
-REQUIRED_DATASETS = {"vpn-app", "tls-120"}
+SELECTION_DATASETS = {"vpn-app", "tls-120"}
+PACKET_TASK_DATASETS = {
+    "vpn-app",
+    "vpn-binary",
+    "vpn-service",
+    "tls-120",
+    "ustc-app",
+    "ustc-binary",
+}
+FLOW_TASK_DATASETS = {"vpn-app", "tls-120"}
+METHOD_DATASETS = PACKET_TASK_DATASETS | FLOW_TASK_DATASETS
+# Backward-compatible name for selection-report validators.
+REQUIRED_DATASETS = SELECTION_DATASETS
 PAIRED_FACTORIAL_FIELDS = {
     "paired_packet_aux_jsonl",
     "paired_consistency_weight",
@@ -443,12 +455,14 @@ def validate_hierarchy_selection(
     return output
 
 
-def validate_flow_hierarchy_derivation(
+def validate_task_hierarchy_derivation(
     derivation: dict[str, Any],
     *,
     derivation_path: Path,
+    required_datasets: set[str],
+    task_label: str,
 ) -> dict[str, dict[str, Any]]:
-    """Validate task-specific numeric values derived only from Flow train counts."""
+    """Validate task-specific numeric values derived only from task Train counts."""
     if not (
         derivation.get("schema") == "bounded_hierarchy_risk_protocol_v1"
         and derivation.get("status") == "derived_from_training_counts_only"
@@ -470,10 +484,13 @@ def validate_flow_hierarchy_derivation(
             abs_tol=1e-12,
         )
     ):
-        raise ValueError("invalid Flow-task bounded hierarchy derivation")
+        raise ValueError(f"invalid {task_label} bounded hierarchy derivation")
     datasets = derivation.get("datasets") or {}
-    if set(datasets) != REQUIRED_DATASETS:
-        raise ValueError("Flow hierarchy derivation must cover exactly VPN and TLS-120")
+    if set(datasets) != required_datasets:
+        raise ValueError(
+            f"{task_label} hierarchy derivation must cover exactly "
+            f"{sorted(required_datasets)}"
+        )
     output: dict[str, dict[str, Any]] = {}
     for dataset, row in datasets.items():
         strength = float(row.get("class_weight_strength", -1.0))
@@ -487,7 +504,7 @@ def validate_flow_hierarchy_derivation(
             and source_path.is_file()
             and file_sha256(source_path) == source.get("sha256")
         ):
-            raise ValueError(f"invalid Flow hierarchy derivation for {dataset}")
+            raise ValueError(f"invalid {task_label} hierarchy derivation for {dataset}")
         source_payload = json.loads(source_path.read_text(encoding="utf-8"))
         if not (
             source_payload.get("schema") == "class_sampling_hierarchy_analysis_v1"
@@ -495,13 +512,15 @@ def validate_flow_hierarchy_derivation(
             == "train_only_reporting_not_model_selection"
             and source_payload.get("test_labels_used") is False
         ):
-            raise ValueError(f"Flow hierarchy source is not train-only for {dataset}")
+            raise ValueError(
+                f"{task_label} hierarchy source is not train-only for {dataset}"
+            )
         output[dataset] = {
             "class_weight_basis": "flow",
             "class_weight_strength": strength,
         }
     if not derivation_path.is_file():
-        raise ValueError("Flow hierarchy derivation evidence is missing")
+        raise ValueError(f"{task_label} hierarchy derivation evidence is missing")
     return output
 
 
@@ -629,6 +648,8 @@ def freeze_config(
     paired_path: Path,
     hierarchy_report: dict[str, Any] | None = None,
     hierarchy_path: Path | None = None,
+    packet_hierarchy_derivation: dict[str, Any] | None = None,
+    packet_hierarchy_derivation_path: Path | None = None,
     flow_hierarchy_derivation: dict[str, Any] | None = None,
     flow_hierarchy_derivation_path: Path | None = None,
 ) -> dict[str, Any]:
@@ -644,7 +665,43 @@ def freeze_config(
             hierarchy_path=hierarchy_path,
             balance_path=balance_path,
         )
+        if hierarchy_report.get("shared_algorithm") == (
+            "bounded_effective_flow_class_risk_power_eta"
+        ) and (
+            packet_hierarchy_derivation is None
+            or flow_hierarchy_derivation is None
+        ):
+            raise ValueError(
+                "bounded hierarchy requires Train-only derivations for all Packet "
+                "and Flow task datasets"
+            )
+    packet_hierarchy_weights = hierarchy_weights
     flow_hierarchy_weights = hierarchy_weights
+    if packet_hierarchy_derivation is not None:
+        if hierarchy_report is None or hierarchy_report.get("shared_algorithm") != (
+            "bounded_effective_flow_class_risk_power_eta"
+        ):
+            raise ValueError(
+                "Packet-task bounded derivation requires the promoted bounded hierarchy rule"
+            )
+        if packet_hierarchy_derivation_path is None:
+            raise ValueError("packet_hierarchy_derivation_path is required")
+        packet_hierarchy_weights = validate_task_hierarchy_derivation(
+            packet_hierarchy_derivation,
+            derivation_path=packet_hierarchy_derivation_path,
+            required_datasets=PACKET_TASK_DATASETS,
+            task_label="Packet-task",
+        )
+        for dataset in sorted(SELECTION_DATASETS):
+            if not math.isclose(
+                float(packet_hierarchy_weights[dataset]["class_weight_strength"]),
+                float(hierarchy_weights[dataset]["class_weight_strength"]),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            ):
+                raise ValueError(
+                    f"Packet-task train-only eta disagrees with validated eta for {dataset}"
+                )
     if flow_hierarchy_derivation is not None:
         if hierarchy_report is None or hierarchy_report.get("shared_algorithm") != (
             "bounded_effective_flow_class_risk_power_eta"
@@ -654,9 +711,11 @@ def freeze_config(
             )
         if flow_hierarchy_derivation_path is None:
             raise ValueError("flow_hierarchy_derivation_path is required")
-        flow_hierarchy_weights = validate_flow_hierarchy_derivation(
+        flow_hierarchy_weights = validate_task_hierarchy_derivation(
             flow_hierarchy_derivation,
             derivation_path=flow_hierarchy_derivation_path,
+            required_datasets=FLOW_TASK_DATASETS,
+            task_label="Flow-task",
         )
     paired_factorial = validate_experiment_chain(
         balance_report, paired_report, hierarchy_weights
@@ -716,10 +775,19 @@ def freeze_config(
     payload: dict[str, Any] = {
         "schema": "exact_shared_packet_core_v2",
         "status": "frozen_from_cross_dataset_validation",
-        "datasets": sorted(REQUIRED_DATASETS),
+        "datasets": sorted(METHOD_DATASETS),
+        "task_datasets": {
+            "packet-level-classification": sorted(PACKET_TASK_DATASETS),
+            "flow-level-classification": sorted(FLOW_TASK_DATASETS),
+        },
         "tasks": ["packet-level-classification", "flow-level-classification"],
         "selection_protocol": {
             "scope": SELECTION_SCOPE,
+            "selection_datasets": sorted(SELECTION_DATASETS),
+            "application_datasets_by_task": {
+                "packet-level-classification": sorted(PACKET_TASK_DATASETS),
+                "flow-level-classification": sorted(FLOW_TASK_DATASETS),
+            },
             "metric": SELECTION_METRIC,
             "min_macro_f1_delta": MIN_MACRO_F1_DELTA,
             "max_accuracy_drop": MAX_ACCURACY_DROP,
@@ -781,7 +849,7 @@ def freeze_config(
                     dataset: {
                         "class_weight_strength": row["class_weight_strength"]
                     }
-                    for dataset, row in sorted(hierarchy_weights.items())
+                    for dataset, row in sorted(packet_hierarchy_weights.items())
                 },
                 "flow-level-classification": {
                     dataset: {
@@ -836,6 +904,17 @@ def freeze_config(
             "datasets": hierarchy_report["datasets"],
         }
     if (
+        packet_hierarchy_derivation is not None
+        and packet_hierarchy_derivation_path is not None
+    ):
+        payload["selection_evidence"]["packet_task_hierarchy_derivation"] = {
+            "path": str(packet_hierarchy_derivation_path),
+            "sha256": file_sha256(packet_hierarchy_derivation_path),
+            "shared_algorithm": packet_hierarchy_derivation["shared_algorithm"],
+            "datasets": packet_hierarchy_derivation["datasets"],
+            "test_labels_used": False,
+        }
+    if (
         flow_hierarchy_derivation is not None
         and flow_hierarchy_derivation_path is not None
     ):
@@ -855,6 +934,7 @@ def main() -> None:
     parser.add_argument("--balance_selection", required=True)
     parser.add_argument("--paired_selection", required=True)
     parser.add_argument("--hierarchy_selection", default="")
+    parser.add_argument("--packet_hierarchy_derivation", default="")
     parser.add_argument("--flow_hierarchy_derivation", default="")
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
@@ -879,6 +959,16 @@ def main() -> None:
         if flow_derivation_path is not None
         else None
     )
+    packet_derivation_path = (
+        Path(args.packet_hierarchy_derivation)
+        if args.packet_hierarchy_derivation
+        else None
+    )
+    packet_derivation = (
+        json.loads(packet_derivation_path.read_text(encoding="utf-8"))
+        if packet_derivation_path is not None
+        else None
+    )
     payload = freeze_config(
         balance,
         paired,
@@ -886,6 +976,8 @@ def main() -> None:
         paired_path=paired_path,
         hierarchy_report=hierarchy,
         hierarchy_path=hierarchy_path,
+        packet_hierarchy_derivation=packet_derivation,
+        packet_hierarchy_derivation_path=packet_derivation_path,
         flow_hierarchy_derivation=flow_derivation,
         flow_hierarchy_derivation_path=flow_derivation_path,
     )

@@ -5,7 +5,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from freeze_shared_core_v2_config import REQUIRED_DATASETS, canonical_sha256
+from freeze_shared_core_v2_config import (
+    FLOW_TASK_DATASETS,
+    METHOD_DATASETS,
+    PACKET_TASK_DATASETS,
+    REQUIRED_DATASETS,
+    canonical_sha256,
+)
 
 
 SCHEMA = "exact_shared_packet_core_v2"
@@ -270,6 +276,11 @@ def resolve_dataset_training_hyperparameters(
     }.get(task)
     if task_key is None:
         raise ValueError(f"unsupported shared-core task: {task}")
+    declared_task_datasets = payload.get("task_datasets") or {}
+    if declared_task_datasets:
+        allowed = set(declared_task_datasets.get(task_key) or [])
+        if dataset not in allowed:
+            raise ValueError(f"dataset {dataset} is outside the {task_key} contract")
     stored = (
         (payload.get("dataset_numeric_hyperparameter_overrides") or {})
         .get(task_key, {})
@@ -325,8 +336,35 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         raise ValueError("frozen shared-core config fingerprint mismatch")
     if payload.get("schema") != SCHEMA or payload.get("status") != STATUS:
         raise ValueError("unsupported or non-frozen shared-core config")
-    if set(payload.get("datasets") or []) != REQUIRED_DATASETS:
-        raise ValueError("shared-core v2 must be frozen jointly for VPN and TLS-120")
+    task_datasets = payload.get("task_datasets") or {}
+    if task_datasets:
+        expected_task_datasets = {
+            "packet-level-classification": PACKET_TASK_DATASETS,
+            "flow-level-classification": FLOW_TASK_DATASETS,
+        }
+        observed_task_datasets = {
+            task: set(datasets) for task, datasets in task_datasets.items()
+        }
+        if observed_task_datasets != expected_task_datasets:
+            raise ValueError("shared-core v2 task dataset contract is incomplete")
+        if set(payload.get("datasets") or []) != METHOD_DATASETS:
+            raise ValueError("shared-core v2 method dataset union is incomplete")
+        protocol = payload.get("selection_protocol") or {}
+        declared_application = {
+            task: set(datasets)
+            for task, datasets in (
+                protocol.get("application_datasets_by_task") or {}
+            ).items()
+        }
+        if (
+            set(protocol.get("selection_datasets") or []) != REQUIRED_DATASETS
+            or declared_application != expected_task_datasets
+        ):
+            raise ValueError(
+                "shared-core v2 selection/application dataset scopes disagree"
+            )
+    elif set(payload.get("datasets") or []) != REQUIRED_DATASETS:
+        raise ValueError("legacy shared-core v2 must cover VPN and TLS-120")
     if (payload.get("selection_protocol") or {}).get("test_labels_used") is not False:
         raise ValueError("shared-core v2 selection must explicitly exclude test labels")
     contract = payload.get("task_contract") or {}
@@ -485,9 +523,19 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         }
         if set(numeric) != expected_tasks or tower1["class_weight_basis"] != "flow":
             raise ValueError("invalid dataset numeric hierarchy override topology")
+        expected_numeric_datasets = (
+            {
+                "packet-level-classification": PACKET_TASK_DATASETS,
+                "flow-level-classification": FLOW_TASK_DATASETS,
+            }
+            if task_datasets
+            else {task: REQUIRED_DATASETS for task in expected_tasks}
+        )
         for task_name, datasets in numeric.items():
-            if set(datasets) != REQUIRED_DATASETS:
-                raise ValueError(f"{task_name} numeric overrides do not cover VPN/TLS")
+            if set(datasets) != expected_numeric_datasets[task_name]:
+                raise ValueError(
+                    f"{task_name} numeric overrides do not cover its task contract"
+                )
             for dataset, values in datasets.items():
                 if set(values) != {"class_weight_strength"}:
                     raise ValueError(
