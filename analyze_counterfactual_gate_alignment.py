@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,19 @@ import numpy as np
 
 
 EPS = 1e-12
+
+
+def _file_evidence(path: str | Path) -> dict[str, Any]:
+    resolved = Path(path).resolve()
+    digest = hashlib.sha256()
+    with resolved.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(resolved),
+        "sha256": digest.hexdigest(),
+        "size_bytes": int(resolved.stat().st_size),
+    }
 
 
 def _rank(values: np.ndarray) -> np.ndarray:
@@ -236,9 +250,9 @@ def main() -> None:
     )
     report["task"] = args.task
     report["inputs"] = {
-        "full": str(Path(args.full_prediction).resolve()),
-        "factual_only": str(Path(args.factual_prediction).resolve()),
-        "intervened_only": str(Path(args.intervened_prediction).resolve()),
+        "full": _file_evidence(args.full_prediction),
+        "factual_only": _file_evidence(args.factual_prediction),
+        "intervened_only": _file_evidence(args.intervened_prediction),
     }
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)

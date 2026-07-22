@@ -5,10 +5,24 @@ import pytest
 
 from analyze_counterfactual_gate_alignment import (
     _bootstrap_pearson,
+    _file_evidence,
     _load_flow,
     _load_packet,
     analyze,
 )
+
+
+def test_prediction_input_evidence_binds_content(tmp_path):
+    path = tmp_path / "prediction.bin"
+    path.write_bytes(b"counterfactual-prediction")
+
+    evidence = _file_evidence(path)
+
+    assert evidence["path"] == str(path.resolve())
+    assert evidence["sha256"] == (
+        "06a33732c8cc54345e574ef0e3edfa3d62e40d73a4d2c262a6fa57026d3bbef3"
+    )
+    assert evidence["size_bytes"] == 25
 
 
 def test_packet_gate_alignment_detects_positive_counterfactual_association(tmp_path):

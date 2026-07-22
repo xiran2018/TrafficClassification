@@ -6334,7 +6334,9 @@ correlations to be positive and the 95% bootstrap lower bound for Pearson to be
 above zero. This remains diagnostic association, not a causal guarantee and
 not a Test-time model-selection signal. Failure falsifies the strong
 "identifiable reliability" interpretation even when aggregate gate bounds and
-accuracy pass.
+accuracy pass. Every alignment report binds the full, factual-only, and
+intervened-only prediction artifacts by absolute path, byte size, and SHA-256;
+replacing a prediction file therefore invalidates the recorded evidence.
 
 The training programs now expose the matching persistent toggles
 `--train_ablate_input_channel semantic|content|structural` and
