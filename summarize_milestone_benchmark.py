@@ -93,12 +93,18 @@ def packet_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str,
         and len(np.unique(packet_uids)) == num_samples
     ):
         raise ValueError("Packet Test does not prove one unique packet per sample")
+    predicted = probabilities.argmax(axis=1)
+    recomputed_accuracy = float(np.mean(predicted == y_true))
+    reported_accuracy = float((payload.get("metrics") or {})["accuracy"])
+    if not np.isclose(recomputed_accuracy, reported_accuracy, atol=1e-12):
+        raise ValueError("Packet prediction Accuracy disagrees with the JSON report")
     return {
         "status": "pass",
         "sample_unit": "one_packet",
         "num_samples": num_samples,
         "num_unique_packet_uids": int(len(np.unique(packet_uids))),
         "num_source_flows": int(len(np.unique(flow_ids))),
+        "recomputed_accuracy": recomputed_accuracy,
         "prediction_path": str(prediction_path.resolve()),
         "prediction_sha256": file_sha256(prediction_path),
     }
@@ -119,11 +125,20 @@ def flow_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str, A
         and len({str(flow_id) for flow_id in flow_ids}) == num_samples
     ):
         raise ValueError("Flow Test does not prove one unique flow per sample")
+    recomputed_accuracy = float(
+        np.mean(np.asarray(y_pred, dtype=np.int64) == np.asarray(y_true, dtype=np.int64))
+    )
+    reported_accuracy = float(
+        ((payload.get("metrics") or {}).get("flow_level") or {})["accuracy"]
+    )
+    if not np.isclose(recomputed_accuracy, reported_accuracy, atol=1e-12):
+        raise ValueError("Flow prediction Accuracy disagrees with the JSON report")
     return {
         "status": "pass",
         "sample_unit": "one_flow",
         "num_samples": num_samples,
         "num_unique_flow_ids": num_samples,
+        "recomputed_accuracy": recomputed_accuracy,
         "prediction_path": str(result.resolve()),
         "prediction_sha256": file_sha256(result),
     }

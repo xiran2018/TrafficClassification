@@ -26,6 +26,9 @@ def result(path: Path, task: str) -> Path:
     }
     if task == "packet":
         path.parent.mkdir(parents=True, exist_ok=True)
+        y_true = np.asarray([0, 1] * 5)
+        y_pred = np.asarray([1, 1, 0, 1, 0, 1, 0, 1, 0, 0])
+        probability = np.eye(2)[y_pred]
         payload = {
             "task": "packet-level-classification",
             "sample_unit": "one_packet",
@@ -33,17 +36,19 @@ def result(path: Path, task: str) -> Path:
         }
         np.savez_compressed(
             path.with_suffix(".npz"),
-            y_true=np.arange(10) % 2,
-            probabilities=np.full((10, 2), 0.5),
+            y_true=y_true,
+            probabilities=probability,
             flow_ids=np.asarray([f"flow-{index // 2}" for index in range(10)]),
             packet_uids=np.asarray([f"packet-{index}" for index in range(10)]),
         )
     else:
+        y_true = [0, 1] * 5
+        y_pred = [1, 1, 0, 1, 0, 1, 0, 1, 0, 0]
         payload = {
             "metrics": {"flow_level": flow_metrics},
-            "flow_y_true": [0] * 10,
-            "flow_y_pred": [0] * 10,
-            "flow_prob": [[1.0, 0.0]] * 10,
+            "flow_y_true": y_true,
+            "flow_y_pred": y_pred,
+            "flow_prob": np.eye(2)[y_pred].tolist(),
             "flow_ids": [f"flow-{index}" for index in range(10)],
         }
     return write_json(path, payload)
@@ -153,6 +158,7 @@ def test_summarize_marks_test_as_development_benchmark(tmp_path):
         "sample_unit": "one_flow",
         "num_samples": 10,
         "num_unique_flow_ids": 10,
+        "recomputed_accuracy": 0.8,
         "prediction_path": str(
             (
                 repo
@@ -243,4 +249,20 @@ def test_summarize_rejects_duplicate_packet_or_flow_samples(tmp_path):
     payload["flow_ids"][-1] = payload["flow_ids"][0]
     write_json(flow_result, payload)
     with pytest.raises(ValueError, match="one unique flow"):
+        summarize(root, repo, config)
+
+
+def test_summarize_rejects_prediction_metric_mismatch(tmp_path):
+    root, repo, config = build_tree(tmp_path)
+    packet_result = (
+        root
+        / "packet_artifacts"
+        / "vpn-app"
+        / "fold0"
+        / "test_unified_packet_single_head.json"
+    )
+    payload = json.loads(packet_result.read_text(encoding="utf-8"))
+    payload["metrics"]["accuracy"] = 0.9
+    write_json(packet_result, payload)
+    with pytest.raises(ValueError, match="Packet prediction Accuracy"):
         summarize(root, repo, config)

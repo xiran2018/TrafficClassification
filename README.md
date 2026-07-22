@@ -195,7 +195,8 @@ The same report proves the inference unit from ordered predictions rather than
 only trusting a command-line declaration. Packet results must bind a `.npz`
 with one unique `packet_uid` per row plus its source `flow_id`; Flow results
 must contain one unique `flow_id` per row. The report records row counts and
-prediction-file SHA-256 values and rejects either duplicate sample unit.
+prediction-file SHA-256 values, recomputes Accuracy from the bound predictions,
+and rejects duplicate sample units or a metric/report mismatch.
 
 Before the full benchmark Test is released, the four Packet application
 datasets that do not participate in VPN/TLS method selection run one
