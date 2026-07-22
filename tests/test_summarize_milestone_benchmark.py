@@ -50,7 +50,12 @@ def manifest(dataset: str, task: str, result_path: Path, *, source=SOURCE_SHA) -
     }
 
 
-def build_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
+def build_tree(
+    tmp_path: Path,
+    *,
+    decision: str = "final_after_preregistered_validation",
+    tag: str = "milestone_dev_fold0",
+) -> tuple[Path, Path, Path]:
     root = tmp_path / "root"
     repo = tmp_path / "repo"
     config = write_json(
@@ -58,7 +63,7 @@ def build_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
         {
             "config_sha256": CONFIG_SHA,
             "method_selection": {
-                "decision_status": "final_after_preregistered_validation",
+                "decision_status": decision,
                 "test_labels_used": False,
                 "selected_method": "shared_core_v2",
             },
@@ -78,7 +83,7 @@ def build_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
             repo
             / "reasoningDataset"
             / dataset
-            / "test_seq_metrics_flow_milestone_dev_fold0_probs.json",
+            / f"test_seq_metrics_flow_{tag}_probs.json",
             "flow",
         )
         write_json(
@@ -93,7 +98,7 @@ def build_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
             repo
             / "reasoningDataset"
             / dataset
-            / "stage8_flowaware_manifest_milestone_dev_fold0.json",
+            / f"stage8_flowaware_manifest_{tag}.json",
             manifest(dataset, "flow-level", flow_result),
         )
         write_json(
@@ -124,6 +129,24 @@ def test_summarize_marks_test_as_development_benchmark(tmp_path):
     assert comparison["predeclared_target"]["met"] is False
     assert comparison["sweet"]["end_to_end"]["delta_accuracy"] == pytest.approx(
         -0.056
+    )
+
+
+def test_summarize_accepts_base_frozen_milestone_with_unique_tag(tmp_path):
+    tag = "base_milestone_dev_fold0"
+    root, repo, config = build_tree(
+        tmp_path,
+        decision="base_frozen_pending_identity_cross_scale_validation",
+        tag=tag,
+    )
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["selection_protocol"]["test_evaluation_role"] = (
+        "development_benchmark_after_base_shared_core_freeze"
+    )
+    write_json(config, payload)
+    report = summarize(root, repo, config, tag=tag)
+    assert report["evaluation_role"] == (
+        "development_benchmark_after_base_shared_core_freeze"
     )
 
 

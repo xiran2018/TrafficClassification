@@ -162,23 +162,34 @@ during development. This policy avoids spending days on a validation-only
 direction that fails under distribution shift without silently tuning the
 reported final Test.
 
-The active strict-v2 run applies this rule with an early direction check. After
-`shared_core_v2/final_method_config.json` has passed Packet selection and Flow
-validation noninferiority, `/tmp/two_tower_runs/run_milestone_dev_fold0.sh`
-runs VPN-app and TLS-120 fold 0 through both one-packet inference and one-flow
-inference. It writes only under
+The active strict-v2 run applies this rule at two explicit direction checks.
+First, after VPN-app and TLS-120 jointly select and freeze the base shared core,
+`make_development_milestone_config.py` derives an explicitly released, signed
+copy from `shared_core_v2/frozen_config.json`. VPN-app and TLS-120 fold 0
+then run through both one-packet and one-flow inference under the tag
+`base_milestone_dev_fold0`, before the expensive identity-safe and cross-scale
+objective screens. This catches a Valid-to-Test distribution failure without
+waiting days for every downstream ablation.
+
+Second, after Packet selection and Flow validation noninferiority produce
+`shared_core_v2/final_method_config.json`,
+`/tmp/two_tower_runs/run_milestone_dev_fold0.sh` repeats the same four-task
+check for the final selected method. It writes only under
 `/tmp/two_tower_runs/milestone_dev_shared_core_v2` (apart from uniquely tagged
 Flow manifests) and does not wait for the four-dataset Packet applicability
-gate. These two results are explicitly a development benchmark. The later
-scope gate and full three-fold launch remain separate, so a poor core result is
-detected before spending the complete cross-dataset evaluation budget.
-`summarize_milestone_benchmark.py` then verifies both cross-task audits,
-configuration and source fingerprints, and writes the consolidated report to
-`milestone_dev_shared_core_v2/milestone_development_benchmark.json`; the report
-sets `unbiased_final_claim_allowed=false` by construction. Each task row also
-reports the preregistered project target and separate deltas from SWEET's
+gate. Both checkpoints are explicitly development benchmarks. They are tied
+to method-freeze events rather than elapsed time, and their Test metrics must
+not select an unreported hyperparameter sweep.
+
+`summarize_milestone_benchmark.py` verifies both cross-task audits,
+configuration and source fingerprints, supports a unique `--tag` for each
+milestone, and writes a consolidated report with
+`unbiased_final_claim_allowed=false`. Each task row also reports the
+preregistered project target and separate deltas from SWEET's
 frozen-representation and protocol-matched end-to-end references; those fields
-are reporting-only and cannot change the frozen method.
+are reporting-only and cannot change the frozen method. If either development
+Test informs subsequent design, the final paper claim requires a new outer
+holdout or nested cross-validation.
 
 Before the full benchmark Test is released, the four Packet application
 datasets that do not participate in VPN/TLS method selection run one

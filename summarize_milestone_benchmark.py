@@ -14,6 +14,10 @@ from unified_framework_spec import FLOW_LEVEL_RESULTS, PACKET_LEVEL_RESULTS
 
 DATASETS = ("vpn-app", "tls-120")
 TAG = "milestone_dev_fold0"
+ALLOWED_DECISIONS = {
+    "base_frozen_pending_identity_cross_scale_validation",
+    "final_after_preregistered_validation",
+}
 
 
 def load_json(path: str | Path) -> dict[str, Any]:
@@ -135,7 +139,9 @@ def validate_manifest(
     return require_stable_source(manifest, path)
 
 
-def summarize(root: Path, repo: Path, config_path: Path) -> dict[str, Any]:
+def summarize(
+    root: Path, repo: Path, config_path: Path, *, tag: str = TAG
+) -> dict[str, Any]:
     root = root.resolve()
     repo = repo.resolve()
     config_path = config_path.resolve()
@@ -143,7 +149,7 @@ def summarize(root: Path, repo: Path, config_path: Path) -> dict[str, Any]:
     config_sha = str(config.get("config_sha256") or "")
     if not (
         config.get("method_selection", {}).get("decision_status")
-        == "final_after_preregistered_validation"
+        in ALLOWED_DECISIONS
         and config.get("selection_protocol", {}).get("test_evaluation_allowed")
         is True
         and config.get("method_selection", {}).get("test_labels_used") is False
@@ -154,7 +160,9 @@ def summarize(root: Path, repo: Path, config_path: Path) -> dict[str, Any]:
     report: dict[str, Any] = {
         "schema": "unified_milestone_development_benchmark_v1",
         "status": "pass",
-        "evaluation_role": "development_benchmark_after_validation_freeze",
+        "evaluation_role": config.get("selection_protocol", {}).get(
+            "test_evaluation_role", "development_benchmark_after_validation_freeze"
+        ),
         "may_inform_future_method_design": True,
         "unbiased_final_claim_allowed": False,
         "test_labels_used_for_frozen_config_selection": False,
@@ -187,7 +195,7 @@ def summarize(root: Path, repo: Path, config_path: Path) -> dict[str, Any]:
         packet_manifest = load_json(packet_manifest_path)
         flow_matches = list(
             (repo / "reasoningDataset" / dataset).glob(
-                f"stage8_flowaware_manifest_*{TAG}*.json"
+                f"stage8_flowaware_manifest_*{tag}*.json"
             )
         )
         if len(flow_matches) != 1:
@@ -280,8 +288,11 @@ def main() -> None:
     parser.add_argument("--config", required=True)
     parser.add_argument("--output_json", required=True)
     parser.add_argument("--output_md", required=True)
+    parser.add_argument("--tag", default=TAG)
     args = parser.parse_args()
-    report = summarize(Path(args.root), Path(args.repo), Path(args.config))
+    report = summarize(
+        Path(args.root), Path(args.repo), Path(args.config), tag=args.tag
+    )
     output_json = Path(args.output_json)
     output_md = Path(args.output_md)
     output_json.parent.mkdir(parents=True, exist_ok=True)
