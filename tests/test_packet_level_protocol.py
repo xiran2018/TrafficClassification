@@ -14,7 +14,11 @@ from audit_packet_identifiability import (
 )
 from calibrate_prediction_prior import main as calibrate_prior_main
 from fuse_packet_crossfold import main as fuse_crossfold_main
-from packet_eval_utils import encode_packet_logits_with_backoff, packet_classification_metrics
+from packet_eval_utils import (
+    encode_packet_logits_with_backoff,
+    evaluate_packet_model,
+    packet_classification_metrics,
+)
 from fuse_packet_experts import (
     blend,
     confidence_features,
@@ -816,6 +820,45 @@ def test_packet_evaluator_recovers_from_large_batch_oom():
 
     assert logits.shape == (5, 2)
     assert torch.equal(logits[:, 0], torch.arange(5, dtype=torch.float32))
+
+
+def test_packet_evaluator_does_not_forward_flow_identity_or_neighbor_context():
+    class RecordingModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.extra_args = None
+            self.extra_kwargs = None
+
+        def encode_packets(self, input_ids, attention_mask, *args, **kwargs):
+            self.extra_args = args
+            self.extra_kwargs = kwargs
+            logits = torch.stack(
+                [input_ids[:, 0].float(), attention_mask[:, 0].float()], dim=1
+            )
+            return logits, logits, logits
+
+    model = RecordingModel()
+    batch = {
+        "input_ids": torch.tensor([[2], [0]], dtype=torch.long),
+        "attention_mask": torch.ones(2, 1, dtype=torch.long),
+        "labels": torch.tensor([0, 1], dtype=torch.long),
+        "flow_ids": torch.tensor([17, 17], dtype=torch.long),
+        "packet_ids": torch.tensor([3, 4], dtype=torch.long),
+        "paired_input_ids": torch.tensor([[9], [9]], dtype=torch.long),
+        "paired_attention_mask": torch.ones(2, 1, dtype=torch.long),
+    }
+
+    metrics = evaluate_packet_model(
+        model,
+        [batch],
+        torch.device("cpu"),
+        num_classes=2,
+        desc="strict single-packet inference",
+    )
+
+    assert metrics["num_samples"] == 2
+    assert model.extra_args == ()
+    assert model.extra_kwargs == {}
 
 
 def test_weighted_packet_probability_fusion(tmp_path, monkeypatch):
