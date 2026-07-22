@@ -5449,6 +5449,17 @@ conda run -n llm-factory python run_packet_level_pipeline.py \
 
 This runs `pretrain_native_flow_encoder.py` before packet-head training and passes `CHECKPOINT_ROOT/vpn-app_fold0/shared_content_pretraining/best.pt` through `--protocol_content_checkpoint`. Use `--stage protocol_pretrain` to run only the label-free phase after preprocessing. Automatic pretraining and an explicitly supplied `--protocol_content_checkpoint` are mutually exclusive, so the initialization source cannot be silently ambiguous. These flags provide the exact-v2 execution path; they do not retroactively make existing `paper_unified` screening checkpoints exact-core results.
 
+Native pretraining supports cost-aware early stopping with `--patience` and
+`--min_delta`. The best checkpoint still follows every strict validation-loss
+improvement, while patience is reset only after the cumulative decrease from
+the last significant reference exceeds `min_delta`. Packet and Flow runners
+expose the same setting as `--protocol_pretrain_min_delta` and
+`--native_min_delta`. Existing frozen configs that predate this field resolve
+it to `0.0`, preserving their exact execution contract; newly generated
+shared-core configs use `0.001` with patience `4` to prevent tiny numerical
+decreases from extending an otherwise saturated pretraining run. This is a
+recorded compute-budget hyperparameter, not a dataset-specific module switch.
+
 Before freezing publication results, compare the completed packet checkpoint with the corresponding native flow checkpoint:
 
 ```bash

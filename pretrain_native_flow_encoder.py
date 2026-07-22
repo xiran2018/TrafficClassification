@@ -29,6 +29,15 @@ from native_flow_data import (
 )
 
 
+def resets_early_stopping_patience(
+    valid_loss: float,
+    reference_loss: float,
+    min_delta: float,
+) -> bool:
+    """Return whether validation improved enough to reset patience."""
+    return float(valid_loss) < float(reference_loss) - float(min_delta)
+
+
 def valid_cross_entropy(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     valid = targets >= 0
     if not valid.any():
@@ -274,6 +283,16 @@ def main() -> None:
     ap.add_argument("--steps_per_epoch", type=int, default=0)
     ap.add_argument("--valid_steps", type=int, default=0)
     ap.add_argument("--patience", type=int, default=4)
+    ap.add_argument(
+        "--min_delta",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum cumulative validation-loss decrease that resets early "
+            "stopping patience. The best checkpoint still tracks every strict "
+            "loss improvement."
+        ),
+    )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument(
         "--initialize_only",
@@ -288,6 +307,10 @@ def main() -> None:
         ap.error("--session_mask_probability must be in [0, 1]")
     if not 0.0 <= args.payload_dropout_probability <= 1.0:
         ap.error("--payload_dropout_probability must be in [0, 1]")
+    if args.patience < 0:
+        ap.error("--patience must be non-negative")
+    if args.min_delta < 0:
+        ap.error("--min_delta must be non-negative")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -361,6 +384,8 @@ def main() -> None:
     history: list[dict] = []
     best_loss = float("inf")
     best_epoch = 0
+    patience_reference_loss = float("inf")
+    last_significant_epoch = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         rows = []
@@ -393,13 +418,24 @@ def main() -> None:
         }
         history.append(record)
         print(json.dumps(record, ensure_ascii=False), flush=True)
-        if valid_metrics["loss"] < best_loss:
-            best_loss = valid_metrics["loss"]
+        valid_loss = float(valid_metrics["loss"])
+        if valid_loss < best_loss:
+            best_loss = valid_loss
             best_epoch = epoch
             save_checkpoint(output_dir / "best.pt", model, model_config, args, history)
+        if resets_early_stopping_patience(
+            valid_loss, patience_reference_loss, args.min_delta
+        ):
+            patience_reference_loss = valid_loss
+            last_significant_epoch = epoch
         save_checkpoint(output_dir / "last.pt", model, model_config, args, history)
-        if epoch - best_epoch >= args.patience:
-            print(f"early stopping epoch={epoch} best_epoch={best_epoch}", flush=True)
+        if args.patience > 0 and epoch - last_significant_epoch >= args.patience:
+            print(
+                f"early stopping epoch={epoch} best_epoch={best_epoch} "
+                f"last_significant_epoch={last_significant_epoch} "
+                f"min_delta={args.min_delta}",
+                flush=True,
+            )
             break
 
     summary = {
@@ -407,6 +443,8 @@ def main() -> None:
         "uses_downstream_labels": False,
         "best_epoch": best_epoch,
         "best_valid_loss": best_loss,
+        "last_significant_epoch": last_significant_epoch,
+        "patience_reference_loss": patience_reference_loss,
         "model_config": model_config,
         "pretraining_config": vars(args),
         "history": history,

@@ -44,6 +44,8 @@ def test_protocol_pretrain_stage_inherits_exact_packet_core_architecture(tmp_pat
         "4",
         "--byte_dropout",
         "0.1",
+        "--protocol_pretrain_min_delta",
+        "0.001",
     )
 
     assert result.returncode == 0, result.stderr
@@ -54,6 +56,7 @@ def test_protocol_pretrain_stage_inherits_exact_packet_core_architecture(tmp_pat
     assert "--byte_layers 2" in command
     assert "--num_heads 4" in command
     assert "--dropout 0.1" in command
+    assert "--min_delta 0.001" in command
     assert "train_packet_byte_transformer.py" not in command
 
     manifest_path = artifact_root / "vpn-app" / "fold0" / "packet_framework_manifest.json"

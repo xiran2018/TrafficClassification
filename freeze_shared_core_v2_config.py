@@ -1000,6 +1000,7 @@ def freeze_config(
             "flow_contrastive_weight": 0.25,
             "temperature": 0.1,
             "patience": 4,
+            "min_delta": 0.001,
             "seed": 42,
         },
         "empirical_risk": {

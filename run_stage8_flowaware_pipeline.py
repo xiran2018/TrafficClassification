@@ -627,6 +627,8 @@ def native_pretrain_cmd(args) -> List[str]:
         str(args.native_temperature),
         "--patience",
         str(args.native_patience),
+        "--min_delta",
+        str(args.native_min_delta),
         "--seed",
         str(args.seed),
         "--device",
@@ -1649,6 +1651,7 @@ def main() -> None:
     ap.add_argument("--native_packet_consistency_weight", type=float, default=0.25)
     ap.add_argument("--native_temperature", type=float, default=0.1)
     ap.add_argument("--native_patience", type=int, default=4)
+    ap.add_argument("--native_min_delta", type=float, default=0.0)
     ap.add_argument(
         "--native_structural_dim",
         type=int,
@@ -2000,6 +2003,8 @@ def main() -> None:
         ap.error("--tower1_paired_logit_kl_weight must be non-negative")
     if args.tower1_paired_cls_weight > 0 and args.tower1_paired_consistency_weight <= 0:
         ap.error("--tower1_paired_cls_weight requires --tower1_paired_consistency_weight > 0")
+    if args.native_min_delta < 0:
+        ap.error("--native_min_delta must be non-negative")
 
     if args.dataset in {"ustc-app", "ustc-binary"} and args.source_suffix == "change_weight":
         args.source_suffix = args.output_suffix

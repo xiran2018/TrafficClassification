@@ -73,13 +73,17 @@ NATIVE_TRAINING_CONTRACT_KEYS = (
     "flow_contrastive_weight",
     "temperature",
     "patience",
+    "min_delta",
     "seed",
 )
 
 
 def native_training_contract(checkpoint: dict[str, Any]) -> dict[str, Any]:
     config = checkpoint.get("pretraining_config") or {}
-    return {key: config.get(key) for key in NATIVE_TRAINING_CONTRACT_KEYS}
+    return {
+        key: config.get(key, 0.0 if key == "min_delta" else None)
+        for key in NATIVE_TRAINING_CONTRACT_KEYS
+    }
 
 
 def native_training_protocol_signature(

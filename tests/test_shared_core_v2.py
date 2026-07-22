@@ -280,6 +280,7 @@ def packet_args():
         "protocol_pretrain_flow_contrastive_weight": 0.1,
         "protocol_pretrain_temperature": 0.2,
         "protocol_pretrain_patience": 1,
+        "protocol_pretrain_min_delta": 0.5,
         "protocol_pretrain_seed": 1,
         "byte_content_group_loss_reduction": "none",
         "class_weighting": "none",
@@ -485,6 +486,7 @@ def test_flow_runtime_uses_the_same_core_values():
         native_flow_contrastive_weight=0.1,
         native_temperature=0.2,
         native_patience=1,
+        native_min_delta=0.5,
         seed=1,
         content_group_loss_reduction="none",
         tower1_class_weighting="none",
@@ -505,6 +507,8 @@ def test_flow_runtime_uses_the_same_core_values():
     assert flow.shared_packet_hidden_dim == packet.byte_hidden_dim
     assert flow.meta_feature_dim == 13
     assert flow.native_structural_dim == 128
+    assert packet.protocol_pretrain_min_delta == 0.0
+    assert flow.native_min_delta == 0.0
     assert flow.dual_channel_mode == "residual"
     assert flow.channel_fusion_base_mode == "semantic_anchor"
     assert flow.use_intervention_views is True
@@ -769,6 +773,7 @@ def test_packet_runner_common_reference_keeps_method_and_effective_hash_equal(tm
         "--learning_rate 0.0003",
         "--weight_decay 0.01",
         "--temperature 0.1",
+        "--min_delta 0.0",
         "--seed 42",
     ):
         assert option in pretrain
@@ -983,6 +988,7 @@ def test_flow_runner_consumes_same_config_and_preprocesses_paired_view_first(tmp
         "--learning_rate 0.0003",
         "--weight_decay 0.01",
         "--temperature 0.1",
+        "--min_delta 0.0",
         "--seed 42",
     ):
         assert option in native

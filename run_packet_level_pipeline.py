@@ -578,6 +578,8 @@ def write_framework_manifest(
                     "direction_weight": args.protocol_pretrain_direction_weight,
                     "packet_consistency_weight": args.protocol_pretrain_packet_consistency_weight,
                     "flow_contrastive_weight": args.protocol_pretrain_flow_contrastive_weight,
+                    "patience": args.protocol_pretrain_patience,
+                    "min_delta": args.protocol_pretrain_min_delta,
                 },
                 "paper_main_experts": [],
                 "semantic_fusion_level": "representation",
@@ -829,6 +831,7 @@ def main() -> None:
     ap.add_argument("--protocol_pretrain_flow_contrastive_weight", type=float, default=0.25)
     ap.add_argument("--protocol_pretrain_temperature", type=float, default=0.1)
     ap.add_argument("--protocol_pretrain_patience", type=int, default=4)
+    ap.add_argument("--protocol_pretrain_min_delta", type=float, default=0.0)
     ap.add_argument("--protocol_pretrain_seed", type=int, default=42)
     ap.add_argument("--protocol_pretrain_device", default="cuda")
     ap.add_argument(
@@ -932,6 +935,8 @@ def main() -> None:
         ap.error("--semantic_embedding_num_shards must be positive")
     if not 0.0 <= args.class_weight_strength <= 1.0:
         ap.error("--class_weight_strength must be in [0, 1]")
+    if args.protocol_pretrain_min_delta < 0:
+        ap.error("--protocol_pretrain_min_delta must be non-negative")
     if args.tower1_paired_consistency_weight < 0 or args.tower1_paired_cls_weight < 0:
         ap.error("Tower-1 paired loss weights must be non-negative")
     if args.tower1_paired_logit_kl_weight < 0:
@@ -1191,6 +1196,7 @@ def main() -> None:
             "--flow_contrastive_weight", str(args.protocol_pretrain_flow_contrastive_weight),
             "--temperature", str(args.protocol_pretrain_temperature),
             "--patience", str(args.protocol_pretrain_patience),
+            "--min_delta", str(args.protocol_pretrain_min_delta),
             "--seed", str(args.protocol_pretrain_seed),
             "--device", args.protocol_pretrain_device,
         ]

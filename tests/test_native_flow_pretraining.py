@@ -25,6 +25,7 @@ from native_flow_data import (
     protocol_field_ids,
 )
 from preprocess_tower2 import apply_structural_embedding_reference
+from pretrain_native_flow_encoder import resets_early_stopping_patience
 from train_tower2 import configure_dual_channel_train_scope, maybe_load_init_checkpoint
 
 
@@ -64,6 +65,14 @@ def packet_row(flow_id: str, packet_id: int, direction: str = "C2S") -> dict:
             "tcp_window": 1024,
         },
     }
+
+
+def test_native_pretraining_min_delta_uses_cumulative_reference_improvement():
+    assert resets_early_stopping_patience(1.0, float("inf"), 0.001)
+    assert not resets_early_stopping_patience(0.9995, 1.0, 0.001)
+    assert resets_early_stopping_patience(0.9989, 1.0, 0.001)
+    assert resets_early_stopping_patience(0.9999, 1.0, 0.0)
+    assert not resets_early_stopping_patience(1.0, 1.0, 0.0)
 
 
 def test_protocol_field_ids_mark_endpoints_checksums_and_payload():

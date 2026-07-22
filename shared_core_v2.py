@@ -71,6 +71,7 @@ INDEPENDENT_TRAINING_HYPERPARAMETERS = {
             "protocol_pretrain_flow_contrastive_weight",
             "protocol_pretrain_temperature",
             "protocol_pretrain_patience",
+            "protocol_pretrain_min_delta",
             "protocol_pretrain_seed",
         }
     ),
@@ -123,6 +124,7 @@ INDEPENDENT_TRAINING_HYPERPARAMETERS = {
             "native_flow_contrastive_weight",
             "native_temperature",
             "native_patience",
+            "native_min_delta",
         }
     ),
 }
@@ -406,6 +408,7 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
     native = payload.get("native_pretraining") or {}
     if native.get("protocol") != "native_flow_multitask_v1":
         raise ValueError("shared-core v2 requires native_flow_multitask_v1")
+    native.setdefault("min_delta", 0.0)
     required_native = {
         "max_packets",
         "flow_layers",
@@ -429,6 +432,7 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         "flow_contrastive_weight",
         "temperature",
         "patience",
+        "min_delta",
         "seed",
     }
     missing_native = sorted(required_native - set(native))
@@ -436,6 +440,8 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         raise ValueError(
             f"shared-core v2 native pretraining contract is incomplete: {missing_native}"
         )
+    if float(native["min_delta"]) < 0:
+        raise ValueError("shared-core v2 native pretraining min_delta must be non-negative")
     risk = payload.get("empirical_risk") or {}
     if risk.get("content_group_loss_reduction") != "group_mean":
         raise ValueError("shared-core v2 requires content-group group_mean risk")
@@ -659,6 +665,7 @@ def apply_frozen_shared_core(
             ],
             "protocol_pretrain_temperature": native["temperature"],
             "protocol_pretrain_patience": native["patience"],
+            "protocol_pretrain_min_delta": native.get("min_delta", 0.0),
             "protocol_pretrain_seed": native["seed"],
             "byte_content_group_loss_reduction": risk["content_group_loss_reduction"],
             "class_weighting": tower1["class_weighting"],
@@ -755,6 +762,7 @@ def apply_frozen_shared_core(
             "native_flow_contrastive_weight": native["flow_contrastive_weight"],
             "native_temperature": native["temperature"],
             "native_patience": native["patience"],
+            "native_min_delta": native.get("min_delta", 0.0),
             "seed": native["seed"],
             "content_group_loss_reduction": risk["content_group_loss_reduction"],
             "tower1_class_weighting": tower1["class_weighting"],
