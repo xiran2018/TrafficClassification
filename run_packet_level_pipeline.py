@@ -67,6 +67,17 @@ def parse_eval_splits(value: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(splits))
 
 
+def parse_prepared_splits(value: str) -> tuple[str, ...]:
+    splits = tuple(part.strip() for part in value.split(",") if part.strip())
+    invalid = sorted(set(splits) - {"train", "valid", "test"})
+    if not splits or invalid:
+        detail = f"; invalid values: {','.join(invalid)}" if invalid else ""
+        raise argparse.ArgumentTypeError(
+            "--prepared_splits must contain train, valid, and/or test" + detail
+        )
+    return tuple(dict.fromkeys(splits))
+
+
 def command_program(command: list[str]) -> str:
     return Path(command[1]).name if len(command) > 1 else Path(command[0]).name
 
@@ -309,7 +320,7 @@ def semantic_cache_policy_evidence(args, artifacts: Path) -> dict:
         else "legacy_per_flow_v1"
     )
     splits = {}
-    for split in ("train", "valid", "test"):
+    for split in getattr(args, "prepared_splits", ("train", "valid", "test")):
         views = {}
         for view, suffix, expected_header in (
             ("factual", "_full", "full"),
@@ -521,6 +532,7 @@ def write_framework_manifest(
                     / "best.pt"
                 ),
                 "eval_splits": list(args.eval_splits),
+                "prepared_splits": list(args.prepared_splits),
                 "result_paths": [
                     str(artifacts / f"{split}_unified_packet_single_head.json")
                     for split in args.eval_splits
@@ -645,6 +657,15 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--packet_batch_size", type=int, default=16)
     ap.add_argument("--eval_batch_size", type=int, default=16)
+    ap.add_argument(
+        "--prepared_splits",
+        type=parse_prepared_splits,
+        default=("train", "valid", "test"),
+        help=(
+            "Comma-separated data splits to preprocess and embed. Candidate screening "
+            "can use 'train,valid' to avoid touching Test data."
+        ),
+    )
     ap.add_argument(
         "--eval_splits",
         type=parse_eval_splits,
@@ -905,6 +926,14 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()
+    if "train" not in args.prepared_splits or "valid" not in args.prepared_splits:
+        ap.error("--prepared_splits must include train and valid")
+    missing_eval_splits = sorted(set(args.eval_splits) - set(args.prepared_splits))
+    if missing_eval_splits:
+        ap.error(
+            "--eval_splits must be a subset of --prepared_splits; missing: "
+            + ",".join(missing_eval_splits)
+        )
     if args.semantic_embedding_num_shards <= 0:
         ap.error("--semantic_embedding_num_shards must be positive")
     if not 0.0 <= args.class_weight_strength <= 1.0:
@@ -1194,6 +1223,8 @@ def main() -> None:
             ("valid", valid_source, valid_dir),
             ("test", test_source, test_dir),
         ):
+            if split not in args.prepared_splits:
+                continue
             if split == "test" and args.shared_test_dir:
                 required = output_dir / "packet_auxiliary.jsonl"
                 if not required.exists():
@@ -1237,18 +1268,17 @@ def main() -> None:
                 run(intervention_command, args.dry_run)
 
     if args.stage in {"audit", "paper_unified", "all"}:
-        run(
-            [
-                sys.executable,
-                "audit_packet_flow_split.py",
-                "--train", str(train_dir / "packet_auxiliary.jsonl"),
-                "--valid", str(valid_dir / "packet_auxiliary.jsonl"),
-                "--test", str(test_dir / "packet_auxiliary.jsonl"),
-                "--output_json", str(artifacts / "flow_split_audit.json"),
-                "--fail_on_overlap",
-            ],
-            args.dry_run,
-        )
+        audit_command = [
+            sys.executable,
+            "audit_packet_flow_split.py",
+            "--train", str(train_dir / "packet_auxiliary.jsonl"),
+            "--valid", str(valid_dir / "packet_auxiliary.jsonl"),
+            "--output_json", str(artifacts / "flow_split_audit.json"),
+            "--fail_on_overlap",
+        ]
+        if "test" in args.prepared_splits:
+            audit_command.extend(["--test", str(test_dir / "packet_auxiliary.jsonl")])
+        run(audit_command, args.dry_run)
 
     if should_pretrain_protocol_content:
         run(protocol_content_pretrain_command(), args.dry_run)
@@ -1267,7 +1297,9 @@ def main() -> None:
 
     if args.stage == "paper_unified":
         run(tower1_packet_train_command(), args.dry_run)
-        for split_name, split_dir in (("train", train_dir), ("valid", valid_dir), ("test", test_dir)):
+        prepared_directories = {"train": train_dir, "valid": valid_dir, "test": test_dir}
+        for split_name in args.prepared_splits:
+            split_dir = prepared_directories[split_name]
             for intervened, prompt_dir, policy in (
                 (False, split_dir, "full"),
                 (True, intervention_dirs[split_name], "mask_ip_port"),

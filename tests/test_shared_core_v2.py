@@ -738,6 +738,8 @@ def test_packet_runner_can_screen_valid_without_test_evaluation(tmp_path):
             "--dry_run",
             "--eval_splits",
             "valid",
+            "--prepared_splits",
+            "train,valid",
             "--artifact_root",
             str(artifact_root),
             "--checkpoint_root",
@@ -759,6 +761,17 @@ def test_packet_runner_can_screen_valid_without_test_evaluation(tmp_path):
     assert len(evaluation_commands) == 1
     assert "valid/packet_index.jsonl" in evaluation_commands[0]
     assert "test/packet_index.jsonl" not in evaluation_commands[0]
+    assert "/vpn-app/test" not in result.stdout
+    semantic_extractions = [
+        line
+        for line in result.stdout.splitlines()
+        if "extract_packet_embeddings_qwen.py" in line
+    ]
+    assert len(semantic_extractions) == 4
+    audit_command = next(
+        line for line in result.stdout.splitlines() if "audit_packet_flow_split.py" in line
+    )
+    assert "--test" not in audit_command
 
     manifest = json.loads(
         next(artifact_root.glob("vpn-app/fold0/packet_framework_manifest.json")).read_text(
@@ -767,6 +780,7 @@ def test_packet_runner_can_screen_valid_without_test_evaluation(tmp_path):
     )
     notes = manifest["framework"]["notes"]
     assert notes["eval_splits"] == ["valid"]
+    assert notes["prepared_splits"] == ["train", "valid"]
     assert notes["result_paths"] == [
         str(
             artifact_root
