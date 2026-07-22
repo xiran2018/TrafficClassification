@@ -207,6 +207,14 @@ def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
 
 def test_freeze_supports_minimal_core_without_unvalidated_paired_module(tmp_path):
     balance = report(tmp_path, "minimal_balance", "candidate")
+    balance["factorial_config_integrity"] = {
+        "required": True,
+        "status": "pass",
+        "declared_factorial_fields": [
+            "class_weight_basis",
+            "class_weight_strength",
+        ],
+    }
     balance_path = write_report(tmp_path / "minimal_balance.json", balance)
 
     frozen = freeze_config(
@@ -227,6 +235,36 @@ def test_freeze_supports_minimal_core_without_unvalidated_paired_module(tmp_path
     }
     fingerprint = frozen.pop("config_sha256")
     assert fingerprint == canonical_sha256(frozen)
+
+
+@pytest.mark.parametrize("missing", ["factorial", "implementation"])
+def test_minimal_core_rejects_unverified_two_arm_selection(tmp_path, missing):
+    balance = report(tmp_path, f"unverified_{missing}", "candidate")
+    balance["factorial_config_integrity"] = {
+        "required": True,
+        "status": "pass",
+        "declared_factorial_fields": [
+            "class_weight_basis",
+            "class_weight_strength",
+        ],
+    }
+    if missing == "factorial":
+        balance.pop("factorial_config_integrity")
+    else:
+        balance.pop("training_implementation_consistency")
+
+    expected = (
+        "stable-source and strict class-weight"
+        if missing == "factorial"
+        else "stable trainer source"
+    )
+    with pytest.raises(ValueError, match=expected):
+        freeze_config(
+            balance,
+            None,
+            balance_path=write_report(tmp_path / f"{missing}.json", balance),
+            paired_path=None,
+        )
 
 
 def test_freeze_binds_hierarchy_numeric_overrides_before_paired_screen(tmp_path):

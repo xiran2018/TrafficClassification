@@ -654,10 +654,31 @@ def freeze_config(
     flow_hierarchy_derivation_path: Path | None = None,
 ) -> dict[str, Any]:
     validate_selection(balance_report, "balance selection")
+    minimal_balance_integrity = None
     if paired_report is not None:
         if paired_path is None:
             raise ValueError("paired_path is required with paired_report")
         validate_selection(paired_report, "paired selection")
+    else:
+        implementation = balance_report.get("training_implementation_consistency") or {}
+        factorial = balance_report.get("factorial_config_integrity") or {}
+        if not (
+            implementation.get("required") is True
+            and implementation.get("status") == "pass"
+            and implementation.get("all_runs_stable_through_completion") is True
+            and factorial.get("required") is True
+            and factorial.get("status") == "pass"
+            and set(factorial.get("declared_factorial_fields") or [])
+            == {"class_weight_basis", "class_weight_strength"}
+        ):
+            raise ValueError(
+                "minimal shared core requires stable-source and strict "
+                "class-weight factorial evidence"
+            )
+        minimal_balance_integrity = {
+            "training_implementation_consistency": implementation,
+            "factorial_config_integrity": factorial,
+        }
     hierarchy_weights = None
     if hierarchy_report is not None:
         if hierarchy_path is None:
@@ -914,6 +935,7 @@ def freeze_config(
                 "sha256": file_sha256(balance_path),
                 "selected": balance_report["selected"],
                 "datasets": balance_report["datasets"],
+                **(minimal_balance_integrity or {}),
             },
             "paired_invariance": (
                 {
