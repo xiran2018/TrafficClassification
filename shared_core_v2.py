@@ -16,6 +16,7 @@ from freeze_shared_core_v2_config import (
 
 SCHEMA = "exact_shared_packet_core_v2"
 STATUS = "frozen_from_cross_dataset_validation"
+DEVELOPMENT_STATUS = "frozen_for_development_milestone"
 
 
 # These values control optimization, stochastic regularization, or compute
@@ -334,7 +335,10 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
     unsigned = {key: value for key, value in payload.items() if key != "config_sha256"}
     if not fingerprint or fingerprint != canonical_sha256(unsigned):
         raise ValueError("frozen shared-core config fingerprint mismatch")
-    if payload.get("schema") != SCHEMA or payload.get("status") != STATUS:
+    if payload.get("schema") != SCHEMA or payload.get("status") not in {
+        STATUS,
+        DEVELOPMENT_STATUS,
+    }:
         raise ValueError("unsupported or non-frozen shared-core config")
     task_datasets = payload.get("task_datasets") or {}
     if task_datasets:

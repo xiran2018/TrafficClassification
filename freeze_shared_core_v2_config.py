@@ -640,11 +640,96 @@ def validate_experiment_chain(
     return factorial_integrity
 
 
+def validate_fixed_class_weight_design(
+    design: dict[str, Any], design_path: Path
+) -> dict[str, Any]:
+    selected = design.get("selected_config") or {}
+    evidence = design.get("validation_trajectory_evidence") or {}
+    if not (
+        design.get("schema") == "fixed_minimal_class_weight_design_v1"
+        and design.get("status") == "frozen_for_development_milestone"
+        and design.get("selection_scope")
+        == "preliminary_fold0_validation_trajectory"
+        and design.get("test_labels_used") is False
+        and set(design.get("datasets") or []) == REQUIRED_DATASETS
+        and selected.get("class_weight_basis") == "packet"
+        and math.isclose(
+            float(selected.get("class_weight_strength", -1.0)),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and design.get("cost_benefit_decision")
+        == "select_simplest_baseline_abandon_low_gain_weight_screen"
+        and set(evidence) == REQUIRED_DATASETS
+    ):
+        raise ValueError("invalid fixed minimal class-weight design declaration")
+
+    recomputed: dict[str, Any] = {}
+    for dataset, row in sorted(evidence.items()):
+        histories: dict[str, dict[int, dict[str, float]]] = {}
+        for arm in ("baseline", "candidate"):
+            path = Path(str(row.get(f"{arm}_history_path") or ""))
+            if not (
+                path.is_file()
+                and row.get(f"{arm}_history_sha256") == file_sha256(path)
+            ):
+                raise ValueError(
+                    f"fixed class-weight {dataset} {arm} history is missing or stale"
+                )
+            values: dict[int, dict[str, float]] = {}
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    metrics = payload["metrics"]
+                    values[int(payload["step"])] = {
+                        "accuracy": float(metrics["accuracy"]),
+                        "macro_f1": float(metrics["macro_f1"]),
+                    }
+            histories[arm] = values
+        common_steps = sorted(set(histories["baseline"]) & set(histories["candidate"]))
+        if len(common_steps) < 4:
+            raise ValueError(
+                f"fixed class-weight {dataset} requires four aligned validation points"
+            )
+        deltas = {
+            metric: [
+                histories["candidate"][step][metric]
+                - histories["baseline"][step][metric]
+                for step in common_steps
+            ]
+            for metric in ("accuracy", "macro_f1")
+        }
+        means = {
+            metric: sum(values) / len(values) for metric, values in deltas.items()
+        }
+        recomputed[dataset] = {
+            "common_steps": common_steps,
+            "mean_delta_accuracy": means["accuracy"],
+            "mean_delta_macro_f1": means["macro_f1"],
+            "candidate_wins_accuracy": sum(value > 0.0 for value in deltas["accuracy"]),
+            "candidate_wins_macro_f1": sum(value > 0.0 for value in deltas["macro_f1"]),
+        }
+    return {
+        "path": str(design_path.resolve()),
+        "sha256": file_sha256(design_path),
+        "selected_config": {
+            "class_weight_basis": "packet",
+            "class_weight_strength": 1.0,
+        },
+        "recomputed_validation_trajectory": recomputed,
+        "test_labels_used": False,
+        "evaluation_role": "development_milestone_only",
+    }
+
+
 def freeze_config(
-    balance_report: dict[str, Any],
+    balance_report: dict[str, Any] | None,
     paired_report: dict[str, Any] | None,
     *,
-    balance_path: Path,
+    balance_path: Path | None,
     paired_path: Path | None,
     hierarchy_report: dict[str, Any] | None = None,
     hierarchy_path: Path | None = None,
@@ -652,16 +737,38 @@ def freeze_config(
     packet_hierarchy_derivation_path: Path | None = None,
     flow_hierarchy_derivation: dict[str, Any] | None = None,
     flow_hierarchy_derivation_path: Path | None = None,
+    fixed_class_weight_design: dict[str, Any] | None = None,
+    fixed_class_weight_design_path: Path | None = None,
 ) -> dict[str, Any]:
-    validate_selection(balance_report, "balance selection")
+    if (balance_report is None) == (fixed_class_weight_design is None):
+        raise ValueError(
+            "provide exactly one of balance_report or fixed_class_weight_design"
+        )
+    fixed_design_evidence = None
+    if fixed_class_weight_design is not None:
+        if fixed_class_weight_design_path is None:
+            raise ValueError("fixed_class_weight_design_path is required")
+        if paired_report is not None or hierarchy_report is not None:
+            raise ValueError(
+                "fixed minimal class-weight design cannot enable paired or hierarchy"
+            )
+        fixed_design_evidence = validate_fixed_class_weight_design(
+            fixed_class_weight_design, fixed_class_weight_design_path
+        )
+    else:
+        if balance_path is None:
+            raise ValueError("balance_path is required with balance_report")
+        validate_selection(balance_report, "balance selection")
     minimal_balance_integrity = None
     if paired_report is not None:
         if paired_path is None:
             raise ValueError("paired_path is required with paired_report")
         validate_selection(paired_report, "paired selection")
-    else:
-        implementation = balance_report.get("training_implementation_consistency") or {}
-        factorial = balance_report.get("factorial_config_integrity") or {}
+    elif fixed_design_evidence is None:
+        implementation = (
+            (balance_report or {}).get("training_implementation_consistency") or {}
+        )
+        factorial = (balance_report or {}).get("factorial_config_integrity") or {}
         if not (
             implementation.get("required") is True
             and implementation.get("status") == "pass"
@@ -769,6 +876,9 @@ def freeze_config(
     )
 
     selected_weight = (
+        fixed_design_evidence["selected_config"]
+        if fixed_design_evidence is not None
+        else
         {"class_weight_basis": "flow", "class_weight_strength": 1.0}
         if hierarchy_weights is not None
         else selected_class_weight_config(balance_report)
@@ -823,7 +933,11 @@ def freeze_config(
     }
     payload: dict[str, Any] = {
         "schema": "exact_shared_packet_core_v2",
-        "status": "frozen_from_cross_dataset_validation",
+        "status": (
+            "frozen_for_development_milestone"
+            if fixed_design_evidence is not None
+            else "frozen_from_cross_dataset_validation"
+        ),
         "datasets": sorted(METHOD_DATASETS),
         "task_datasets": {
             "packet-level-classification": sorted(PACKET_TASK_DATASETS),
@@ -930,13 +1044,17 @@ def freeze_config(
             "objective_activation_topology_must_match": True,
         },
         "selection_evidence": {
-            "balance": {
-                "path": str(balance_path),
-                "sha256": file_sha256(balance_path),
-                "selected": balance_report["selected"],
-                "datasets": balance_report["datasets"],
-                **(minimal_balance_integrity or {}),
-            },
+            "balance": (
+                fixed_design_evidence
+                if fixed_design_evidence is not None
+                else {
+                    "path": str(balance_path),
+                    "sha256": file_sha256(balance_path),
+                    "selected": balance_report["selected"],
+                    "datasets": balance_report["datasets"],
+                    **(minimal_balance_integrity or {}),
+                }
+            ),
             "paired_invariance": (
                 {
                     "path": str(paired_path),
@@ -983,13 +1101,22 @@ def freeze_config(
             "datasets": flow_hierarchy_derivation["datasets"],
             "test_labels_used": False,
         }
+    if fixed_design_evidence is not None:
+        payload["method_selection"] = {
+            "scope": "preliminary_fold0_validation_before_development_test",
+            "decision_status": "base_frozen_pending_identity_cross_scale_validation",
+            "selected_method": "minimal_shared_core_packet_effective_ce",
+            "test_labels_used": False,
+            "unbiased_final_claim_allowed": False,
+        }
     payload["config_sha256"] = canonical_sha256(payload)
     return payload
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--balance_selection", required=True)
+    parser.add_argument("--balance_selection", default="")
+    parser.add_argument("--fixed_class_weight_design", default="")
     parser.add_argument("--paired_selection", default="")
     parser.add_argument("--hierarchy_selection", default="")
     parser.add_argument("--packet_hierarchy_derivation", default="")
@@ -997,9 +1124,23 @@ def main() -> None:
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
-    balance_path = Path(args.balance_selection)
+    balance_path = Path(args.balance_selection) if args.balance_selection else None
     paired_path = Path(args.paired_selection) if args.paired_selection else None
-    balance = json.loads(balance_path.read_text(encoding="utf-8"))
+    balance = (
+        json.loads(balance_path.read_text(encoding="utf-8"))
+        if balance_path is not None
+        else None
+    )
+    fixed_design_path = (
+        Path(args.fixed_class_weight_design)
+        if args.fixed_class_weight_design
+        else None
+    )
+    fixed_design = (
+        json.loads(fixed_design_path.read_text(encoding="utf-8"))
+        if fixed_design_path is not None
+        else None
+    )
     paired = (
         json.loads(paired_path.read_text(encoding="utf-8"))
         if paired_path is not None
@@ -1042,6 +1183,8 @@ def main() -> None:
         packet_hierarchy_derivation_path=packet_derivation_path,
         flow_hierarchy_derivation=flow_derivation,
         flow_hierarchy_derivation_path=flow_derivation_path,
+        fixed_class_weight_design=fixed_design,
+        fixed_class_weight_design_path=fixed_design_path,
     )
     output = Path(args.output_json)
     output.parent.mkdir(parents=True, exist_ok=True)

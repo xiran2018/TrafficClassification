@@ -141,6 +141,50 @@ def write_report(path, payload):
     return path
 
 
+def fixed_design(tmp_path):
+    evidence = {}
+    for dataset in ("vpn-app", "tls-120"):
+        paths = {}
+        for arm, offset in (("baseline", 0.0), ("candidate", 0.01)):
+            path = tmp_path / f"{dataset}_{arm}_history.jsonl"
+            rows = [
+                {
+                    "step": step,
+                    "metrics": {
+                        "accuracy": 0.60 + step / 100.0 + offset,
+                        "macro_f1": 0.50 + step / 100.0 + offset,
+                    },
+                }
+                for step in range(1, 5)
+            ]
+            path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            paths[f"{arm}_history_path"] = str(path)
+            paths[f"{arm}_history_sha256"] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+        evidence[dataset] = paths
+    payload = {
+        "schema": "fixed_minimal_class_weight_design_v1",
+        "status": "frozen_for_development_milestone",
+        "selection_scope": "preliminary_fold0_validation_trajectory",
+        "test_labels_used": False,
+        "datasets": ["tls-120", "vpn-app"],
+        "selected_config": {
+            "class_weight_basis": "packet",
+            "class_weight_strength": 1.0,
+        },
+        "cost_benefit_decision": (
+            "select_simplest_baseline_abandon_low_gain_weight_screen"
+        ),
+        "validation_trajectory_evidence": evidence,
+    }
+    path = write_report(tmp_path / "fixed_design.json", payload)
+    return payload, path
+
+
 def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
     balance = report(tmp_path, "balance", "candidate")
     paired = bind_paired_baseline(
@@ -235,6 +279,50 @@ def test_freeze_supports_minimal_core_without_unvalidated_paired_module(tmp_path
     }
     fingerprint = frozen.pop("config_sha256")
     assert fingerprint == canonical_sha256(frozen)
+
+
+def test_freeze_supports_audited_development_design_after_cost_stop(tmp_path):
+    design, design_path = fixed_design(tmp_path)
+
+    frozen = freeze_config(
+        None,
+        None,
+        balance_path=None,
+        paired_path=None,
+        fixed_class_weight_design=design,
+        fixed_class_weight_design_path=design_path,
+    )
+
+    assert frozen["status"] == "frozen_for_development_milestone"
+    assert frozen["tower1"]["class_weight_basis"] == "packet"
+    assert frozen["tower1"]["class_weight_strength"] == 1.0
+    assert frozen["tower1"]["paired_consistency_weight"] == 0.0
+    assert frozen["method_selection"]["unbiased_final_claim_allowed"] is False
+    trajectory = frozen["selection_evidence"]["balance"][
+        "recomputed_validation_trajectory"
+    ]
+    assert trajectory["vpn-app"]["common_steps"] == [1, 2, 3, 4]
+    assert trajectory["tls-120"]["mean_delta_macro_f1"] == pytest.approx(0.01)
+
+
+def test_fixed_development_design_rejects_stale_history(tmp_path):
+    design, design_path = fixed_design(tmp_path)
+    history = Path(
+        design["validation_trajectory_evidence"]["vpn-app"][
+            "candidate_history_path"
+        ]
+    )
+    history.write_text(history.read_text(encoding="utf-8") + "{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="history is missing or stale"):
+        freeze_config(
+            None,
+            None,
+            balance_path=None,
+            paired_path=None,
+            fixed_class_weight_design=design,
+            fixed_class_weight_design_path=design_path,
+        )
 
 
 @pytest.mark.parametrize("missing", ["factorial", "implementation"])
