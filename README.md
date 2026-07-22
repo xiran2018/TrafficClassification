@@ -5792,6 +5792,18 @@ Tower1 reference retains all eight epochs. This decision uses no Test labels;
 future shortening requires a separately validated learning-curve budget rule,
 not a lower patience chosen after observing final metrics.
 
+Replay histories with content hashes and explicit no-Test provenance:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python analyze_tower1_early_stopping.py \
+  --input vpn_baseline /tmp/two_tower_runs/shared_core_v2_validation_resampled/baseline/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+  --input vpn_balance /tmp/two_tower_runs/shared_core_v2_validation_resampled/balance/checkpoints/vpn-app_fold0/packet_validation_history.jsonl \
+  --input tls_baseline_partial /tmp/two_tower_runs/shared_core_v2_validation_resampled/baseline/checkpoints/tls-120_fold0/packet_validation_history.jsonl \
+  --patience 1 2 3 \
+  --output_json /tmp/two_tower_runs/shared_core_v2/tower1_early_stop_replay.json
+```
+
 Packet and Flow manifests contain both `tower1_training_contract` (the runner
 declaration) and `tower1_execution_evidence` (the completed trainer contract).
 The latter re-hashes `final/tower1_heads.pt`, the validation history, and the
