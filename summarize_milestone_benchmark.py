@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from compare_sweet_reference import SWEET_REFERENCES, compare_metrics
 from unified_framework_spec import FLOW_LEVEL_RESULTS, PACKET_LEVEL_RESULTS
 
@@ -66,6 +68,64 @@ def metric_summary(payload: dict[str, Any], task: str) -> dict[str, Any]:
         "num_samples": int(num_samples),
         "accuracy": float(metrics["accuracy"]),
         "macro_f1": float(metrics["macro_f1"]),
+    }
+
+
+def packet_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    prediction_path = result.with_suffix(".npz")
+    if not prediction_path.is_file():
+        raise ValueError(f"Packet result is missing ordered predictions: {prediction_path}")
+    with np.load(prediction_path, allow_pickle=False) as prediction:
+        required = {"y_true", "probabilities", "flow_ids", "packet_uids"}
+        missing = sorted(required - set(prediction.files))
+        if missing:
+            raise ValueError(f"Packet predictions are missing fields: {missing}")
+        y_true = np.asarray(prediction["y_true"])
+        probabilities = np.asarray(prediction["probabilities"])
+        flow_ids = np.asarray(prediction["flow_ids"])
+        packet_uids = np.asarray(prediction["packet_uids"])
+    num_samples = len(y_true)
+    if not (
+        payload.get("task") == "packet-level-classification"
+        and payload.get("sample_unit") == "one_packet"
+        and probabilities.ndim == 2
+        and len(probabilities) == len(flow_ids) == len(packet_uids) == num_samples
+        and len(np.unique(packet_uids)) == num_samples
+    ):
+        raise ValueError("Packet Test does not prove one unique packet per sample")
+    return {
+        "status": "pass",
+        "sample_unit": "one_packet",
+        "num_samples": num_samples,
+        "num_unique_packet_uids": int(len(np.unique(packet_uids))),
+        "num_source_flows": int(len(np.unique(flow_ids))),
+        "prediction_path": str(prediction_path.resolve()),
+        "prediction_sha256": file_sha256(prediction_path),
+    }
+
+
+def flow_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    required = {"flow_y_true", "flow_y_pred", "flow_prob", "flow_ids"}
+    missing = sorted(required - set(payload))
+    if missing:
+        raise ValueError(f"Flow predictions are missing fields: {missing}")
+    y_true = payload["flow_y_true"]
+    y_pred = payload["flow_y_pred"]
+    probability = payload["flow_prob"]
+    flow_ids = payload["flow_ids"]
+    num_samples = len(y_true)
+    if not (
+        len(y_pred) == len(probability) == len(flow_ids) == num_samples
+        and len({str(flow_id) for flow_id in flow_ids}) == num_samples
+    ):
+        raise ValueError("Flow Test does not prove one unique flow per sample")
+    return {
+        "status": "pass",
+        "sample_unit": "one_flow",
+        "num_samples": num_samples,
+        "num_unique_flow_ids": num_samples,
+        "prediction_path": str(result.resolve()),
+        "prediction_sha256": file_sha256(result),
     }
 
 
@@ -223,17 +283,28 @@ def summarize(
 
         packet_result = result_path(packet_manifest, "test_unified_packet_single_head")
         flow_result = result_path(flow_manifest, "test_seq_metrics")
-        packet_metrics = metric_summary(load_json(packet_result), "packet")
-        flow_metrics = metric_summary(load_json(flow_result), "flow")
+        packet_payload = load_json(packet_result)
+        flow_payload = load_json(flow_result)
+        packet_metrics = metric_summary(packet_payload, "packet")
+        flow_metrics = metric_summary(flow_payload, "flow")
+        packet_unit = packet_sample_unit_audit(packet_result, packet_payload)
+        flow_unit = flow_sample_unit_audit(flow_result, flow_payload)
+        if (
+            packet_unit["num_samples"] != packet_metrics["num_samples"]
+            or flow_unit["num_samples"] != flow_metrics["num_samples"]
+        ):
+            raise ValueError(f"sample-unit evidence disagrees with metrics for {dataset}")
         report["datasets"][dataset] = {
             "packet": {
                 "metrics": packet_metrics,
+                "sample_unit_audit": packet_unit,
                 "comparison": benchmark_comparison(dataset, "packet", packet_metrics),
                 "result": str(packet_result),
                 "result_sha256": file_sha256(packet_result),
             },
             "flow": {
                 "metrics": flow_metrics,
+                "sample_unit_audit": flow_unit,
                 "comparison": benchmark_comparison(dataset, "flow", flow_metrics),
                 "result": str(flow_result),
                 "result_sha256": file_sha256(flow_result),

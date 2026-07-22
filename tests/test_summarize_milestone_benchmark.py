@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from summarize_milestone_benchmark import DATASETS, summarize
@@ -23,9 +24,28 @@ def result(path: Path, task: str) -> Path:
         "macro_f1": 0.7,
         "calibration": {"num_samples": 10},
     }
-    payload = {
-        "metrics": metrics if task == "packet" else {"flow_level": flow_metrics}
-    }
+    if task == "packet":
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "task": "packet-level-classification",
+            "sample_unit": "one_packet",
+            "metrics": metrics,
+        }
+        np.savez_compressed(
+            path.with_suffix(".npz"),
+            y_true=np.arange(10) % 2,
+            probabilities=np.full((10, 2), 0.5),
+            flow_ids=np.asarray([f"flow-{index // 2}" for index in range(10)]),
+            packet_uids=np.asarray([f"packet-{index}" for index in range(10)]),
+        )
+    else:
+        payload = {
+            "metrics": {"flow_level": flow_metrics},
+            "flow_y_true": [0] * 10,
+            "flow_y_pred": [0] * 10,
+            "flow_prob": [[1.0, 0.0]] * 10,
+            "flow_ids": [f"flow-{index}" for index in range(10)],
+        }
     return write_json(path, payload)
 
 
@@ -125,6 +145,26 @@ def test_summarize_marks_test_as_development_benchmark(tmp_path):
         "accuracy": 0.8,
         "macro_f1": 0.7,
     }
+    assert report["datasets"]["vpn-app"]["packet"]["sample_unit_audit"][
+        "num_unique_packet_uids"
+    ] == 10
+    assert report["datasets"]["vpn-app"]["flow"]["sample_unit_audit"] == {
+        "status": "pass",
+        "sample_unit": "one_flow",
+        "num_samples": 10,
+        "num_unique_flow_ids": 10,
+        "prediction_path": str(
+            (
+                repo
+                / "reasoningDataset"
+                / "vpn-app"
+                / "test_seq_metrics_flow_milestone_dev_fold0_probs.json"
+            ).resolve()
+        ),
+        "prediction_sha256": report["datasets"]["vpn-app"]["flow"][
+            "result_sha256"
+        ],
+    }
     comparison = report["datasets"]["vpn-app"]["packet"]["comparison"]
     assert comparison["predeclared_target"]["met"] is False
     assert comparison["sweet"]["end_to_end"]["delta_accuracy"] == pytest.approx(
@@ -173,4 +213,34 @@ def test_summarize_rejects_unfrozen_config(tmp_path):
     payload["method_selection"]["decision_status"] = "provisional"
     write_json(config, payload)
     with pytest.raises(ValueError, match="not frozen"):
+        summarize(root, repo, config)
+
+
+def test_summarize_rejects_duplicate_packet_or_flow_samples(tmp_path):
+    root, repo, config = build_tree(tmp_path)
+    packet_npz = (
+        root
+        / "packet_artifacts"
+        / "vpn-app"
+        / "fold0"
+        / "test_unified_packet_single_head.npz"
+    )
+    with np.load(packet_npz) as original:
+        arrays = {key: original[key] for key in original.files}
+    arrays["packet_uids"][-1] = arrays["packet_uids"][0]
+    np.savez_compressed(packet_npz, **arrays)
+    with pytest.raises(ValueError, match="one unique packet"):
+        summarize(root, repo, config)
+
+    root, repo, config = build_tree(tmp_path / "flow_case")
+    flow_result = (
+        repo
+        / "reasoningDataset"
+        / "vpn-app"
+        / "test_seq_metrics_flow_milestone_dev_fold0_probs.json"
+    )
+    payload = json.loads(flow_result.read_text(encoding="utf-8"))
+    payload["flow_ids"][-1] = payload["flow_ids"][0]
+    write_json(flow_result, payload)
+    with pytest.raises(ValueError, match="one unique flow"):
         summarize(root, repo, config)

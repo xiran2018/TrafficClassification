@@ -191,6 +191,12 @@ are reporting-only and cannot change the frozen method. If either development
 Test informs subsequent design, the final paper claim requires a new outer
 holdout or nested cross-validation.
 
+The same report proves the inference unit from ordered predictions rather than
+only trusting a command-line declaration. Packet results must bind a `.npz`
+with one unique `packet_uid` per row plus its source `flow_id`; Flow results
+must contain one unique `flow_id` per row. The report records row counts and
+prediction-file SHA-256 values and rejects either duplicate sample unit.
+
 Before the full benchmark Test is released, the four Packet application
 datasets that do not participate in VPN/TLS method selection run one
 locked-Test fold-0 applicability screen with the already frozen method:
