@@ -282,6 +282,11 @@ These diagnostics may falsify the reliability interpretation. They must not be
 used to tune a test-set gate or to rename ordinary mixture-of-experts routing
 as a causal estimator.
 
+The only permitted explicit reliability-supervision candidate is frozen in
+`reasoningDataset/counterfactual_reliability_candidate_preregistration.md`.
+Its registered objective, Flow de-overlap semantics, controls, promotion gate,
+and stop rule must not be changed after the current milestone Test is observed.
+
 ## Required Evidence
 
 - Exact class/schema audit showing both tasks execute `SharedPacketRepresentationEncoder`, `SharedInterventionViewFusion`, `SharedPacketChannelFusion`, and the same classifier-head class where applicable.
