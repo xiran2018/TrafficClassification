@@ -56,6 +56,17 @@ GPU_PROGRAMS = {
 }
 
 
+def parse_eval_splits(value: str) -> tuple[str, ...]:
+    splits = tuple(part.strip() for part in value.split(",") if part.strip())
+    invalid = sorted(set(splits) - {"valid", "test"})
+    if not splits or invalid:
+        detail = f"; invalid values: {','.join(invalid)}" if invalid else ""
+        raise argparse.ArgumentTypeError(
+            "--eval_splits must contain valid, test, or valid,test" + detail
+        )
+    return tuple(dict.fromkeys(splits))
+
+
 def command_program(command: list[str]) -> str:
     return Path(command[1]).name if len(command) > 1 else Path(command[0]).name
 
@@ -509,31 +520,23 @@ def write_framework_manifest(
                     / "byte_transformer"
                     / "best.pt"
                 ),
+                "eval_splits": list(args.eval_splits),
                 "result_paths": [
-                    str(artifacts / "valid_unified_packet_single_head.json"),
-                    str(artifacts / "test_unified_packet_single_head.json"),
+                    str(artifacts / f"{split}_unified_packet_single_head.json")
+                    for split in args.eval_splits
                 ] if args.stage == "paper_unified" else (
                     [
                         str(
                             artifacts
                             / (
-                                "valid_shared_core_ablation_"
+                                f"{split}_shared_core_ablation_"
                                 f"{args.train_ablate_input_channel}_"
                                 f"{args.train_ablate_intervention_view}"
                                 f"{'_fixed' if args.train_fixed_channel_fusion else ''}"
                                 f"{'_row_risk' if args.train_row_risk_ablation else ''}.json"
                             )
-                        ),
-                        str(
-                            artifacts
-                            / (
-                                "test_shared_core_ablation_"
-                                f"{args.train_ablate_input_channel}_"
-                                f"{args.train_ablate_intervention_view}"
-                                f"{'_fixed' if args.train_fixed_channel_fusion else ''}"
-                                f"{'_row_risk' if args.train_row_risk_ablation else ''}.json"
-                            )
-                        ),
+                        )
+                        for split in args.eval_splits
                     ]
                     if args.stage == "shared_core_ablation"
                     else []
@@ -642,6 +645,15 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--packet_batch_size", type=int, default=16)
     ap.add_argument("--eval_batch_size", type=int, default=16)
+    ap.add_argument(
+        "--eval_splits",
+        type=parse_eval_splits,
+        default=("valid", "test"),
+        help=(
+            "Comma-separated final classifier evaluation splits. Use 'valid' for "
+            "validation-first candidate screening without producing Test metrics."
+        ),
+    )
     ap.add_argument("--valid_packets_per_flow", type=int, default=2)
     ap.add_argument(
         "--packet_batch_scheduler",
@@ -1300,7 +1312,9 @@ def main() -> None:
             ],
             args.dry_run,
         )
-        for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
+        eval_directories = {"valid": valid_dir, "test": test_dir}
+        for split_name in args.eval_splits:
+            split_dir = eval_directories[split_name]
             run(
                 [
                     sys.executable,
@@ -1437,7 +1451,9 @@ def main() -> None:
                 ]
             )
         run(byte_command, args.dry_run)
-        for split_name, split_dir in (("valid", valid_dir), ("test", test_dir)):
+        eval_directories = {"valid": valid_dir, "test": test_dir}
+        for split_name in args.eval_splits:
+            split_dir = eval_directories[split_name]
             output_stem = (
                 f"{split_name}_unified_packet_single_head"
                 if args.stage == "paper_unified"

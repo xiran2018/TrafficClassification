@@ -722,6 +722,59 @@ def test_packet_runner_common_reference_keeps_method_and_effective_hash_equal(tm
     assert notes["shared_core_config_sha256"] == notes["shared_core_method_sha256"]
 
 
+def test_packet_runner_can_screen_valid_without_test_evaluation(tmp_path):
+    config = write_payload(tmp_path / "frozen.json", frozen_payload())
+    artifact_root = tmp_path / "packet_artifacts"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "run_packet_level_pipeline.py"),
+            "--dataset",
+            "vpn-app",
+            "--fold",
+            "0",
+            "--stage",
+            "paper_unified",
+            "--dry_run",
+            "--eval_splits",
+            "valid",
+            "--artifact_root",
+            str(artifact_root),
+            "--checkpoint_root",
+            str(tmp_path / "packet_checkpoints"),
+            "--shared_core_config",
+            str(config),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    evaluation_commands = [
+        line
+        for line in result.stdout.splitlines()
+        if "test_packet_byte_transformer.py" in line
+    ]
+    assert len(evaluation_commands) == 1
+    assert "valid/packet_index.jsonl" in evaluation_commands[0]
+    assert "test/packet_index.jsonl" not in evaluation_commands[0]
+
+    manifest = json.loads(
+        next(artifact_root.glob("vpn-app/fold0/packet_framework_manifest.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    notes = manifest["framework"]["notes"]
+    assert notes["eval_splits"] == ["valid"]
+    assert notes["result_paths"] == [
+        str(
+            artifact_root
+            / "vpn-app/fold0/valid_unified_packet_single_head.json"
+        )
+    ]
+
+
 def test_packet_runner_preserves_declared_numeric_overrides(tmp_path):
     payload = frozen_payload()
     config = write_payload(tmp_path / "frozen.json", payload)
