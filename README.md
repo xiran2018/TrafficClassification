@@ -5309,6 +5309,20 @@ selection: held-out packet macro-F1 gain >=0.005 and accuracy drop <=0.005,
 test policy: evaluate the frozen selected setting once; do not select strength from test metrics
 ```
 
+Notation note: Tower-1 class weighting has no learnable `eta` parameter. Its
+implemented controls are `class_weight_beta`, `class_weight_basis`, and
+`class_weight_strength`. The symbol `eta` used later in the paired-loss
+equation denotes only the symmetric-logit-KL coefficient; it is inactive when
+`paired_consistency_weight=0`, as in the frozen base milestone. In that
+milestone, packet-basis counts are exactly balanced (`2068` rows per VPN class
+and `822` rows per TLS-120 class), so the logged normalized CE weights are all
+`1.0`. The separately evaluated flow-basis square-root candidate improves the
+mean validation Macro-F1 trajectory by about `0.56` percentage points on both
+datasets, but changes mean Accuracy by `-0.50` points on VPN and `+0.58` points
+on TLS-120. It therefore misses the frozen VPN Accuracy guard and is excluded
+from the minimal main method; further numeric class-weight screening is a
+low-return ablation, not part of the current long-running milestone.
+
 Full flow-count correction is not the first candidate because its maximum normalized weight is approximately `2.98` on VPN but `16.20` on TLS-120. The shared square-root correction limits the observed ranges to approximately `0.46-1.86` on VPN and `0.72-4.30` on TLS-120, reducing variance while correcting the sampler/loss mismatch.
 
 `analyze_class_weight_mechanism.py` binds the training packet file and both
