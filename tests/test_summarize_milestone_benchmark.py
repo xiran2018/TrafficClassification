@@ -18,10 +18,10 @@ def write_json(path: Path, payload: dict) -> Path:
 
 
 def result(path: Path, task: str) -> Path:
-    metrics = {"num_samples": 10, "accuracy": 0.8, "macro_f1": 0.7}
+    metrics = {"num_samples": 10, "accuracy": 0.8, "macro_f1": 0.8}
     flow_metrics = {
         "accuracy": 0.8,
-        "macro_f1": 0.7,
+        "macro_f1": 0.8,
         "calibration": {"num_samples": 10},
     }
     if task == "packet":
@@ -148,7 +148,7 @@ def test_summarize_marks_test_as_development_benchmark(tmp_path):
     assert report["datasets"]["vpn-app"]["packet"]["metrics"] == {
         "num_samples": 10,
         "accuracy": 0.8,
-        "macro_f1": 0.7,
+        "macro_f1": 0.8,
     }
     assert report["datasets"]["vpn-app"]["packet"]["sample_unit_audit"][
         "num_unique_packet_uids"
@@ -159,6 +159,7 @@ def test_summarize_marks_test_as_development_benchmark(tmp_path):
         "num_samples": 10,
         "num_unique_flow_ids": 10,
         "recomputed_accuracy": 0.8,
+        "recomputed_macro_f1": 0.8,
         "prediction_path": str(
             (
                 repo
@@ -252,7 +253,8 @@ def test_summarize_rejects_duplicate_packet_or_flow_samples(tmp_path):
         summarize(root, repo, config)
 
 
-def test_summarize_rejects_prediction_metric_mismatch(tmp_path):
+@pytest.mark.parametrize("metric", ["accuracy", "macro_f1"])
+def test_summarize_rejects_packet_prediction_metric_mismatch(tmp_path, metric):
     root, repo, config = build_tree(tmp_path)
     packet_result = (
         root
@@ -262,7 +264,25 @@ def test_summarize_rejects_prediction_metric_mismatch(tmp_path):
         / "test_unified_packet_single_head.json"
     )
     payload = json.loads(packet_result.read_text(encoding="utf-8"))
-    payload["metrics"]["accuracy"] = 0.9
+    payload["metrics"][metric] = 0.9
     write_json(packet_result, payload)
-    with pytest.raises(ValueError, match="Packet prediction Accuracy"):
+    expected = "Accuracy" if metric == "accuracy" else "Macro-F1"
+    with pytest.raises(ValueError, match=f"Packet prediction {expected}"):
+        summarize(root, repo, config)
+
+
+@pytest.mark.parametrize("metric", ["accuracy", "macro_f1"])
+def test_summarize_rejects_flow_prediction_metric_mismatch(tmp_path, metric):
+    root, repo, config = build_tree(tmp_path)
+    flow_result = (
+        repo
+        / "reasoningDataset"
+        / "vpn-app"
+        / "test_seq_metrics_flow_milestone_dev_fold0_probs.json"
+    )
+    payload = json.loads(flow_result.read_text(encoding="utf-8"))
+    payload["metrics"]["flow_level"][metric] = 0.9
+    write_json(flow_result, payload)
+    expected = "Accuracy" if metric == "accuracy" else "Macro-F1"
+    with pytest.raises(ValueError, match=f"Flow prediction {expected}"):
         summarize(root, repo, config)

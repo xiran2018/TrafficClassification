@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from sklearn.metrics import f1_score
 
 from compare_sweet_reference import SWEET_REFERENCES, compare_metrics
 from unified_framework_spec import FLOW_LEVEL_RESULTS, PACKET_LEVEL_RESULTS
@@ -95,9 +96,15 @@ def packet_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str,
         raise ValueError("Packet Test does not prove one unique packet per sample")
     predicted = probabilities.argmax(axis=1)
     recomputed_accuracy = float(np.mean(predicted == y_true))
+    recomputed_macro_f1 = float(
+        f1_score(y_true, predicted, average="macro", zero_division=0)
+    )
     reported_accuracy = float((payload.get("metrics") or {})["accuracy"])
+    reported_macro_f1 = float((payload.get("metrics") or {})["macro_f1"])
     if not np.isclose(recomputed_accuracy, reported_accuracy, atol=1e-12):
         raise ValueError("Packet prediction Accuracy disagrees with the JSON report")
+    if not np.isclose(recomputed_macro_f1, reported_macro_f1, atol=1e-12):
+        raise ValueError("Packet prediction Macro-F1 disagrees with the JSON report")
     return {
         "status": "pass",
         "sample_unit": "one_packet",
@@ -105,6 +112,7 @@ def packet_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str,
         "num_unique_packet_uids": int(len(np.unique(packet_uids))),
         "num_source_flows": int(len(np.unique(flow_ids))),
         "recomputed_accuracy": recomputed_accuracy,
+        "recomputed_macro_f1": recomputed_macro_f1,
         "prediction_path": str(prediction_path.resolve()),
         "prediction_sha256": file_sha256(prediction_path),
     }
@@ -128,17 +136,26 @@ def flow_sample_unit_audit(result: Path, payload: dict[str, Any]) -> dict[str, A
     recomputed_accuracy = float(
         np.mean(np.asarray(y_pred, dtype=np.int64) == np.asarray(y_true, dtype=np.int64))
     )
+    recomputed_macro_f1 = float(
+        f1_score(y_true, y_pred, average="macro", zero_division=0)
+    )
     reported_accuracy = float(
         ((payload.get("metrics") or {}).get("flow_level") or {})["accuracy"]
     )
+    reported_macro_f1 = float(
+        ((payload.get("metrics") or {}).get("flow_level") or {})["macro_f1"]
+    )
     if not np.isclose(recomputed_accuracy, reported_accuracy, atol=1e-12):
         raise ValueError("Flow prediction Accuracy disagrees with the JSON report")
+    if not np.isclose(recomputed_macro_f1, reported_macro_f1, atol=1e-12):
+        raise ValueError("Flow prediction Macro-F1 disagrees with the JSON report")
     return {
         "status": "pass",
         "sample_unit": "one_flow",
         "num_samples": num_samples,
         "num_unique_flow_ids": num_samples,
         "recomputed_accuracy": recomputed_accuracy,
+        "recomputed_macro_f1": recomputed_macro_f1,
         "prediction_path": str(result.resolve()),
         "prediction_sha256": file_sha256(result),
     }
