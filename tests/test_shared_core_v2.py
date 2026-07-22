@@ -305,6 +305,7 @@ def packet_args():
         "tower1_early_stop_patience": 3,
         "init_checkpoint_dir": "old-checkpoint",
         "init_adapter_only": True,
+        "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
     }
     return SimpleNamespace(**names)
 
@@ -431,6 +432,7 @@ def test_flow_runtime_uses_the_same_core_values():
         tower1_disable_packet_information_weights=False,
         flow_balanced_packet_batches=False,
         packets_per_flow=1,
+        packet_batch_scheduler="epoch_resampled_dataloader_v1",
         model_types="graph,seq",
         exact_shared_packet_encoder=False,
         shared_packet_hidden_dim=1,

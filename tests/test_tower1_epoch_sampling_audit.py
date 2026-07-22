@@ -30,3 +30,24 @@ def test_singleton_flows_change_order_even_when_packet_identity_cannot_change():
     assert report["all_epoch_batch_hashes_unique"] is True
     assert report["all_adjacent_epochs_change_flow_packet_selection"] is False
     assert report["final_cumulative_packet_coverage"] == 1.0
+
+
+def test_coverage_cycle_audit_proves_no_repeat_before_full_flow_coverage():
+    rows = [
+        {"flow_id": f"flow-{flow}", "packet_id": packet}
+        for flow in range(4)
+        for packet in range(7)
+    ]
+
+    report = epoch_sampling_audit(
+        rows,
+        batch_size=4,
+        packets_per_flow=2,
+        seed=42,
+        epochs=3,
+        scheduler="coverage_cycle_dataloader_v1",
+    )
+
+    assert report["scheduler"] == "coverage_cycle_dataloader_v1"
+    assert report["coverage_cycle_no_early_repeat_verified"] is True
+    assert report["final_cumulative_packet_coverage"] == 24 / 28

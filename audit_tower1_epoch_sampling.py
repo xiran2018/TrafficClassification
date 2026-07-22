@@ -11,7 +11,10 @@ from typing import Any
 from train_tower1_multitask import FlowBalancedPacketBatchSampler, file_sha256, load_jsonl
 
 
-SCHEDULER = "epoch_resampled_dataloader_v1"
+SCHEDULERS = {
+    "epoch_resampled_dataloader_v1",
+    "coverage_cycle_dataloader_v1",
+}
 
 
 def epoch_sampling_audit(
@@ -21,6 +24,7 @@ def epoch_sampling_audit(
     packets_per_flow: int,
     seed: int,
     epochs: int,
+    scheduler: str = "epoch_resampled_dataloader_v1",
 ) -> dict[str, Any]:
     if epochs < 2:
         raise ValueError("sampling audit requires at least two epochs")
@@ -29,11 +33,13 @@ def epoch_sampling_audit(
         batch_size=batch_size,
         packets_per_flow=packets_per_flow,
         seed=seed,
+        scheduler=scheduler,
     )
     epoch_rows: list[dict[str, Any]] = []
     cumulative_packets: set[int] = set()
     previous_packets: set[int] | None = None
     previous_by_flow: dict[str, tuple[int, ...]] | None = None
+    cumulative_by_flow: dict[str, set[int]] = {}
 
     for epoch in range(epochs):
         digest = hashlib.sha256()
@@ -47,6 +53,7 @@ def epoch_sampling_audit(
             for index in batch:
                 flow_id = str(rows[index].get("flow_id", index))
                 selected_by_flow.setdefault(flow_id, []).append(index)
+                cumulative_by_flow.setdefault(flow_id, set()).add(index)
         packet_set = set(selected_packets)
         cumulative_packets.update(packet_set)
         normalized_by_flow = {
@@ -87,8 +94,8 @@ def epoch_sampling_audit(
         for row in epoch_rows[1:]
     ]
     return {
-        "schema": "tower1_epoch_sampling_audit_v1",
-        "scheduler": SCHEDULER,
+        "schema": "tower1_epoch_sampling_audit_v2",
+        "scheduler": scheduler,
         "seed": seed,
         "epochs": epochs,
         "batch_size": batch_size,
@@ -100,6 +107,15 @@ def epoch_sampling_audit(
             value is not None and value > 0.0 for value in adjacent_change_rates
         ),
         "final_cumulative_packet_coverage": len(cumulative_packets) / max(1, len(rows)),
+        "coverage_cycle_no_early_repeat_verified": (
+            all(
+                len(cumulative_by_flow.get(flow_id, set()))
+                == min(len(indices), epochs * packets_per_flow)
+                for flow_id, indices in sampler.flow_to_indices.items()
+            )
+            if scheduler == "coverage_cycle_dataloader_v1"
+            else None
+        ),
         "epochs_detail": epoch_rows,
     }
 
@@ -111,6 +127,11 @@ def main() -> None:
     parser.add_argument("--packets_per_flow", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=8)
+    parser.add_argument(
+        "--packet_batch_scheduler",
+        choices=sorted(SCHEDULERS),
+        default="epoch_resampled_dataloader_v1",
+    )
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
@@ -122,6 +143,7 @@ def main() -> None:
         packets_per_flow=args.packets_per_flow,
         seed=args.seed,
         epochs=args.epochs,
+        scheduler=args.packet_batch_scheduler,
     )
     report["input"] = {
         "path": str(input_path.resolve()),

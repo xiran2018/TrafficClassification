@@ -287,7 +287,13 @@ def tower1_train_cmd(args) -> List[str]:
             str(args.tower1_paired_raw_consistency_weight),
         ]
     if args.flow_balanced_packet_batches:
-        cmd += ["--flow_balanced_packet_batches", "--packets_per_flow", str(args.packets_per_flow)]
+        cmd += [
+            "--flow_balanced_packet_batches",
+            "--packets_per_flow",
+            str(args.packets_per_flow),
+            "--packet_batch_scheduler",
+            args.packet_batch_scheduler,
+        ]
     if args.local_files_only:
         cmd.append("--local_files_only")
     if args.gradient_checkpointing:
@@ -1706,6 +1712,11 @@ def main() -> None:
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0, help="Raw last-token cosine term inside Tower-1 paired consistency.")
     ap.add_argument("--flow_balanced_packet_batches", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--packets_per_flow", type=int, default=2)
+    ap.add_argument(
+        "--packet_batch_scheduler",
+        choices=["epoch_resampled_dataloader_v1", "coverage_cycle_dataloader_v1"],
+        default="epoch_resampled_dataloader_v1",
+    )
     ap.add_argument("--tower1_lr", type=float, default=2e-5)
     ap.add_argument("--tower1_head_lr", type=float, default=1e-4)
     ap.add_argument("--tower1_class_weighting", choices=["none", "inverse", "effective"], default="none")

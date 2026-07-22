@@ -159,6 +159,7 @@ def tower1_training_config(args) -> dict:
         "paired_raw_consistency_weight",
         "flow_balanced_packet_batches",
         "packets_per_flow",
+        "packet_batch_scheduler",
         "projection_dim",
         "lora_r",
         "lora_alpha",
@@ -174,8 +175,12 @@ def tower1_training_config(args) -> dict:
         "no_sft",
         "seed",
     )
-    config = {key: getattr(args, key) for key in keys}
-    config["packet_batch_scheduler"] = "epoch_resampled_dataloader_v1"
+    config = {key: getattr(args, key, None) for key in keys}
+    config["packet_batch_scheduler"] = getattr(
+        args,
+        "packet_batch_scheduler",
+        "epoch_resampled_dataloader_v1",
+    )
     return config
 
 
@@ -262,6 +267,7 @@ class FlowBalancedPacketBatchSampler(BatchSampler):
         packets_per_flow: int,
         seed: int = 42,
         allow_packet_replacement: bool = True,
+        scheduler: str = "epoch_resampled_dataloader_v1",
     ):
         self.flow_to_indices: Dict[str, List[int]] = {}
         for idx, row in enumerate(rows):
@@ -272,10 +278,30 @@ class FlowBalancedPacketBatchSampler(BatchSampler):
         self.flows_per_batch = max(1, self.batch_size // self.packets_per_flow)
         self.seed = seed
         self.allow_packet_replacement = bool(allow_packet_replacement)
+        if scheduler not in {
+            "epoch_resampled_dataloader_v1",
+            "coverage_cycle_dataloader_v1",
+        }:
+            raise ValueError(f"unsupported packet batch scheduler: {scheduler}")
+        self.scheduler = scheduler
         self.epoch = 0
 
+    def _coverage_cycle_sample(self, flow_id: str, indices: List[int], epoch: int) -> List[int]:
+        """Traverse a deterministic per-flow permutation before repeating packets."""
+        selected: List[int] = []
+        flow_seed = stable_flow_id(flow_id)
+        start = epoch * self.packets_per_flow
+        for virtual_position in range(start, start + self.packets_per_flow):
+            cycle, position = divmod(virtual_position, len(indices))
+            permutation = list(indices)
+            cycle_seed = (self.seed + flow_seed + cycle * 1_000_003) & ((1 << 63) - 1)
+            random.Random(cycle_seed).shuffle(permutation)
+            selected.append(permutation[position])
+        return selected
+
     def __iter__(self):
-        rng = random.Random(self.seed + self.epoch)
+        epoch = self.epoch
+        rng = random.Random(self.seed + epoch)
         self.epoch += 1
         flows = list(self.flows)
         rng.shuffle(flows)
@@ -283,7 +309,12 @@ class FlowBalancedPacketBatchSampler(BatchSampler):
             batch = []
             for flow_id in flows[start:start + self.flows_per_batch]:
                 indices = self.flow_to_indices[flow_id]
-                if len(indices) >= self.packets_per_flow:
+                if self.scheduler == "coverage_cycle_dataloader_v1":
+                    if not self.allow_packet_replacement and len(indices) < self.packets_per_flow:
+                        batch.extend(indices)
+                    else:
+                        batch.extend(self._coverage_cycle_sample(flow_id, indices, epoch))
+                elif len(indices) >= self.packets_per_flow:
                     batch.extend(rng.sample(indices, self.packets_per_flow))
                 elif not self.allow_packet_replacement:
                     batch.extend(indices)
@@ -625,6 +656,12 @@ def main() -> None:
     )
     ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
     ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
+    ap.add_argument(
+        "--packet_batch_scheduler",
+        choices=["epoch_resampled_dataloader_v1", "coverage_cycle_dataloader_v1"],
+        default="epoch_resampled_dataloader_v1",
+        help="Per-flow packet exposure policy across training epochs.",
+    )
     ap.add_argument("--projection_dim", type=int, default=256)
     ap.add_argument("--lora_r", type=int, default=16)
     ap.add_argument("--lora_alpha", type=int, default=32)
@@ -743,6 +780,7 @@ def main() -> None:
             packets_per_flow=args.packets_per_flow,
             seed=args.seed,
             allow_packet_replacement=not distinct_flow_context,
+            scheduler=args.packet_batch_scheduler,
         )
         packet_loader = DataLoader(
             packet_ds,
@@ -753,7 +791,8 @@ def main() -> None:
             f"flow-balanced packet sampler: flows={len(packet_sampler.flows)}, "
             f"flows_per_batch={packet_sampler.flows_per_batch}, "
             f"packets_per_flow={packet_sampler.packets_per_flow}, "
-            f"allow_packet_replacement={packet_sampler.allow_packet_replacement}",
+            f"allow_packet_replacement={packet_sampler.allow_packet_replacement}, "
+            f"scheduler={packet_sampler.scheduler}",
             flush=True,
         )
     else:

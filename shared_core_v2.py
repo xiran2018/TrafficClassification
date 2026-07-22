@@ -425,8 +425,11 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         tower1["packets_per_flow"]
     ) != 2:
         raise ValueError("shared-core v2 requires two-packet flow-balanced batches")
-    if tower1["packet_batch_scheduler"] != "epoch_resampled_dataloader_v1":
-        raise ValueError("shared-core v2 requires fresh deterministic sampling each epoch")
+    if tower1["packet_batch_scheduler"] not in {
+        "epoch_resampled_dataloader_v1",
+        "coverage_cycle_dataloader_v1",
+    }:
+        raise ValueError("shared-core v2 has an unsupported packet batch scheduler")
     if float(tower1["weight_decay"]) != 0.01:
         raise ValueError("shared-core v2 requires the fixed Tower1 weight decay")
     if float(tower1["class_weight_beta"]) != 0.9999:
@@ -545,6 +548,7 @@ def apply_frozen_shared_core(
             "class_weighting": tower1["class_weighting"],
             "class_weight_basis": tower1["class_weight_basis"],
             "class_weight_strength": tower1["class_weight_strength"],
+            "packet_batch_scheduler": tower1["packet_batch_scheduler"],
             "tower1_paired_consistency_weight": tower1["paired_consistency_weight"],
             "tower1_paired_cls_weight": tower1["paired_cls_weight"],
             "tower1_paired_logit_kl_weight": tower1["paired_logit_kl_weight"],
@@ -591,6 +595,7 @@ def apply_frozen_shared_core(
                 "flow_balanced_packet_batches"
             ],
             "packets_per_flow": tower1["packets_per_flow"],
+            "packet_batch_scheduler": tower1["packet_batch_scheduler"],
             "model_types": "seq",
             "exact_shared_packet_encoder": True,
             "shared_packet_hidden_dim": core["hidden_dim"],

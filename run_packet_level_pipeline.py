@@ -643,6 +643,11 @@ def main() -> None:
     ap.add_argument("--packet_batch_size", type=int, default=16)
     ap.add_argument("--eval_batch_size", type=int, default=16)
     ap.add_argument("--valid_packets_per_flow", type=int, default=2)
+    ap.add_argument(
+        "--packet_batch_scheduler",
+        choices=["epoch_resampled_dataloader_v1", "coverage_cycle_dataloader_v1"],
+        default="epoch_resampled_dataloader_v1",
+    )
     ap.add_argument("--tower1_early_stop_patience", type=int, default=0)
     ap.add_argument("--semantic_embedding_batch_size", type=int, default=8)
     ap.add_argument("--semantic_embedding_flow_batch_packets", type=int, default=128)
@@ -1058,6 +1063,7 @@ def main() -> None:
             "--gradient_checkpointing",
             "--flow_balanced_packet_batches",
             "--packets_per_flow", "2",
+            "--packet_batch_scheduler", args.packet_batch_scheduler,
             "--no_sft",
         ]
         if args.init_checkpoint_dir:
@@ -1308,6 +1314,7 @@ def main() -> None:
                 "--batch_size", str(args.byte_batch_size),
                 "--eval_batch_size", str(args.byte_eval_batch_size),
                 "--packets_per_flow", "8",
+                "--packet_batch_scheduler", args.packet_batch_scheduler,
                 "--mask_probability", str(args.byte_mask_probability),
                 "--masked_ce_weight", (
                     str(args.byte_masked_ce_weight)

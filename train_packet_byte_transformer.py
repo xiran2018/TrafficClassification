@@ -1044,6 +1044,11 @@ def main() -> None:
     ap.add_argument("--contrastive_weight", type=float, default=0.05)
     ap.add_argument("--temperature", type=float, default=0.1)
     ap.add_argument("--packets_per_flow", type=int, default=2)
+    ap.add_argument(
+        "--packet_batch_scheduler",
+        choices=["epoch_resampled_dataloader_v1", "coverage_cycle_dataloader_v1"],
+        default="epoch_resampled_dataloader_v1",
+    )
     ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -1105,7 +1110,11 @@ def main() -> None:
     ):
         raise ValueError("train and validation must both provide intervention semantic views")
     sampler = FlowBalancedPacketBatchSampler(
-        train_dataset.rows, args.batch_size, args.packets_per_flow, seed=args.seed
+        train_dataset.rows,
+        args.batch_size,
+        args.packets_per_flow,
+        seed=args.seed,
+        scheduler=args.packet_batch_scheduler,
     )
     train_loader = DataLoader(
         train_dataset,

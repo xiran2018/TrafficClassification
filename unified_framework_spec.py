@@ -502,7 +502,9 @@ def tower1_training_contract(args: Any, task: str) -> Dict[str, Any]:
         "disable_packet_information_weights": disable_information_weights,
         "flow_balanced_packet_batches": flow_balanced_batches,
         "packets_per_flow": packets_per_flow,
-        "packet_batch_scheduler": "epoch_resampled_dataloader_v1",
+        "packet_batch_scheduler": str(
+            getattr(args, "packet_batch_scheduler", "epoch_resampled_dataloader_v1")
+        ),
         "select_metric": "macro_f1",
         "early_stop_patience": int(
             value("tower1_early_stop_patience", "tower1_early_stop_patience")
