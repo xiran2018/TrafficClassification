@@ -446,9 +446,12 @@ def predict_packet_views(
     include_masked=False,
     include_identifiability=False,
     return_gate_diagnostics=False,
+    return_gate_values=False,
     ablate_channel="none",
     ablate_intervention_view="none",
 ):
+    if return_gate_values and not return_gate_diagnostics:
+        raise ValueError("return_gate_values requires return_gate_diagnostics")
     model.eval()
     ys, raw_probabilities, masked_probabilities, identifiability = [], [], [], []
     content_group_ids = []
@@ -525,7 +528,46 @@ def predict_packet_views(
     gate_diagnostics = summarize_packet_gate_diagnostics(
         model, channel_gates, intervention_gates
     )
+    if return_gate_values:
+        gate_values = packet_effective_gate_values(
+            model, channel_gates, intervention_gates
+        )
+        return (
+            y_true,
+            raw,
+            masked,
+            reliability,
+            groups,
+            gate_diagnostics,
+            gate_values,
+        )
     return y_true, raw, masked, reliability, groups, gate_diagnostics
+
+
+def packet_effective_gate_values(model, channel_chunks, intervention_chunks):
+    """Return per-packet effective routing weights for mechanism diagnostics."""
+    gate_values: dict[str, np.ndarray] = {}
+    if channel_chunks:
+        values = torch.cat(channel_chunks, dim=0).float()
+        fusion = model.shared_packet_fusion
+        if getattr(model, "train_fixed_channel_fusion", False):
+            effective = values
+        elif fusion.base_mode == "semantic_anchor":
+            effective = fusion.effective_weights(values)
+        else:
+            effective = values
+        gate_values["packet_channel_gate"] = effective.numpy()
+    if intervention_chunks:
+        values = torch.cat(intervention_chunks, dim=0).float()
+        fusion = getattr(model, "intervention_view_fusion", None)
+        if fusion is None and hasattr(model, "shared_packet_encoder"):
+            fusion = model.shared_packet_encoder.intervention_view_fusion
+        if fusion is None:
+            raise ValueError("intervention gate was emitted without its fusion module")
+        gate_values["intervention_view_gate"] = (
+            fusion.effective_weights(values).numpy()
+        )
+    return gate_values
 
 
 def summarize_packet_gate_diagnostics(model, channel_chunks, intervention_chunks):

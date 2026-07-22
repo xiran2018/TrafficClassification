@@ -109,16 +109,37 @@ def main() -> None:
         pin_memory=device.type == "cuda",
     )
     label_names = load_label_names(args.label_map)
-    y_true, raw_probabilities, masked_probabilities, routed_reliability, content_group_ids, gate_diagnostics = predict_packet_views(
+    prediction_outputs = predict_packet_views(
         model,
         loader,
         device,
         include_masked=evaluate_invariant_view,
         include_identifiability=router_enabled,
         return_gate_diagnostics=True,
+        return_gate_values=bool(args.output_npz),
         ablate_channel=args.ablate_input_channel,
         ablate_intervention_view=args.ablate_intervention_view,
     )
+    if args.output_npz:
+        (
+            y_true,
+            raw_probabilities,
+            masked_probabilities,
+            routed_reliability,
+            content_group_ids,
+            gate_diagnostics,
+            gate_values,
+        ) = prediction_outputs
+    else:
+        (
+            y_true,
+            raw_probabilities,
+            masked_probabilities,
+            routed_reliability,
+            content_group_ids,
+            gate_diagnostics,
+        ) = prediction_outputs
+        gate_values = {}
     if router_enabled:
         assert masked_probabilities is not None and routed_reliability is not None
         invariant_scale = float(inference_config.get("invariant_scale", 0.0))
@@ -246,19 +267,29 @@ def main() -> None:
     if args.output_npz:
         output_npz = Path(args.output_npz)
         output_npz.parent.mkdir(parents=True, exist_ok=True)
+        prediction_arrays = {
+            "y_true": y_true,
+            "probabilities": probabilities,
+            "content_group_ids": content_group_ids,
+            "flow_ids": dataset.flow_ids.cpu().numpy(),
+            "packet_uids": packet_uids,
+        }
+        prediction_arrays.update(
+            {
+                f"effective_{name}": values
+                for name, values in gate_values.items()
+            }
+        )
         np.savez_compressed(
             output_npz,
-            y_true=y_true,
-            probabilities=probabilities,
-            content_group_ids=content_group_ids,
-            flow_ids=dataset.flow_ids.cpu().numpy(),
-            packet_uids=packet_uids,
+            **prediction_arrays,
         )
         payload["provenance"]["prediction_npz"] = {
             "path": str(output_npz.expanduser().resolve()),
             "sha256": sha256_file(output_npz, artifact_hash_cache),
             "num_packets": int(len(packet_uids)),
             "packet_uid_alignment": "exact_packet_index_row_order",
+            "effective_gate_arrays": sorted(gate_values),
         }
     output_json = Path(args.output_json)
     output_json.parent.mkdir(parents=True, exist_ok=True)

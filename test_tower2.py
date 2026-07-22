@@ -234,6 +234,7 @@ def predict_seq(
     intervened_dataset_path: str = "",
     ablate_input_channel: str = "none",
     ablate_intervention_view: str = "none",
+    return_gate_values: bool = False,
 ):
     ds = SeqDataset(dataset_path)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_seq)
@@ -253,6 +254,7 @@ def predict_seq(
         "dual_channel_gate": [],
         "packet_evidence_gate": [],
     }
+    window_gate_values = {name: [] for name in gate_values}
     batches = zip(dl, intervened_dl) if intervened_dl is not None else ((batch, None) for batch in dl)
     for batch, intervened_batch in batches:
         factual_x = ablate_seq_input_channel(
@@ -278,20 +280,31 @@ def predict_seq(
             intervened_x=intervened_x,
         )
         valid_mask = batch["mask"].bool()
+        labels = batch["label"]
+        labeled_mask = labels >= 0
         for gate_name in gate_values:
             gate = out.get(gate_name)
             if gate is None:
                 continue
             gate = gate.detach().cpu()
             if gate.ndim == 3 and gate.shape[:2] == valid_mask.shape:
-                gate = gate[valid_mask]
+                valid_float = valid_mask.to(gate.dtype).unsqueeze(-1)
+                per_window_gate = (gate * valid_float).sum(dim=1) / valid_float.sum(
+                    dim=1
+                ).clamp_min(1.0)
+                diagnostic_gate = gate[valid_mask]
+            elif gate.ndim == 2 and gate.shape[0] == len(labels):
+                per_window_gate = gate
+                diagnostic_gate = gate
             else:
-                gate = gate.reshape(-1, gate.shape[-1])
-            gate_values[gate_name].append(gate)
+                diagnostic_gate = gate.reshape(-1, gate.shape[-1])
+                per_window_gate = None
+            gate_values[gate_name].append(diagnostic_gate)
+            if return_gate_values and per_window_gate is not None:
+                window_gate_values[gate_name].append(per_window_gate[labeled_mask])
         logits = out["logits"].cpu()
         emb = out["embedding"].cpu()
         x_cpu = factual_x.cpu()
-        labels = batch["label"]
         for i in range(logits.size(0)):
             if int(labels[i]) < 0:
                 continue
@@ -406,7 +419,39 @@ def predict_seq(
                 torch.all(effective >= lower - 1e-6)
                 and torch.all(effective <= upper + 1e-6)
             )
-    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics
+    outputs = (
+        y_true,
+        y_pred,
+        flow_ids,
+        logits_all,
+        emb_all,
+        x_all,
+        window_ranges,
+        gate_diagnostics,
+    )
+    if not return_gate_values:
+        return outputs
+    effective_window_gates = {}
+    for gate_name, chunks in window_gate_values.items():
+        if not chunks:
+            continue
+        values = torch.cat(chunks, dim=0).float()
+        if gate_name == "intervention_view_gate":
+            fusion = getattr(model, "intervention_view_fusion", None)
+            if fusion is None and hasattr(model, "shared_packet_encoder"):
+                fusion = model.shared_packet_encoder.intervention_view_fusion
+            if fusion is None:
+                raise ValueError("intervention gate was emitted without its fusion module")
+            values = fusion.effective_weights(values)
+        elif (
+            gate_name == "dual_channel_gate"
+            and getattr(model, "channel_fusion_base_mode", "legacy")
+            == "semantic_anchor"
+            and not getattr(model, "train_fixed_channel_fusion", False)
+        ):
+            values = model.shared_packet_fusion.effective_weights(values)
+        effective_window_gates[gate_name] = values.numpy()
+    return outputs + (effective_window_gates,)
 
 
 @torch.no_grad()
@@ -732,7 +777,17 @@ def main():
     if ckpt.get("num_coarse_classes", 0) > 0:
         class_to_coarse, _ = build_class_to_coarse(ckpt.get("coarse_groups", "vpn_app"), ckpt["num_classes"], args.device)
     if ckpt["model_type"] == "seq":
-        y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics = predict_seq(
+        (
+            y_true,
+            y_pred,
+            flow_ids,
+            logits_all,
+            emb_all,
+            x_all,
+            window_ranges,
+            gate_diagnostics,
+            window_gate_values,
+        ) = predict_seq(
             model,
             args.dataset,
             args.device,
@@ -742,10 +797,12 @@ def main():
             ),
             ablate_input_channel=args.ablate_input_channel,
             ablate_intervention_view=args.ablate_intervention_view,
+            return_gate_values=True,
         )
     else:
         y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges = predict_graph(model, args.dataset, args.device)
         gate_diagnostics = {}
+        window_gate_values = {}
 
     window_prob = softmax_np(np.stack(logits_all, axis=0)) if logits_all else np.zeros((0, ckpt["num_classes"]))
     window_metrics = compute_metrics(y_true, y_pred)
@@ -846,6 +903,10 @@ def main():
                     "window_y_pred": y_pred,
                     "window_prob": window_prob.tolist() if logits_all else [],
                     "window_flow_ids": flow_ids,
+                    "window_effective_gate_values": {
+                        name: values.tolist()
+                        for name, values in window_gate_values.items()
+                    },
                     "flow_y_true": flow_true,
                     "flow_y_pred": flow_pred,
                     "flow_prob": flow_prob.tolist() if flow_logits_all else [],

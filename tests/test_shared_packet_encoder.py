@@ -365,12 +365,17 @@ def test_exact_flow_evaluation_reports_intervention_and_packet_evidence_gates(
         "cpu",
         1,
         intervened_dataset_path=str(intervened_path),
+        return_gate_values=True,
     )
-    diagnostics = outputs[-1]
+    diagnostics = outputs[-2]
+    effective_gates = outputs[-1]
 
     assert diagnostics["intervention_view_gate"]["bounds_satisfied"] is True
     assert diagnostics["packet_evidence_gate"]["bounds_satisfied"] is True
     assert diagnostics["packet_evidence_gate"]["max_weight"] == 0.4
+    assert effective_gates["intervention_view_gate"].shape == (1, 2)
+    assert effective_gates["dual_channel_gate"].shape == (1, 3)
+    assert effective_gates["packet_evidence_gate"].shape == (1, 1)
 
 
 def test_shared_tri_channel_gate_is_normalized_and_differentiable():

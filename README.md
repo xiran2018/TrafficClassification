@@ -6303,6 +6303,37 @@ ablations above. Run them first to verify that each learned channel is actually
 used, then spend the full three-fold budget only on the pre-registered retrained
 matrix.
 
+The evaluators also export aligned **effective** routing weights for a stricter
+counterfactual-reliability audit. Packet NPZ files contain
+`effective_intervention_view_gate` in exact `packet_uid` order. Flow JSON files
+contain `window_effective_gate_values`, which are aligned to
+`window_flow_ids` and aggregated in exact evaluated Flow order by
+`analyze_counterfactual_gate_alignment.py`. Evaluate the same frozen checkpoint
+in full, `factual_only`, and `intervened_only` modes, then run:
+
+```bash
+conda run --no-capture-output -n llm-factory \
+  python analyze_counterfactual_gate_alignment.py \
+    --task packet \
+    --full_prediction <FULL_PACKET_NPZ> \
+    --factual_prediction <FACTUAL_ONLY_PACKET_NPZ> \
+    --intervened_prediction <INTERVENED_ONLY_PACKET_NPZ> \
+    --output_json <PACKET_GATE_ALIGNMENT_JSON>
+```
+
+Use `--task flow` with the corresponding Tower2 JSON files for Flow. The audit
+computes each sample's factual advantage as
+`CE(intervened_only) - CE(factual_only)` and tests whether the learned factual
+routing preference increases with that advantage. It reports Pearson and
+Spearman association, directional agreement, top-versus-bottom advantage
+quintiles, and a paired bootstrap confidence interval. A positive point
+estimate alone is insufficient: `positive_association` requires both
+correlations to be positive and the 95% bootstrap lower bound for Pearson to be
+above zero. This remains diagnostic association, not a causal guarantee and
+not a Test-time model-selection signal. Failure falsifies the strong
+"identifiable reliability" interpretation even when aggregate gate bounds and
+accuracy pass.
+
 The training programs now expose the matching persistent toggles
 `--train_ablate_input_channel semantic|content|structural` and
 `--train_ablate_intervention_view factual_only|intervened_only`. Unlike the
