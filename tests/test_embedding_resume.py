@@ -291,6 +291,31 @@ def test_embedding_gpu_capacity_lock_wait_contract(tmp_path, monkeypatch):
     handle.close()
 
 
+def test_embedding_gpu_capacity_lock_uses_matching_inherited_reservation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5")
+    monkeypatch.setenv("SHARED_GPU_RESERVATION_TOKEN", "5")
+    monkeypatch.setattr(
+        "extract_packet_embeddings_qwen.torch.cuda.is_available", lambda: True
+    )
+    monkeypatch.setattr(
+        "extract_packet_embeddings_qwen.fcntl.flock",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("inherited reservation must not relock")
+        ),
+    )
+
+    handle = acquire_cuda_capacity_lock(
+        "cuda:0",
+        min_free_gb=20.0,
+        poll_seconds=1.0,
+        lock_dir=tmp_path,
+    )
+
+    assert handle is None
+
+
 def test_post_tower1_resumes_both_views_and_shared_tower2(monkeypatch):
     events = []
     args = SimpleNamespace(

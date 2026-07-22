@@ -27,3 +27,20 @@ def test_gpu_command_guard_skips_cpu_command(monkeypatch):
 
     with pipeline.gpu_command_guard(["python", "preprocess_tower1.py"], dry_run=False):
         pass
+
+
+def test_gpu_command_guard_uses_matching_inherited_reservation(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5")
+    monkeypatch.setenv("SHARED_GPU_RESERVATION_TOKEN", "5")
+    monkeypatch.setattr(
+        pipeline.fcntl,
+        "flock",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("inherited reservation must not relock")
+        ),
+    )
+
+    with pipeline.gpu_command_guard(
+        ["python", "train_tower1_multitask.py"], dry_run=False
+    ):
+        pass

@@ -359,6 +359,14 @@ def acquire_cuda_capacity_lock(
     token = physical_cuda_token(device)
     if logical_index is None or token is None or not torch.cuda.is_available():
         return None
+    inherited = os.environ.get("SHARED_GPU_RESERVATION_TOKEN", "")
+    if inherited == token:
+        print(
+            f"using inherited embedding GPU reservation: device={device} "
+            f"physical={token}",
+            flush=True,
+        )
+        return None
     lock_path = Path(lock_dir) / f"qwen_embedding_gpu_{token}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+", encoding="utf-8")

@@ -88,6 +88,15 @@ def gpu_command_guard(command: list[str], dry_run: bool):
         return
 
     token = physical_cuda_token()
+    inherited = os.environ.get("SHARED_GPU_RESERVATION_TOKEN", "")
+    if inherited == token:
+        print(
+            f"using inherited GPU reservation: physical={token} "
+            f"program={command_program(command)}",
+            flush=True,
+        )
+        yield
+        return
     lock_dir = Path(os.environ.get("PACKET_GPU_LOCK_DIR", "/tmp/two_tower_embedding_gpu_locks"))
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_handle = open(lock_dir / f"qwen_embedding_gpu_{token}.lock", "a+", encoding="utf-8")
