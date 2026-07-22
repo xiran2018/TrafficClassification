@@ -6329,10 +6329,13 @@ Spearman association, directional agreement, top-versus-bottom advantage
 quintiles, and a paired Flow-cluster bootstrap confidence interval. Packet
 rows from the same Flow are always resampled together; Flow evaluation uses one
 Flow per cluster, avoiding pseudo-replication from correlated packets. A positive point
-estimate alone is insufficient: `positive_association` requires both
-correlations to be positive and the 95% bootstrap lower bound for Pearson to be
-above zero. This remains diagnostic association, not a causal guarantee and
-not a Test-time model-selection signal. Failure falsifies the strong
+estimate alone is insufficient: `positive_association` requires Pearson and
+Spearman to each be at least `0.10`, the factual effective-weight difference
+between the top and bottom advantage quintiles to be at least `0.02`, and the
+95% Flow-cluster bootstrap lower bound for Pearson to be above zero. These
+effect-size thresholds are shared across tasks and datasets. This remains
+diagnostic association, not a causal guarantee and not a Test-time
+model-selection signal. Failure falsifies the strong
 "identifiable reliability" interpretation even when aggregate gate bounds and
 accuracy pass. Every alignment report binds the full, factual-only, and
 intervened-only prediction artifacts by absolute path, byte size, and SHA-256;

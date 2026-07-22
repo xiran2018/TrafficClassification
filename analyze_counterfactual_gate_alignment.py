@@ -12,6 +12,9 @@ import numpy as np
 
 
 EPS = 1e-12
+MIN_PEARSON = 0.10
+MIN_SPEARMAN = 0.10
+MIN_QUINTILE_WEIGHT_DELTA = 0.02
 
 
 def _file_evidence(path: str | Path) -> dict[str, Any]:
@@ -182,6 +185,7 @@ def analyze(
     quintile = max(1, len(order) // 5)
     bottom = gate[:, 0][order[:quintile]]
     top = gate[:, 0][order[-quintile:]]
+    quintile_delta = float(top.mean() - bottom.mean())
     bootstrap = _bootstrap_pearson(
         gate_preference,
         advantage,
@@ -190,8 +194,9 @@ def analyze(
         seed,
     )
     robust_positive = bool(
-        pearson > 0.0
-        and spearman > 0.0
+        pearson >= MIN_PEARSON
+        and spearman >= MIN_SPEARMAN
+        and quintile_delta >= MIN_QUINTILE_WEIGHT_DELTA
         and (not bootstrap or bootstrap["ci95_low"] > 0.0)
     )
     return {
@@ -221,8 +226,14 @@ def analyze(
             "direction_sample_count": int(informative.sum()),
             "factual_weight_bottom_advantage_quintile": float(bottom.mean()),
             "factual_weight_top_advantage_quintile": float(top.mean()),
-            "top_minus_bottom": float(top.mean() - bottom.mean()),
+            "top_minus_bottom": quintile_delta,
             "bootstrap_pearson": bootstrap,
+            "promotion_thresholds": {
+                "min_pearson": MIN_PEARSON,
+                "min_spearman": MIN_SPEARMAN,
+                "min_top_minus_bottom": MIN_QUINTILE_WEIGHT_DELTA,
+                "bootstrap_ci95_low_strictly_positive": True,
+            },
             "robust_positive": robust_positive,
         },
     }

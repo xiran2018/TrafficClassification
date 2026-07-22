@@ -114,6 +114,37 @@ def test_gate_alignment_rejects_sample_identity_mismatch():
         )
 
 
+def test_tiny_positive_association_does_not_pass_effect_size_gate():
+    count = 200
+    labels = np.zeros(count, dtype=np.int64)
+    advantage = np.linspace(-1.0, 1.0, count)
+    factual_true_probability = np.full(count, 0.5)
+    intervened_true_probability = factual_true_probability * np.exp(-advantage)
+    intervened_true_probability = np.clip(intervened_true_probability, 0.01, 0.99)
+    factual = np.c_[factual_true_probability, 1.0 - factual_true_probability]
+    intervened = np.c_[intervened_true_probability, 1.0 - intervened_true_probability]
+    weak_preference = 0.005 * advantage
+    gate = np.c_[0.5 + weak_preference, 0.5 - weak_preference]
+    base = {
+        "ids": np.asarray([f"p-{index}" for index in range(count)]),
+        "groups": np.asarray([f"flow-{index}" for index in range(count)]),
+        "y_true": labels,
+    }
+    full = {**base, "probabilities": factual, "gate": gate}
+
+    report = analyze(
+        full,
+        {**base, "probabilities": factual},
+        {**base, "probabilities": intervened},
+        bootstrap_samples=0,
+        seed=0,
+    )
+
+    assert report["association"]["pearson"] > 0
+    assert report["association"]["top_minus_bottom"] < 0.02
+    assert report["status"] == "not_demonstrated"
+
+
 def test_packet_bootstrap_resamples_flow_clusters():
     report = _bootstrap_pearson(
         np.asarray([-0.4, -0.3, 0.3, 0.4]),
