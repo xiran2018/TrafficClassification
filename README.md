@@ -5779,6 +5779,19 @@ the magnitude of an already-enabled objective is ordinary tuning. This keeps
 the main packet objective to class-balanced CE plus flow-aware SupCon instead
 of retaining an unverified extra loss.
 
+A Valid-only replay of every available long Tower1 trajectory rejects simple
+patience-based early stopping for this eight-epoch schedule. Several VPN
+curves fall temporarily and then reach their best Macro-F1 at epoch 8.
+`patience=1` would lose `0.0144`--`0.0466` absolute Macro-F1 on affected
+trajectories; `patience=2` still loses `0.0144`--`0.0308`, and one trajectory
+would lose `0.0308` even with `patience=3`. Available TLS-120 histories are
+partial and rise monotonically through their last recorded epoch, so they do
+not establish a safe earlier stopping point. Consequently, cost-aware early
+stopping remains enabled for label-free native pretraining, but the current
+Tower1 reference retains all eight epochs. This decision uses no Test labels;
+future shortening requires a separately validated learning-curve budget rule,
+not a lower patience chosen after observing final metrics.
+
 Packet and Flow manifests contain both `tower1_training_contract` (the runner
 declaration) and `tower1_execution_evidence` (the completed trainer contract).
 The latter re-hashes `final/tower1_heads.pt`, the validation history, and the
