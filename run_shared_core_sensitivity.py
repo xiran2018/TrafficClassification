@@ -77,6 +77,8 @@ def packet_command(
         str(artifacts / "train" / "label_map.json"),
         "--output_json",
         str(output),
+        "--output_npz",
+        str(output.with_suffix(".npz")),
         "--batch_size",
         "1024",
         "--semantic_embedding_cache",

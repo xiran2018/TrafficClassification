@@ -52,6 +52,9 @@ def test_sensitivity_builds_identical_diagnostic_names_for_both_tasks(tmp_path):
 
     assert packet_cmd[packet_cmd.index("--ablate_input_channel") + 1] == "content"
     assert flow_cmd[flow_cmd.index("--ablate_input_channel") + 1] == "content"
+    assert packet_cmd[packet_cmd.index("--output_npz") + 1] == str(
+        tmp_path / "packet.npz"
+    )
     assert packet_cmd[packet_cmd.index("--required_semantic_header_policy") + 1] == "full"
     assert "test_tower2_primary_fold1" in flow_cmd[flow_cmd.index("--dataset") + 1]
     assert "test_tower2_intervention_fold1" in flow_cmd[

@@ -6367,6 +6367,11 @@ conda run --no-capture-output -n llm-factory \
     --device cuda
 ```
 
+The runner writes both the Packet summary JSON and its same-stem ordered NPZ
+for every diagnostic; the NPZ is required by the gate-alignment audit above.
+Flow diagnostics remain self-contained JSON files with ordered Flow
+probabilities and window-aligned effective gates.
+
 After all six VPN/TLS fold pairs are complete, pass their summary files to
 `make_shared_core_sensitivity_report.py`. The report refuses incomplete fold,
 dataset, task, or fingerprint coverage and never authorizes automatic module
