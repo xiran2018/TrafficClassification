@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from analyze_counterfactual_gate_alignment import (
+    _bootstrap_pearson,
     _load_flow,
     _load_packet,
     analyze,
@@ -13,6 +14,7 @@ from analyze_counterfactual_gate_alignment import (
 def test_packet_gate_alignment_detects_positive_counterfactual_association(tmp_path):
     labels = np.asarray([0, 0, 1, 1], dtype=np.int64)
     ids = np.asarray(["p0", "p1", "p2", "p3"])
+    flow_ids = np.asarray(["f0", "f0", "f1", "f1"])
     factual_prob = np.asarray(
         [[0.95, 0.05], [0.80, 0.20], [0.55, 0.45], [0.20, 0.80]]
     )
@@ -34,6 +36,7 @@ def test_packet_gate_alignment_detects_positive_counterfactual_association(tmp_p
             "y_true": labels,
             "probabilities": probabilities,
             "packet_uids": ids,
+            "flow_ids": flow_ids,
         }
         if name == "full":
             values["effective_intervention_view_gate"] = gate
@@ -82,6 +85,7 @@ def test_gate_alignment_rejects_sample_identity_mismatch():
         "y_true": np.asarray([0, 1]),
         "probabilities": np.asarray([[0.9, 0.1], [0.1, 0.9]]),
         "gate": np.asarray([[0.6, 0.4], [0.4, 0.6]]),
+        "groups": np.asarray(["flow-a", "flow-b"]),
     }
     candidate = dict(reference)
     candidate["ids"] = np.asarray(["b", "a"])
@@ -94,3 +98,17 @@ def test_gate_alignment_rejects_sample_identity_mismatch():
             bootstrap_samples=0,
             seed=0,
         )
+
+
+def test_packet_bootstrap_resamples_flow_clusters():
+    report = _bootstrap_pearson(
+        np.asarray([-0.4, -0.3, 0.3, 0.4]),
+        np.asarray([-2.0, -1.0, 1.0, 2.0]),
+        np.asarray(["flow-a", "flow-a", "flow-b", "flow-b"]),
+        samples=20,
+        seed=11,
+    )
+
+    assert report["resampling_unit"] == "flow_cluster"
+    assert report["num_clusters"] == 2
+    assert report["positive_fraction"] == 1.0

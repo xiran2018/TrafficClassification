@@ -6326,7 +6326,9 @@ computes each sample's factual advantage as
 `CE(intervened_only) - CE(factual_only)` and tests whether the learned factual
 routing preference increases with that advantage. It reports Pearson and
 Spearman association, directional agreement, top-versus-bottom advantage
-quintiles, and a paired bootstrap confidence interval. A positive point
+quintiles, and a paired Flow-cluster bootstrap confidence interval. Packet
+rows from the same Flow are always resampled together; Flow evaluation uses one
+Flow per cluster, avoiding pseudo-replication from correlated packets. A positive point
 estimate alone is insufficient: `positive_association` requires both
 correlations to be positive and the 95% bootstrap lower bound for Pearson to be
 above zero. This remains diagnostic association, not a causal guarantee and

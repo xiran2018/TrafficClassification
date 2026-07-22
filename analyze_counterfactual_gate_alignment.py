@@ -41,7 +41,7 @@ def _cross_entropy(probabilities: np.ndarray, labels: np.ndarray) -> np.ndarray:
 
 def _load_packet(path: str) -> dict[str, Any]:
     with np.load(path, allow_pickle=False) as data:
-        required = {"y_true", "probabilities", "packet_uids"}
+        required = {"y_true", "probabilities", "packet_uids", "flow_ids"}
         missing = sorted(required - set(data.files))
         if missing:
             raise ValueError(f"{path}: missing packet arrays {missing}")
@@ -50,6 +50,7 @@ def _load_packet(path: str) -> dict[str, Any]:
         if gate_key in data.files:
             payload["gate"] = np.asarray(data[gate_key], dtype=np.float64)
     payload["ids"] = payload.pop("packet_uids").astype(str)
+    payload["groups"] = payload.pop("flow_ids").astype(str)
     return payload
 
 
@@ -87,6 +88,7 @@ def _load_flow(path: str) -> dict[str, Any]:
         "y_true": np.asarray(payload["flow_y_true"], dtype=np.int64),
         "probabilities": np.asarray(payload["flow_prob"], dtype=np.float64),
         "ids": np.asarray(payload["flow_ids"], dtype=str),
+        "groups": np.asarray(payload["flow_ids"], dtype=str),
     }
     if payload.get("window_effective_gate_values"):
         result["gate"] = _aggregate_window_gate(payload)
@@ -98,26 +100,36 @@ def _validate_alignment(reference: dict[str, Any], candidate: dict[str, Any], na
         raise ValueError(f"{name}: sample identities are not aligned")
     if not np.array_equal(reference["y_true"], candidate["y_true"]):
         raise ValueError(f"{name}: labels are not aligned")
+    if not np.array_equal(reference["groups"], candidate["groups"]):
+        raise ValueError(f"{name}: resampling groups are not aligned")
 
 
 def _bootstrap_pearson(
     gate_preference: np.ndarray,
     advantage: np.ndarray,
+    groups: np.ndarray,
     samples: int,
     seed: int,
 ) -> dict[str, float]:
     if samples <= 0:
         return {}
     rng = np.random.default_rng(seed)
+    unique_groups, inverse = np.unique(groups.astype(str), return_inverse=True)
+    group_members = [np.flatnonzero(inverse == index) for index in range(len(unique_groups))]
     correlations = np.empty(samples, dtype=np.float64)
     for index in range(samples):
-        sample = rng.integers(0, len(advantage), size=len(advantage))
+        sampled_groups = rng.integers(
+            0, len(unique_groups), size=len(unique_groups)
+        )
+        sample = np.concatenate([group_members[group] for group in sampled_groups])
         correlations[index] = _correlation(
             gate_preference[sample], advantage[sample]
         )
     return {
         "samples": int(samples),
         "seed": int(seed),
+        "resampling_unit": "flow_cluster",
+        "num_clusters": int(len(unique_groups)),
         "mean": float(correlations.mean()),
         "ci95_low": float(np.quantile(correlations, 0.025)),
         "ci95_high": float(np.quantile(correlations, 0.975)),
@@ -157,7 +169,11 @@ def analyze(
     bottom = gate[:, 0][order[:quintile]]
     top = gate[:, 0][order[-quintile:]]
     bootstrap = _bootstrap_pearson(
-        gate_preference, advantage, bootstrap_samples, seed
+        gate_preference,
+        advantage,
+        np.asarray(full["groups"]),
+        bootstrap_samples,
+        seed,
     )
     robust_positive = bool(
         pearson > 0.0
@@ -171,6 +187,7 @@ def analyze(
             "counterfactual single-view predictive loss; not a causal guarantee"
         ),
         "num_samples": int(len(advantage)),
+        "num_flow_clusters": int(len(np.unique(np.asarray(full["groups"]).astype(str)))),
         "gate": {
             "view_names": ["factual", "intervened"],
             "effective_mean": gate.mean(axis=0).tolist(),
