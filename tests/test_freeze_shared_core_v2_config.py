@@ -205,6 +205,30 @@ def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
     assert fingerprint == canonical_sha256(frozen)
 
 
+def test_freeze_supports_minimal_core_without_unvalidated_paired_module(tmp_path):
+    balance = report(tmp_path, "minimal_balance", "candidate")
+    balance_path = write_report(tmp_path / "minimal_balance.json", balance)
+
+    frozen = freeze_config(
+        balance,
+        None,
+        balance_path=balance_path,
+        paired_path=None,
+    )
+
+    assert frozen["tower1"]["class_weight_basis"] == "flow"
+    assert frozen["tower1"]["class_weight_strength"] == 0.5
+    assert frozen["tower1"]["paired_consistency_weight"] == 0.0
+    assert frozen["tower1"]["paired_cls_weight"] == 0.0
+    assert frozen["selection_evidence"]["paired_invariance"] == {
+        "selected": "disabled",
+        "reason": "excluded_from_minimal_shared_core",
+        "validation_role": "future_optional_ablation",
+    }
+    fingerprint = frozen.pop("config_sha256")
+    assert fingerprint == canonical_sha256(frozen)
+
+
 def test_freeze_binds_hierarchy_numeric_overrides_before_paired_screen(tmp_path):
     balance = report(tmp_path, "hierarchy_balance", "candidate")
     trainer_sha = balance["training_implementation_consistency"][

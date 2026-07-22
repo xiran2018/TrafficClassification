@@ -642,10 +642,10 @@ def validate_experiment_chain(
 
 def freeze_config(
     balance_report: dict[str, Any],
-    paired_report: dict[str, Any],
+    paired_report: dict[str, Any] | None,
     *,
     balance_path: Path,
-    paired_path: Path,
+    paired_path: Path | None,
     hierarchy_report: dict[str, Any] | None = None,
     hierarchy_path: Path | None = None,
     packet_hierarchy_derivation: dict[str, Any] | None = None,
@@ -654,7 +654,10 @@ def freeze_config(
     flow_hierarchy_derivation_path: Path | None = None,
 ) -> dict[str, Any]:
     validate_selection(balance_report, "balance selection")
-    validate_selection(paired_report, "paired selection")
+    if paired_report is not None:
+        if paired_path is None:
+            raise ValueError("paired_path is required with paired_report")
+        validate_selection(paired_report, "paired selection")
     hierarchy_weights = None
     if hierarchy_report is not None:
         if hierarchy_path is None:
@@ -738,8 +741,10 @@ def freeze_config(
             required_datasets=FLOW_TASK_DATASETS,
             task_label="Flow-task",
         )
-    paired_factorial = validate_experiment_chain(
-        balance_report, paired_report, hierarchy_weights
+    paired_factorial = (
+        validate_experiment_chain(balance_report, paired_report, hierarchy_weights)
+        if paired_report is not None
+        else None
     )
 
     selected_weight = (
@@ -747,7 +752,9 @@ def freeze_config(
         if hierarchy_weights is not None
         else selected_class_weight_config(balance_report)
     )
-    use_paired_invariance = paired_report["selected"] == "candidate"
+    use_paired_invariance = bool(
+        paired_report is not None and paired_report["selected"] == "candidate"
+    )
     tower1 = {
         "base_model": "Qwen/Qwen2.5-7B-Instruct",
         "epochs": 8,
@@ -908,13 +915,21 @@ def freeze_config(
                 "selected": balance_report["selected"],
                 "datasets": balance_report["datasets"],
             },
-            "paired_invariance": {
-                "path": str(paired_path),
-                "sha256": file_sha256(paired_path),
-                "selected": paired_report["selected"],
-                "datasets": paired_report["datasets"],
-                "factorial_config_integrity": paired_factorial,
-            },
+            "paired_invariance": (
+                {
+                    "path": str(paired_path),
+                    "sha256": file_sha256(paired_path),
+                    "selected": paired_report["selected"],
+                    "datasets": paired_report["datasets"],
+                    "factorial_config_integrity": paired_factorial,
+                }
+                if paired_report is not None and paired_path is not None
+                else {
+                    "selected": "disabled",
+                    "reason": "excluded_from_minimal_shared_core",
+                    "validation_role": "future_optional_ablation",
+                }
+            ),
         },
     }
     if hierarchy_report is not None and hierarchy_path is not None:
@@ -953,7 +968,7 @@ def freeze_config(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--balance_selection", required=True)
-    parser.add_argument("--paired_selection", required=True)
+    parser.add_argument("--paired_selection", default="")
     parser.add_argument("--hierarchy_selection", default="")
     parser.add_argument("--packet_hierarchy_derivation", default="")
     parser.add_argument("--flow_hierarchy_derivation", default="")
@@ -961,9 +976,13 @@ def main() -> None:
     args = parser.parse_args()
 
     balance_path = Path(args.balance_selection)
-    paired_path = Path(args.paired_selection)
+    paired_path = Path(args.paired_selection) if args.paired_selection else None
     balance = json.loads(balance_path.read_text(encoding="utf-8"))
-    paired = json.loads(paired_path.read_text(encoding="utf-8"))
+    paired = (
+        json.loads(paired_path.read_text(encoding="utf-8"))
+        if paired_path is not None
+        else None
+    )
     hierarchy_path = Path(args.hierarchy_selection) if args.hierarchy_selection else None
     hierarchy = (
         json.loads(hierarchy_path.read_text(encoding="utf-8"))
