@@ -196,6 +196,7 @@ def frozen_payload():
             "paired_cls_weight": 0.2,
             "paired_logit_kl_weight": 0.5,
             "paired_raw_consistency_weight": 1.0,
+            "paired_validation_selection": "worst_view_macro_f1",
             "early_stop_patience": 0,
             "init_checkpoint_dir": "",
             "init_adapter_only": False,
@@ -279,6 +280,7 @@ def packet_args():
         "tower1_paired_cls_weight": 0.0,
         "tower1_paired_logit_kl_weight": 0.0,
         "tower1_paired_raw_consistency_weight": 0.0,
+        "tower1_paired_validation_selection": "disabled",
         "base_model": "other",
         "epochs": 1,
         "packet_batch_size": 1,
@@ -317,6 +319,42 @@ def test_load_rejects_tampered_frozen_config(tmp_path):
         load_frozen_shared_core(write_payload(tmp_path / "tampered.json", payload))
 
 
+def test_development_config_covers_six_packet_and_two_flow_datasets(tmp_path):
+    payload = frozen_payload()
+    packet_datasets = {
+        "vpn-app",
+        "vpn-binary",
+        "vpn-service",
+        "tls-120",
+        "ustc-app",
+        "ustc-binary",
+    }
+    flow_datasets = {"vpn-app", "tls-120"}
+    payload["status"] = "frozen_for_development_milestone"
+    payload["datasets"] = sorted(packet_datasets | flow_datasets)
+    payload["task_datasets"] = {
+        "packet-level-classification": sorted(packet_datasets),
+        "flow-level-classification": sorted(flow_datasets),
+    }
+    payload["selection_protocol"].update(
+        {
+            "selection_datasets": sorted(flow_datasets),
+            "application_datasets_by_task": payload["task_datasets"],
+        }
+    )
+    unsigned = {key: value for key, value in payload.items() if key != "config_sha256"}
+    payload["config_sha256"] = canonical_sha256(unsigned)
+
+    loaded = load_frozen_shared_core(
+        write_payload(tmp_path / "development.json", payload)
+    )
+
+    assert loaded["status"] == "frozen_for_development_milestone"
+    assert set(loaded["task_datasets"]["packet-level-classification"]) == (
+        packet_datasets
+    )
+
+
 def test_load_rejects_non_reference_epoch_budget_even_with_valid_hash(tmp_path):
     payload = frozen_payload()
     payload["tower1"]["epochs"] = 12
@@ -343,6 +381,7 @@ def test_packet_runtime_receives_the_entire_frozen_shared_core(tmp_path):
     assert args.byte_content_group_loss_reduction == "group_mean"
     assert args.class_weight_basis == "flow"
     assert args.tower1_paired_consistency_weight == 0.05
+    assert args.tower1_paired_validation_selection == "worst_view_macro_f1"
     assert args.semantic_embedding_mode == "concat"
     assert args.semantic_embedding_batch_size == 8
     assert args.semantic_embedding_flow_batch_packets == 128
@@ -480,6 +519,7 @@ def test_flow_runtime_uses_the_same_core_values():
         tower1_paired_cls_weight=0.0,
         tower1_paired_logit_kl_weight=0.0,
         tower1_paired_raw_consistency_weight=0.0,
+        tower1_paired_validation_selection="disabled",
     )
     apply_frozen_shared_core(flow, "flow-level", payload)
     assert flow.model_types == "seq"
@@ -505,6 +545,10 @@ def test_flow_runtime_uses_the_same_core_values():
     assert flow.lora_r == packet.lora_r
     assert flow.tower1_use_sft is False
     assert flow.flow_balanced_packet_batches is True
+    assert flow.tower1_paired_validation_selection == (
+        packet.tower1_paired_validation_selection
+    )
+    assert flow.tower1_paired_validation_selection == "worst_view_macro_f1"
     assert flow.embedding_mode == packet.semantic_embedding_mode == "concat"
     assert flow.embedding_batch_size == packet.semantic_embedding_batch_size == 8
     assert flow.embedding_flow_batch_packets == 128
@@ -746,7 +790,7 @@ def test_flow_runner_consumes_same_config_and_preprocesses_paired_view_first(tmp
             "--stage",
             "all",
             "--splits",
-            "train",
+            "train,valid",
             "--dry_run",
             "--output_suffix",
             "shared_core_v2_test",
@@ -782,9 +826,31 @@ def test_flow_runner_consumes_same_config_and_preprocesses_paired_view_first(tmp
     intervened_preprocess_line = lines[intervened_preprocess]
     assert "--packet_context_policy single_packet" in factual_preprocess
     assert "--packet_context_policy single_packet" in intervened_preprocess_line
+    assert (
+        "--label_map_in reasoningDataset/vpn-app/"
+        "train_tower1_shared_core_v2_test/label_map.json"
+    ) in intervened_preprocess_line
     assert intervened_preprocess < tower1_index
+    assert (
+        "--label_map reasoningDataset/vpn-app/"
+        "train_tower1_shared_core_v2_test/label_map.json"
+    ) in tower1
+    assert (
+        "--packet_aux_jsonl reasoningDataset/vpn-app/"
+        "train_tower1_shared_core_v2_test/packet_auxiliary.jsonl"
+    ) in tower1
+    assert (
+        "--valid_packet_aux_jsonl reasoningDataset/vpn-app/"
+        "valid_tower1_shared_core_v2_test/packet_auxiliary.jsonl"
+    ) in tower1
+    assert (
+        "--output_dir checkpoints/"
+        "tower1_qwen_multitask_vpn_app_shared_core_v2_test_fold0"
+    ) in tower1
     assert "--paired_packet_aux_jsonl" in tower1
     assert "--paired_consistency_weight 0.05" in tower1
+    assert "--valid_paired_packet_aux_jsonl" in tower1
+    assert "--paired_validation_selection worst_view_macro_f1" in tower1
     for option in (
         "--max_bytes 128",
         "--hidden_dim 128",

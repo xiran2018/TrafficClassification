@@ -161,6 +161,7 @@ def test_freeze_uses_one_cross_dataset_selection_for_both_tasks(tmp_path):
     assert frozen["tower1"]["class_weight_basis"] == "flow"
     assert frozen["tower1"]["class_weight_strength"] == 0.5
     assert frozen["tower1"]["paired_consistency_weight"] == 0.0
+    assert frozen["tower1"]["paired_validation_selection"] == "disabled"
     assert frozen["packet_core"]["num_layers"] == 2
     assert frozen["packet_core"]["semantic_packet_context_policy"] == "single_packet"
     assert frozen["empirical_risk"]["content_group_loss_reduction"] == "group_mean"
@@ -209,6 +210,9 @@ def test_freeze_promotes_paired_invariance_only_when_both_datasets_pass(tmp_path
     assert frozen["tower1"]["class_weight_basis"] == "packet"
     assert frozen["tower1"]["paired_consistency_weight"] == 0.05
     assert frozen["tower1"]["paired_cls_weight"] == 0.2
+    assert frozen["tower1"]["paired_validation_selection"] == (
+        "worst_view_macro_f1"
+    )
 
 
 def test_freeze_rejects_single_dataset_or_non_validation_selection(tmp_path):

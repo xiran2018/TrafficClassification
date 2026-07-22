@@ -1,6 +1,12 @@
 from argparse import Namespace
 
-from train_tower1_multitask import tower1_training_config
+import pytest
+
+from train_tower1_multitask import (
+    tower1_training_config,
+    validate_aligned_validation_views,
+    validation_selection_key,
+)
 
 
 def test_training_config_records_sampler_and_paired_objective():
@@ -10,6 +16,7 @@ def test_training_config_records_sampler_and_paired_objective():
         "packet_aux_jsonl": "train.jsonl",
         "paired_packet_aux_jsonl": "masked.jsonl",
         "valid_packet_aux_jsonl": "valid.jsonl",
+        "valid_paired_packet_aux_jsonl": "valid_masked.jsonl",
         "sft_jsonl": [],
         "epochs": 8,
         "max_steps": 0,
@@ -50,6 +57,7 @@ def test_training_config_records_sampler_and_paired_objective():
         "init_checkpoint_dir": "",
         "init_adapter_only": False,
         "select_metric": "macro_f1",
+        "paired_validation_selection": "worst_view_macro_f1",
         "early_stop_patience": 0,
         "no_sft": True,
         "seed": 42,
@@ -62,3 +70,50 @@ def test_training_config_records_sampler_and_paired_objective():
     assert config["class_weight_basis"] == "flow"
     assert config["paired_consistency_weight"] == 0.05
     assert config["paired_raw_consistency_weight"] == 1.0
+    assert config["paired_validation_selection"] == "worst_view_macro_f1"
+
+
+def test_paired_validation_views_require_exact_packet_and_label_alignment():
+    factual = [
+        {"packet_uid": "a", "label_id": 0},
+        {"packet_uid": "b", "label_id": 1},
+    ]
+    validate_aligned_validation_views(
+        factual,
+        [
+            {"packet_uid": "b", "label_id": 1},
+            {"packet_uid": "a", "label_id": 0},
+        ],
+    )
+    with pytest.raises(ValueError, match="not aligned"):
+        validate_aligned_validation_views(
+            factual,
+            [
+                {"packet_uid": "a", "label_id": 1},
+                {"packet_uid": "c", "label_id": 1},
+            ],
+        )
+
+
+def test_worst_view_checkpoint_selection_prioritizes_robust_view():
+    factual = {"macro_f1": 0.90, "accuracy": 0.92}
+    intervened = {"macro_f1": 0.60, "accuracy": 0.70}
+    key, summary = validation_selection_key(
+        factual,
+        intervened,
+        select_metric="macro_f1",
+        paired_mode="worst_view_macro_f1",
+    )
+    assert key == (0.60, 0.75, 0.70, 0.81, 0.90, 0.92)
+    assert summary["score"] == 0.60
+    assert summary["mean_view_macro_f1"] == 0.75
+
+
+def test_paired_selection_rejects_missing_intervened_metrics():
+    with pytest.raises(ValueError, match="requires intervened"):
+        validation_selection_key(
+            {"macro_f1": 0.9, "accuracy": 0.9},
+            None,
+            select_metric="macro_f1",
+            paired_mode="worst_view_macro_f1",
+        )

@@ -427,6 +427,7 @@ def test_tower1_method_signature_is_shared_while_numeric_hyperparameters_may_dif
         "tower1_paired_cls_weight": 0.2,
         "tower1_paired_logit_kl_weight": 0.5,
         "tower1_paired_raw_consistency_weight": 1.0,
+        "tower1_paired_validation_selection": "worst_view_macro_f1",
         "tower1_early_stop_patience": 0,
     }
     packet = SimpleNamespace(
@@ -499,6 +500,7 @@ def test_tower1_method_signature_rejects_disabled_objective_or_architecture_chan
         "flow_proto_context": "inclusive",
         "paired_consistency_weight": 0.05,
         "paired_cls_weight": 0.2,
+        "paired_validation_selection": "worst_view_macro_f1",
     }
     disabled = dict(base, contrastive_weight=0.0)
     changed_architecture = dict(base, projection_dim=128)

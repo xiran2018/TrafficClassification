@@ -498,6 +498,12 @@ def tower1_training_contract(args: Any, task: str) -> Dict[str, Any]:
                 "tower1_paired_raw_consistency_weight",
             )
         ),
+        "paired_validation_selection": str(
+            value(
+                "tower1_paired_validation_selection",
+                "tower1_paired_validation_selection",
+            )
+        ),
         "use_sft": use_sft,
         "disable_packet_information_weights": disable_information_weights,
         "flow_balanced_packet_batches": flow_balanced_batches,
@@ -528,6 +534,7 @@ TOWER1_SHARED_PROTOCOL_FIELDS: Tuple[str, ...] = (
     "class_weighting",
     "class_weight_basis",
     "select_metric",
+    "paired_validation_selection",
 )
 
 
@@ -692,6 +699,9 @@ def tower1_execution_evidence(
             ),
             "paired_raw_consistency_weight": float(
                 config.get("paired_raw_consistency_weight", float("nan"))
+            ),
+            "paired_validation_selection": str(
+                config.get("paired_validation_selection", "disabled")
             ),
             "use_sft": not bool(config.get("no_sft")),
             "disable_packet_information_weights": bool(

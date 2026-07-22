@@ -704,6 +704,12 @@ def main() -> None:
     ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0)
     ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5)
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0)
+    ap.add_argument(
+        "--tower1_paired_validation_selection",
+        choices=["disabled", "worst_view_macro_f1", "mean_view_macro_f1"],
+        default="disabled",
+        help="Select Tower-1 checkpoints using aligned factual/masked validation views.",
+    )
     ap.add_argument("--class_weighting", choices=["none", "inverse", "effective"], default="effective")
     ap.add_argument("--class_weight_basis", choices=["packet", "flow"], default="packet")
     ap.add_argument("--class_weight_strength", type=float, default=1.0)
@@ -899,6 +905,14 @@ def main() -> None:
         ap.error("--tower1_paired_raw_consistency_weight must be non-negative")
     if args.tower1_paired_cls_weight > 0 and args.tower1_paired_consistency_weight <= 0:
         ap.error("--tower1_paired_cls_weight requires --tower1_paired_consistency_weight > 0")
+    if (
+        args.tower1_paired_validation_selection != "disabled"
+        and args.tower1_paired_consistency_weight <= 0
+    ):
+        ap.error(
+            "--tower1_paired_validation_selection requires "
+            "--tower1_paired_consistency_weight > 0"
+        )
     independent_training_hyperparameters = capture_training_hyperparameter_overrides(
         args, "packet-level", args.training_hyperparameter_overrides
     )
@@ -1072,10 +1086,20 @@ def main() -> None:
                 command.append("--init_adapter_only")
         if args.tower1_paired_consistency_weight > 0:
             paired_path = intervention_dirs["train"] / "packet_auxiliary.jsonl"
+            paired_valid_path = intervention_dirs["valid"] / "packet_auxiliary.jsonl"
             if not args.dry_run and not paired_path.exists():
                 raise FileNotFoundError(
                     "Tower-1 paired consistency requires the mask-IP-port training view: "
                     f"{paired_path}. Run --stage preprocess or --stage paper_unified first."
+                )
+            if (
+                args.tower1_paired_validation_selection != "disabled"
+                and not args.dry_run
+                and not paired_valid_path.exists()
+            ):
+                raise FileNotFoundError(
+                    "paired checkpoint selection requires the mask-IP-port validation view: "
+                    f"{paired_valid_path}"
                 )
             command.extend(
                 [
@@ -1086,6 +1110,15 @@ def main() -> None:
                     "--paired_raw_consistency_weight", str(args.tower1_paired_raw_consistency_weight),
                 ]
             )
+            if args.tower1_paired_validation_selection != "disabled":
+                command.extend(
+                    [
+                        "--valid_paired_packet_aux_jsonl",
+                        str(paired_valid_path),
+                        "--paired_validation_selection",
+                        args.tower1_paired_validation_selection,
+                    ]
+                )
         if args.local_files_only:
             command.append("--local_files_only")
         return command

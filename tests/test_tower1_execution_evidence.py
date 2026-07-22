@@ -40,6 +40,7 @@ def declared_contract():
         "paired_cls_weight": 0.0,
         "paired_logit_kl_weight": 0.5,
         "paired_raw_consistency_weight": 1.0,
+        "paired_validation_selection": "disabled",
         "use_sft": False,
         "disable_packet_information_weights": True,
         "flow_balanced_packet_batches": True,

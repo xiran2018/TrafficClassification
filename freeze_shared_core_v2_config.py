@@ -10,7 +10,19 @@ from pathlib import Path
 from typing import Any
 
 
-REQUIRED_DATASETS = {"vpn-app", "tls-120"}
+SELECTION_DATASETS = {"vpn-app", "tls-120"}
+PACKET_TASK_DATASETS = {
+    "vpn-app",
+    "vpn-binary",
+    "vpn-service",
+    "tls-120",
+    "ustc-app",
+    "ustc-binary",
+}
+FLOW_TASK_DATASETS = {"vpn-app", "tls-120"}
+METHOD_DATASETS = PACKET_TASK_DATASETS | FLOW_TASK_DATASETS
+# Backward-compatible name for validation-selection report checks.
+REQUIRED_DATASETS = SELECTION_DATASETS
 SELECTION_SCOPE = "heldout_validation_only"
 SELECTION_METRIC = "macro_f1_with_accuracy_guard"
 MIN_MACRO_F1_DELTA = 0.005
@@ -328,6 +340,9 @@ def freeze_config(
         "paired_cls_weight": 0.2 if use_paired_invariance else 0.0,
         "paired_logit_kl_weight": 0.5,
         "paired_raw_consistency_weight": 1.0,
+        "paired_validation_selection": (
+            "worst_view_macro_f1" if use_paired_invariance else "disabled"
+        ),
         "early_stop_patience": 0,
         "init_checkpoint_dir": "",
         "init_adapter_only": False,

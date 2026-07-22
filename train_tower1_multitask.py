@@ -123,6 +123,90 @@ def validation_patience_exhausted(non_improving_evals: int, patience: int) -> bo
     return int(patience) > 0 and int(non_improving_evals) >= int(patience)
 
 
+def validate_aligned_validation_views(
+    factual_rows: List[dict], intervened_rows: List[dict]
+) -> None:
+    """Require paired validation views to describe the same labeled packets."""
+    def identities(rows: List[dict]) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for row in rows:
+            packet_uid = str(row.get("packet_uid", ""))
+            if not packet_uid:
+                raise ValueError("paired validation rows require packet_uid")
+            if packet_uid in result:
+                raise ValueError(f"duplicate paired validation packet_uid: {packet_uid}")
+            result[packet_uid] = int(row.get("label_id", -1))
+        return result
+
+    factual = identities(factual_rows)
+    intervened = identities(intervened_rows)
+    if factual != intervened:
+        missing = sorted(set(factual) - set(intervened))[:5]
+        extra = sorted(set(intervened) - set(factual))[:5]
+        mismatched = sorted(
+            packet_uid
+            for packet_uid in set(factual) & set(intervened)
+            if factual[packet_uid] != intervened[packet_uid]
+        )[:5]
+        raise ValueError(
+            "paired validation views are not aligned: "
+            f"factual={len(factual)} intervened={len(intervened)} "
+            f"missing={missing} extra={extra} label_mismatches={mismatched}"
+        )
+
+
+def validation_selection_key(
+    factual_metrics: dict,
+    intervened_metrics: Optional[dict],
+    *,
+    select_metric: str,
+    paired_mode: str,
+) -> tuple[tuple[float, ...], dict]:
+    """Build a checkpoint key without hiding either intervention view."""
+    if paired_mode == "disabled":
+        value = float(factual_metrics[select_metric])
+        return (
+            value,
+            float(factual_metrics["macro_f1"]),
+            float(factual_metrics["accuracy"]),
+        ), {
+            "mode": "disabled",
+            "score": value,
+            "factual_macro_f1": float(factual_metrics["macro_f1"]),
+            "factual_accuracy": float(factual_metrics["accuracy"]),
+        }
+    if intervened_metrics is None:
+        raise ValueError(f"{paired_mode} requires intervened validation metrics")
+    factual_f1 = float(factual_metrics["macro_f1"])
+    intervened_f1 = float(intervened_metrics["macro_f1"])
+    factual_acc = float(factual_metrics["accuracy"])
+    intervened_acc = float(intervened_metrics["accuracy"])
+    mean_f1 = 0.5 * (factual_f1 + intervened_f1)
+    worst_f1 = min(factual_f1, intervened_f1)
+    mean_acc = 0.5 * (factual_acc + intervened_acc)
+    worst_acc = min(factual_acc, intervened_acc)
+    if paired_mode == "worst_view_macro_f1":
+        score = worst_f1
+        key = (worst_f1, mean_f1, worst_acc, mean_acc, factual_f1, factual_acc)
+    elif paired_mode == "mean_view_macro_f1":
+        score = mean_f1
+        key = (mean_f1, worst_f1, mean_acc, worst_acc, factual_f1, factual_acc)
+    else:
+        raise ValueError(f"unknown paired validation selection mode: {paired_mode}")
+    return key, {
+        "mode": paired_mode,
+        "score": score,
+        "factual_macro_f1": factual_f1,
+        "intervened_macro_f1": intervened_f1,
+        "mean_view_macro_f1": mean_f1,
+        "worst_view_macro_f1": worst_f1,
+        "factual_accuracy": factual_acc,
+        "intervened_accuracy": intervened_acc,
+        "mean_view_accuracy": mean_acc,
+        "worst_view_accuracy": worst_acc,
+    }
+
+
 def tower1_training_config(args) -> dict:
     keys = (
         "base_model",
@@ -130,6 +214,7 @@ def tower1_training_config(args) -> dict:
         "packet_aux_jsonl",
         "paired_packet_aux_jsonl",
         "valid_packet_aux_jsonl",
+        "valid_paired_packet_aux_jsonl",
         "sft_jsonl",
         "epochs",
         "max_steps",
@@ -171,6 +256,7 @@ def tower1_training_config(args) -> dict:
         "init_checkpoint_dir",
         "init_adapter_only",
         "select_metric",
+        "paired_validation_selection",
         "early_stop_patience",
         "no_sft",
         "seed",
@@ -224,6 +310,7 @@ def write_training_contract(
         "packet_aux_jsonl": args.packet_aux_jsonl,
         "valid_packet_aux_jsonl": args.valid_packet_aux_jsonl,
         "paired_packet_aux_jsonl": args.paired_packet_aux_jsonl,
+        "valid_paired_packet_aux_jsonl": args.valid_paired_packet_aux_jsonl,
     }
     input_paths.update(
         {f"sft_jsonl_{index}": path for index, path in enumerate(args.sft_jsonl)}
@@ -645,6 +732,11 @@ def main() -> None:
         help="Whether an anchor packet may contribute to its own flow prototype.",
     )
     ap.add_argument("--paired_packet_aux_jsonl", default="", help="Optional second-view packet_auxiliary.jsonl aligned by packet_uid, e.g. randomized IP/port prompts.")
+    ap.add_argument(
+        "--valid_paired_packet_aux_jsonl",
+        default="",
+        help="Aligned intervened validation view used for robust paired-view checkpoint selection.",
+    )
     ap.add_argument("--paired_consistency_weight", type=float, default=0.0, help="Weight for Tower-1 full-header vs paired-view packet embedding/logit consistency.")
     ap.add_argument("--paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier added inside the packet classification loss.")
     ap.add_argument("--paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
@@ -675,6 +767,12 @@ def main() -> None:
     ap.add_argument("--eval_steps", type=int, default=0, help="Validation interval. 0 evaluates once per packet-loader epoch.")
     ap.add_argument("--select_metric", choices=["macro_f1", "accuracy"], default="macro_f1")
     ap.add_argument(
+        "--paired_validation_selection",
+        choices=["disabled", "worst_view_macro_f1", "mean_view_macro_f1"],
+        default="disabled",
+        help="Checkpoint rule over factual and intervened validation views.",
+    )
+    ap.add_argument(
         "--early_stop_patience",
         type=int,
         default=0,
@@ -692,6 +790,17 @@ def main() -> None:
         ap.error("--class_weight_strength must be in [0, 1]")
     if args.paired_raw_consistency_weight < 0:
         ap.error("--paired_raw_consistency_weight must be non-negative")
+    if args.paired_validation_selection != "disabled":
+        if not args.valid_packet_aux_jsonl or not args.valid_paired_packet_aux_jsonl:
+            ap.error(
+                "paired validation selection requires both --valid_packet_aux_jsonl "
+                "and --valid_paired_packet_aux_jsonl"
+            )
+        if not args.paired_packet_aux_jsonl or args.paired_consistency_weight <= 0:
+            ap.error(
+                "paired validation selection requires paired-view training with "
+                "--paired_packet_aux_jsonl and --paired_consistency_weight > 0"
+            )
 
     set_seed(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -807,6 +916,7 @@ def main() -> None:
     packet_iter = RestartableDataIterator(packet_loader)
 
     valid_loader = None
+    valid_paired_loader = None
     if args.valid_packet_aux_jsonl:
         valid_ds = PacketAuxDataset(args.valid_packet_aux_jsonl, show_progress=show_load_progress)
         full_valid_count = len(valid_ds.rows)
@@ -827,6 +937,31 @@ def main() -> None:
             f"packets_per_flow={args.valid_packets_per_flow or 'all'}, batches={len(valid_loader)}",
             flush=True,
         )
+        if args.valid_paired_packet_aux_jsonl:
+            valid_paired_ds = PacketAuxDataset(
+                args.valid_paired_packet_aux_jsonl,
+                show_progress=show_load_progress,
+            )
+            full_paired_valid_count = len(valid_paired_ds.rows)
+            valid_paired_ds.rows = flow_balanced_validation_rows(
+                valid_paired_ds.rows,
+                packets_per_flow=args.valid_packets_per_flow,
+                seed=args.seed,
+            )
+            validate_aligned_validation_views(valid_ds.rows, valid_paired_ds.rows)
+            valid_paired_loader = DataLoader(
+                valid_paired_ds,
+                batch_size=args.valid_batch_size or args.packet_batch_size,
+                shuffle=False,
+                drop_last=False,
+                collate_fn=PacketAuxCollator(tokenizer, args.max_packet_length),
+            )
+            print(
+                f"paired validation packet samples={len(valid_paired_ds)}/{full_paired_valid_count}, "
+                f"packets_per_flow={args.valid_packets_per_flow or 'all'}, "
+                f"batches={len(valid_paired_loader)}",
+                flush=True,
+            )
 
     sft_loader = None
     if not args.no_sft:
@@ -992,15 +1127,45 @@ def main() -> None:
             )
             metrics.pop("y_true", None)
             metrics.pop("y_pred", None)
-            record = {"step": step + 1, "select_metric": args.select_metric, "metrics": metrics}
+            paired_metrics = None
+            if valid_paired_loader is not None:
+                paired_metrics = evaluate_packet_model(
+                    model,
+                    valid_paired_loader,
+                    device=device,
+                    num_classes=num_classes,
+                    label_names=label_names,
+                    desc=f"valid paired step {step + 1}",
+                )
+                paired_metrics.pop("y_true", None)
+                paired_metrics.pop("y_pred", None)
+            key, checkpoint_selection = validation_selection_key(
+                metrics,
+                paired_metrics,
+                select_metric=args.select_metric,
+                paired_mode=args.paired_validation_selection,
+            )
+            record = {
+                "step": step + 1,
+                "select_metric": args.select_metric,
+                "metrics": metrics,
+                "paired_metrics": paired_metrics,
+                "checkpoint_selection": checkpoint_selection,
+            }
             with open(history_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            key = (metrics[args.select_metric], metrics["macro_f1"], metrics["accuracy"])
             improved = best_key is None or key > best_key
+            paired_message = ""
+            if paired_metrics is not None:
+                paired_message = (
+                    f" paired_accuracy={paired_metrics['accuracy']:.4f} "
+                    f"paired_macro_f1={paired_metrics['macro_f1']:.4f}"
+                )
             print(
                 f"validation step={step + 1} loss={metrics['loss']:.4f} "
                 f"accuracy={metrics['accuracy']:.4f} macro_f1={metrics['macro_f1']:.4f} "
-                f"select={args.select_metric}:{metrics[args.select_metric]:.4f} improved={improved}",
+                f"select={checkpoint_selection['mode']}:{checkpoint_selection['score']:.4f}"
+                f"{paired_message} improved={improved}",
                 flush=True,
             )
             if improved:

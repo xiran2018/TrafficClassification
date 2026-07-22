@@ -5,11 +5,18 @@ import json
 from pathlib import Path
 from typing import Any
 
-from freeze_shared_core_v2_config import REQUIRED_DATASETS, canonical_sha256
+from freeze_shared_core_v2_config import (
+    FLOW_TASK_DATASETS,
+    METHOD_DATASETS,
+    PACKET_TASK_DATASETS,
+    REQUIRED_DATASETS,
+    canonical_sha256,
+)
 
 
 SCHEMA = "exact_shared_packet_core_v2"
 STATUS = "frozen_from_cross_dataset_validation"
+DEVELOPMENT_STATUS = "frozen_for_development_milestone"
 
 
 # These values control optimization, stochastic regularization, or compute
@@ -285,10 +292,40 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
     unsigned = {key: value for key, value in payload.items() if key != "config_sha256"}
     if not fingerprint or fingerprint != canonical_sha256(unsigned):
         raise ValueError("frozen shared-core config fingerprint mismatch")
-    if payload.get("schema") != SCHEMA or payload.get("status") != STATUS:
+    if payload.get("schema") != SCHEMA or payload.get("status") not in {
+        STATUS,
+        DEVELOPMENT_STATUS,
+    }:
         raise ValueError("unsupported or non-frozen shared-core config")
-    if set(payload.get("datasets") or []) != REQUIRED_DATASETS:
-        raise ValueError("shared-core v2 must be frozen jointly for VPN and TLS-120")
+    task_datasets = payload.get("task_datasets") or {}
+    if task_datasets:
+        expected_task_datasets = {
+            "packet-level-classification": PACKET_TASK_DATASETS,
+            "flow-level-classification": FLOW_TASK_DATASETS,
+        }
+        observed_task_datasets = {
+            task: set(datasets) for task, datasets in task_datasets.items()
+        }
+        if observed_task_datasets != expected_task_datasets:
+            raise ValueError("shared-core v2 task dataset contract is incomplete")
+        if set(payload.get("datasets") or []) != METHOD_DATASETS:
+            raise ValueError("shared-core v2 method dataset union is incomplete")
+        protocol = payload.get("selection_protocol") or {}
+        declared_application = {
+            task: set(datasets)
+            for task, datasets in (
+                protocol.get("application_datasets_by_task") or {}
+            ).items()
+        }
+        if (
+            set(protocol.get("selection_datasets") or []) != REQUIRED_DATASETS
+            or declared_application != expected_task_datasets
+        ):
+            raise ValueError(
+                "shared-core v2 selection/application dataset scopes disagree"
+            )
+    elif set(payload.get("datasets") or []) != REQUIRED_DATASETS:
+        raise ValueError("legacy shared-core v2 must cover VPN and TLS-120")
     if (payload.get("selection_protocol") or {}).get("test_labels_used") is not False:
         raise ValueError("shared-core v2 selection must explicitly exclude test labels")
     contract = payload.get("task_contract") or {}
@@ -421,6 +458,24 @@ def load_frozen_shared_core(path: str | Path) -> dict[str, Any]:
         raise ValueError("shared-core v2 Tower1 must initialize independently from the base model")
     if tower1["disable_packet_information_weights"] is not True:
         raise ValueError("shared-core v2 disables packet shortcut information weights")
+    paired_validation_selection = tower1.get(
+        "paired_validation_selection", "disabled"
+    )
+    if paired_validation_selection not in {
+        "disabled",
+        "worst_view_macro_f1",
+        "mean_view_macro_f1",
+    }:
+        raise ValueError(
+            "shared-core v2 has an unsupported paired validation selection mode"
+        )
+    if (
+        paired_validation_selection != "disabled"
+        and float(tower1["paired_consistency_weight"]) <= 0.0
+    ):
+        raise ValueError(
+            "paired validation selection requires paired Tower1 training"
+        )
     if tower1["flow_balanced_packet_batches"] is not True or int(
         tower1["packets_per_flow"]
     ) != 2:
@@ -555,6 +610,9 @@ def apply_frozen_shared_core(
             "tower1_paired_raw_consistency_weight": tower1[
                 "paired_raw_consistency_weight"
             ],
+            "tower1_paired_validation_selection": tower1.get(
+                "paired_validation_selection", "disabled"
+            ),
         }
     else:
         mappings = {
@@ -647,6 +705,9 @@ def apply_frozen_shared_core(
             "tower1_paired_raw_consistency_weight": tower1[
                 "paired_raw_consistency_weight"
             ],
+            "tower1_paired_validation_selection": tower1.get(
+                "paired_validation_selection", "disabled"
+            ),
         }
     for name, value in mappings.items():
         _set(args, name, value, overrides)

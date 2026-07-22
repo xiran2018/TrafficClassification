@@ -286,6 +286,13 @@ def tower1_train_cmd(args) -> List[str]:
             "--paired_raw_consistency_weight",
             str(args.tower1_paired_raw_consistency_weight),
         ]
+        if args.tower1_paired_validation_selection != "disabled":
+            cmd += [
+                "--valid_paired_packet_aux_jsonl",
+                f"reasoningDataset/{args.dataset}/valid_tower1_{args.tower1_paired_data_suffix}/packet_auxiliary.jsonl",
+                "--paired_validation_selection",
+                args.tower1_paired_validation_selection,
+            ]
     if args.flow_balanced_packet_batches:
         cmd += [
             "--flow_balanced_packet_batches",
@@ -331,7 +338,10 @@ def tower1_preprocess_cmd(args, split: str) -> List[str]:
         cmd += ["--embedding_header_policy", args.embedding_header_policy]
     if split == "train":
         cmd.append("--write_label_map")
-        if Path(source_label_map).exists():
+        if (
+            args.embedding_header_policy != "full"
+            and args.source_suffix != args.output_suffix
+        ) or Path(source_label_map).exists():
             cmd += ["--label_map_in", source_label_map]
     else:
         cmd += ["--label_map_in", train_label_map(args)]
@@ -1710,6 +1720,12 @@ def main() -> None:
     ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier in Tower-1.")
     ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0, help="Raw last-token cosine term inside Tower-1 paired consistency.")
+    ap.add_argument(
+        "--tower1_paired_validation_selection",
+        choices=["disabled", "worst_view_macro_f1", "mean_view_macro_f1"],
+        default="disabled",
+        help="Select Tower-1 checkpoints using aligned factual/masked validation views.",
+    )
     ap.add_argument("--flow_balanced_packet_batches", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--packets_per_flow", type=int, default=2)
     ap.add_argument(
@@ -1993,13 +2009,28 @@ def main() -> None:
         ap.error("--tower1_paired_logit_kl_weight must be non-negative")
     if args.tower1_paired_cls_weight > 0 and args.tower1_paired_consistency_weight <= 0:
         ap.error("--tower1_paired_cls_weight requires --tower1_paired_consistency_weight > 0")
+    if (
+        args.tower1_paired_validation_selection != "disabled"
+        and args.tower1_paired_consistency_weight <= 0
+    ):
+        ap.error(
+            "--tower1_paired_validation_selection requires "
+            "--tower1_paired_consistency_weight > 0"
+        )
 
     if args.dataset in {"ustc-app", "ustc-binary"} and args.source_suffix == "change_weight":
         args.source_suffix = args.output_suffix
     if not args.tower1_data_suffix:
-        args.tower1_data_suffix = args.source_suffix
+        args.tower1_data_suffix = (
+            args.output_suffix
+            if args.stage in {"tower1_preprocess", "all"}
+            else args.source_suffix
+        )
     if args.tower1_output_dir == default_tower1_output_dir:
-        args.tower1_output_dir = f"checkpoints/tower1_qwen_multitask_{safe_name(args.dataset)}_flowaware_change_weight"
+        args.tower1_output_dir = (
+            "checkpoints/tower1_qwen_multitask_"
+            f"{safe_name(args.dataset)}_{safe_name(args.tower1_data_suffix)}_fold{args.fold}"
+        )
     if args.dataset != "vpn-app":
         if args.coarse_groups == "vpn_app":
             args.coarse_groups = "none"
@@ -2092,6 +2123,7 @@ def main() -> None:
                 **vars(args),
                 "output_suffix": intervention_suffix,
                 "tower1_data_suffix": intervention_suffix,
+                "source_suffix": args.output_suffix,
                 "embedding_suffix": intervention_embedding_suffix,
                 "embedding_header_policy": args.intervened_embedding_header_policy,
                 "tower2_suffix": "",

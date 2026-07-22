@@ -17,6 +17,7 @@ def args_with_inputs(tmp_path):
         packet_aux_jsonl=inputs["packet"],
         valid_packet_aux_jsonl=inputs["valid"],
         paired_packet_aux_jsonl=inputs["paired"],
+        valid_paired_packet_aux_jsonl="",
         sft_jsonl=[],
     )
 
