@@ -75,16 +75,48 @@ class PacketAuxDataset(Dataset):
         self.paired_rows = 0
         if paired_path:
             paired = load_jsonl(paired_path, show_progress=show_progress)
-            paired_by_uid = {str(row.get("packet_uid", "")): row for row in paired}
+            paired_by_uid: Dict[str, dict] = {}
+            for paired_row in paired:
+                packet_uid = str(paired_row.get("packet_uid", ""))
+                if not packet_uid:
+                    raise ValueError(f"paired packet auxiliary rows require packet_uid: {paired_path}")
+                if packet_uid in paired_by_uid:
+                    raise ValueError(f"duplicate paired packet_uid {packet_uid!r}: {paired_path}")
+                paired_by_uid[packet_uid] = paired_row
+
+            factual_uids: set[str] = set()
+            missing: List[str] = []
+            label_mismatches: List[str] = []
+            empty_prompts: List[str] = []
             for row in self.rows:
-                paired_row = paired_by_uid.get(str(row.get("packet_uid", "")))
+                packet_uid = str(row.get("packet_uid", ""))
+                if not packet_uid:
+                    raise ValueError(f"factual packet auxiliary rows require packet_uid: {path}")
+                if packet_uid in factual_uids:
+                    raise ValueError(f"duplicate factual packet_uid {packet_uid!r}: {path}")
+                factual_uids.add(packet_uid)
+                paired_row = paired_by_uid.get(packet_uid)
                 if paired_row is None:
+                    missing.append(packet_uid)
                     continue
                 if int(paired_row.get("label_id", -1)) != int(row.get("label_id", -2)):
+                    label_mismatches.append(packet_uid)
                     continue
-                row["paired_prompt"] = paired_row.get("prompt", "")
+                paired_prompt = str(paired_row.get("prompt", ""))
+                if not paired_prompt.strip():
+                    empty_prompts.append(packet_uid)
+                    continue
+                row["paired_prompt"] = paired_prompt
                 row["paired_embedding_header_policy"] = paired_row.get("embedding_header_policy", "")
                 self.paired_rows += 1
+            extra = sorted(set(paired_by_uid) - factual_uids)
+            if missing or extra or label_mismatches or empty_prompts:
+                raise ValueError(
+                    "paired packet auxiliary views are not exactly aligned: "
+                    f"factual={len(self.rows)} paired={len(paired)} matched={self.paired_rows} "
+                    f"missing={missing[:5]} extra={extra[:5]} "
+                    f"label_mismatches={label_mismatches[:5]} empty_prompts={empty_prompts[:5]}"
+                )
             print(
                 f"paired packet auxiliary: matched={self.paired_rows}/{len(self.rows)} "
                 f"from {paired_path}",

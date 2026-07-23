@@ -1,12 +1,18 @@
 from argparse import Namespace
+import json
 
 import pytest
 
 from train_tower1_multitask import (
+    PacketAuxDataset,
     tower1_training_config,
     validate_aligned_validation_views,
     validation_selection_key,
 )
+
+
+def write_jsonl(path, rows):
+    path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
 
 
 def test_training_config_records_sampler_and_paired_objective():
@@ -93,6 +99,78 @@ def test_paired_validation_views_require_exact_packet_and_label_alignment():
                 {"packet_uid": "c", "label_id": 1},
             ],
         )
+
+
+def test_paired_training_views_require_complete_alignment(tmp_path):
+    factual_path = tmp_path / "factual.jsonl"
+    paired_path = tmp_path / "paired.jsonl"
+    factual = [
+        {"packet_uid": "a", "label_id": 0, "prompt": "factual-a"},
+        {"packet_uid": "b", "label_id": 1, "prompt": "factual-b"},
+    ]
+    paired = [
+        {"packet_uid": "b", "label_id": 1, "prompt": "paired-b"},
+        {"packet_uid": "a", "label_id": 0, "prompt": "paired-a"},
+    ]
+    write_jsonl(factual_path, factual)
+    write_jsonl(paired_path, paired)
+
+    dataset = PacketAuxDataset(str(factual_path), show_progress=False, paired_path=str(paired_path))
+
+    assert dataset.paired_rows == 2
+    assert [row["paired_prompt"] for row in dataset.rows] == ["paired-a", "paired-b"]
+
+
+@pytest.mark.parametrize(
+    ("paired", "message"),
+    [
+        ([{"packet_uid": "a", "label_id": 0, "prompt": "paired-a"}], "missing"),
+        (
+            [
+                {"packet_uid": "a", "label_id": 0, "prompt": "paired-a"},
+                {"packet_uid": "b", "label_id": 0, "prompt": "paired-b"},
+            ],
+            "label_mismatches",
+        ),
+        (
+            [
+                {"packet_uid": "a", "label_id": 0, "prompt": "paired-a"},
+                {"packet_uid": "b", "label_id": 1, "prompt": ""},
+            ],
+            "empty_prompts",
+        ),
+    ],
+)
+def test_paired_training_views_reject_partial_or_invalid_pairs(tmp_path, paired, message):
+    factual_path = tmp_path / "factual.jsonl"
+    paired_path = tmp_path / "paired.jsonl"
+    write_jsonl(
+        factual_path,
+        [
+            {"packet_uid": "a", "label_id": 0, "prompt": "factual-a"},
+            {"packet_uid": "b", "label_id": 1, "prompt": "factual-b"},
+        ],
+    )
+    write_jsonl(paired_path, paired)
+
+    with pytest.raises(ValueError, match=message):
+        PacketAuxDataset(str(factual_path), show_progress=False, paired_path=str(paired_path))
+
+
+def test_paired_training_views_reject_duplicate_uids(tmp_path):
+    factual_path = tmp_path / "factual.jsonl"
+    paired_path = tmp_path / "paired.jsonl"
+    write_jsonl(factual_path, [{"packet_uid": "a", "label_id": 0, "prompt": "factual"}])
+    write_jsonl(
+        paired_path,
+        [
+            {"packet_uid": "a", "label_id": 0, "prompt": "paired-1"},
+            {"packet_uid": "a", "label_id": 0, "prompt": "paired-2"},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="duplicate paired packet_uid"):
+        PacketAuxDataset(str(factual_path), show_progress=False, paired_path=str(paired_path))
 
 
 def test_worst_view_checkpoint_selection_prioritizes_robust_view():
