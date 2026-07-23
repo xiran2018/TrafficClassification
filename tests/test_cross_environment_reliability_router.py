@@ -3,7 +3,9 @@ import numpy as np
 from train_cross_environment_reliability_router import (
     aligned_test_consensus,
     aligned_split,
+    load_packet_environment,
     normalize_prob,
+    packet_split,
     router_features,
     safe_prior_transport,
 )
@@ -55,3 +57,55 @@ def test_safe_prior_transport_can_be_disabled():
     np.testing.assert_allclose(valid_out, valid)
     np.testing.assert_allclose(test_out, test)
     assert report["enabled"] is False
+
+
+def test_safe_prior_transport_rejects_macro_f1_regression():
+    y = np.asarray([0, 0, 1, 1])
+    valid = np.asarray(
+        [[0.55, 0.45], [0.55, 0.45], [0.45, 0.55], [0.45, 0.55]],
+        dtype=np.float32,
+    )
+    test = np.asarray([[0.9, 0.1], [0.85, 0.15], [0.8, 0.2]], dtype=np.float32)
+    _, _, report = safe_prior_transport(y, valid, test, 0.3, 0.05)
+    assert report["selected_strength"] == 0.0
+    assert report["reports"][1]["macro_f1"] < report["reports"][0]["macro_f1"]
+
+
+def test_packet_split_uses_packet_uids_when_available(tmp_path):
+    path = tmp_path / "packet.npz"
+    np.savez(
+        path,
+        y_true=np.asarray([0, 1]),
+        probabilities=np.asarray([[0.8, 0.2], [0.1, 0.9]], dtype=np.float32),
+        packet_uids=np.asarray(["flow-a_0", "flow-b_0"]),
+    )
+    ids, labels, probability = packet_split(str(path))
+    assert ids == ["flow-a_0", "flow-b_0"]
+    assert labels.tolist() == [0, 1]
+    assert probability.argmax(axis=1).tolist() == [0, 1]
+
+
+def test_load_packet_environment_rejects_expert_label_mismatch(tmp_path):
+    semantic_valid = tmp_path / "semantic_valid.npz"
+    semantic_test = tmp_path / "semantic_test.npz"
+    structural_valid = tmp_path / "structural_valid.npz"
+    structural_test = tmp_path / "structural_test.npz"
+    probability = np.asarray([[0.8, 0.2], [0.1, 0.9]], dtype=np.float32)
+    np.savez(semantic_valid, y_true=np.asarray([0, 1]), probabilities=probability)
+    np.savez(semantic_test, y_true=np.asarray([0, 1]), probabilities=probability)
+    np.savez(structural_valid, y_true=np.asarray([0, 0]), probabilities=probability)
+    np.savez(structural_test, y_true=np.asarray([0, 1]), probabilities=probability)
+    try:
+        load_packet_environment(
+            [
+                "fold0",
+                str(semantic_valid),
+                str(semantic_test),
+                str(structural_valid),
+                str(structural_test),
+            ]
+        )
+    except ValueError as error:
+        assert "validation labels differ" in str(error)
+    else:
+        raise AssertionError("mismatched packet labels must be rejected")

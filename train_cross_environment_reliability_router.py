@@ -123,6 +123,22 @@ def direct_split(payload: dict[str, Any]):
     return ids, labels, prob
 
 
+def packet_split(path: str):
+    """Load strict one-packet probabilities with an alignment identity."""
+    with np.load(path, allow_pickle=False) as payload:
+        if "y_true" not in payload or "probabilities" not in payload:
+            raise ValueError(f"{path}: packet payload needs y_true and probabilities")
+        labels = np.asarray(payload["y_true"], dtype=np.int64)
+        prob = normalize_prob(payload["probabilities"])
+        if "packet_uids" in payload:
+            ids = [str(value) for value in payload["packet_uids"]]
+        else:
+            ids = [f"packet:{index}" for index in range(len(labels))]
+    if len(ids) != len(set(ids)) or len(ids) != len(labels):
+        raise ValueError(f"{path}: packet payload has invalid sample alignment")
+    return ids, labels, prob
+
+
 @dataclass
 class Environment:
     name: str
@@ -146,6 +162,35 @@ def load_environment(spec: list[str]) -> Environment:
     structural_valid_y, valid_structural = aligned_split(structural, "valid", valid_ids)
     test_ids, test_y, test_semantic = direct_split(semantic_test)
     structural_test_y, test_structural = aligned_split(structural, "test", test_ids)
+    if not np.array_equal(valid_y, structural_valid_y):
+        raise ValueError(f"{name}: validation labels differ across expert slots")
+    if not np.array_equal(test_y, structural_test_y):
+        raise ValueError(f"{name}: test labels differ across expert slots")
+    return Environment(
+        name,
+        valid_ids,
+        valid_y,
+        valid_semantic,
+        valid_structural,
+        test_y,
+        test_ids,
+        test_semantic,
+        test_structural,
+    )
+
+
+def load_packet_environment(spec: list[str]) -> Environment:
+    name, semantic_valid_path, semantic_test_path, structural_valid_path, structural_test_path = spec
+    valid_ids, valid_y, valid_semantic = packet_split(semantic_valid_path)
+    structural_valid_ids, structural_valid_y, valid_structural = packet_split(
+        structural_valid_path
+    )
+    test_ids, test_y, test_semantic = packet_split(semantic_test_path)
+    structural_test_ids, structural_test_y, test_structural = packet_split(
+        structural_test_path
+    )
+    if valid_ids != structural_valid_ids or test_ids != structural_test_ids:
+        raise ValueError(f"{name}: packet identities differ across expert slots")
     if not np.array_equal(valid_y, structural_valid_y):
         raise ValueError(f"{name}: validation labels differ across expert slots")
     if not np.array_equal(test_y, structural_test_y):
@@ -273,6 +318,7 @@ def safe_prior_transport(
     test_prob: np.ndarray,
     max_strength: float,
     strength_step: float,
+    macro_plateau_tolerance: float = 1e-3,
 ):
     """Select bounded target-prior transport using cross-environment OOF risk."""
     if max_strength <= 0:
@@ -309,27 +355,46 @@ def safe_prior_transport(
                 sample_weight=sample_weight,
             )[2]
         )
+        macro_f1 = float(
+            precision_recall_fscore_support(
+                valid_y,
+                pred,
+                average="macro",
+                zero_division=0,
+            )[2]
+        )
         reports.append(
             {
                 "strength": float(strength),
                 "weighted_accuracy": weighted_accuracy,
                 "weighted_macro_f1": weighted_macro_f1,
+                "macro_f1": macro_f1,
             }
         )
         candidates.append((adjusted_valid, adjusted_test))
+    baseline = reports[0]
+    best_macro_f1 = max(report["macro_f1"] for report in reports)
+    admissible = [
+        index
+        for index, report in enumerate(reports)
+        if report["macro_f1"] >= best_macro_f1 - macro_plateau_tolerance
+        and report["weighted_accuracy"] >= baseline["weighted_accuracy"] - 1e-12
+    ]
     selected_index = max(
-        range(len(reports)),
+        admissible,
         key=lambda index: (
-            reports[index]["weighted_accuracy"],
             reports[index]["weighted_macro_f1"],
+            reports[index]["weighted_accuracy"],
+            -reports[index]["strength"],
         ),
     )
     return candidates[selected_index][0], candidates[selected_index][1], {
         "enabled": True,
-        "selection_scope": "cross_environment_oof_target_weighted",
+        "selection_scope": "cross_environment_oof_macro_f1_plateau",
         "selected_strength": reports[selected_index]["strength"],
         "max_strength": float(max_strength),
         "strength_step": float(strength_step),
+        "macro_plateau_tolerance": float(macro_plateau_tolerance),
         "source_prior": source_prior.tolist(),
         "estimated_target_prior": target_prior.tolist(),
         "reports": reports,
@@ -343,7 +408,19 @@ def main() -> None:
         nargs=4,
         action="append",
         metavar=("NAME", "SEMANTIC_VALID", "SEMANTIC_TEST", "STRUCTURAL_VALID_TEST"),
-        required=True,
+    )
+    parser.add_argument(
+        "--packet_environment",
+        nargs=5,
+        action="append",
+        metavar=(
+            "NAME",
+            "SEMANTIC_VALID_NPZ",
+            "SEMANTIC_TEST_NPZ",
+            "STRUCTURAL_VALID_NPZ",
+            "STRUCTURAL_TEST_NPZ",
+        ),
+        help="Strict one-packet expert probabilities for one training environment.",
     )
     parser.add_argument("--hidden_dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.3)
@@ -359,13 +436,29 @@ def main() -> None:
         help="Maximum bounded EM prior-transfer strength. Selection uses pooled leave-one-environment-out predictions only.",
     )
     parser.add_argument("--prior_strength_step", type=float, default=0.05)
+    parser.add_argument(
+        "--prior_macro_plateau_tolerance",
+        type=float,
+        default=1e-3,
+        help="Maximum LOEO Macro-F1 gap admitted to the target-weighted selection plateau.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--checkpoint", default="")
+    parser.add_argument(
+        "--output_npz",
+        default="",
+        help="Packet probability artifact; defaults to output_json with an .npz suffix.",
+    )
     parser.add_argument("--output_json", required=True)
     args = parser.parse_args()
 
-    environments = [load_environment(spec) for spec in args.environment]
+    if bool(args.environment) == bool(args.packet_environment):
+        parser.error("provide exactly one of --environment or --packet_environment")
+    task_scope = "packet_level" if args.packet_environment else "flow_level"
+    environment_specs = args.packet_environment or args.environment
+    loader = load_packet_environment if args.packet_environment else load_environment
+    environments = [loader(spec) for spec in environment_specs]
     leave_one_environment_out = []
     oof_valid_ids = []
     oof_valid_y = []
@@ -427,11 +520,13 @@ def main() -> None:
         probability,
         args.prior_max_strength,
         args.prior_strength_step,
+        args.prior_macro_plateau_tolerance,
     )
     result_metrics = metrics(y_true, probability)
     payload = {
-        "metrics": {"flow_level": result_metrics},
+        "metrics": {task_scope: result_metrics},
         "method": "cross_environment_confusion_conditioned_reliability_router",
+        "sample_unit": "one_packet" if task_scope == "packet_level" else "one_flow",
         "config": {
             key: getattr(args, key)
             for key in (
@@ -444,6 +539,7 @@ def main() -> None:
                 "gate_entropy_weight",
                 "prior_max_strength",
                 "prior_strength_step",
+                "prior_macro_plateau_tolerance",
                 "seed",
             )
         },
@@ -453,16 +549,37 @@ def main() -> None:
         "final_train_group_weights": group_weights.tolist(),
         "base_metrics_before_prior_transport": base_metrics,
         "prior_transport": prior_transport,
-        "flow_ids": flow_ids,
-        "flow_y_true": y_true.tolist(),
-        "flow_y_pred": probability.argmax(axis=1).tolist(),
-        "flow_prob": probability.tolist(),
-        "flow_structural_gate": gate_weights.tolist(),
-        "valid_flow_ids": oof_valid_ids,
-        "valid_y_true": oof_valid_y,
-        "valid_y_pred": valid_prob_array.argmax(axis=1).tolist(),
-        "valid_prob": valid_prob_array.tolist(),
     }
+    if task_scope == "flow_level":
+        payload.update(
+            {
+                "flow_ids": flow_ids,
+                "flow_y_true": y_true.tolist(),
+                "flow_y_pred": probability.argmax(axis=1).tolist(),
+                "flow_prob": probability.tolist(),
+                "flow_structural_gate": gate_weights.tolist(),
+                "valid_flow_ids": oof_valid_ids,
+                "valid_y_true": oof_valid_y,
+                "valid_y_pred": valid_prob_array.argmax(axis=1).tolist(),
+                "valid_prob": valid_prob_array.tolist(),
+            }
+        )
+    else:
+        probability_path = Path(args.output_npz) if args.output_npz else Path(args.output_json).with_suffix(".npz")
+        probability_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            probability_path,
+            y_true=y_true,
+            probabilities=probability.astype(np.float32),
+            structural_gate=gate_weights.astype(np.float32),
+        )
+        payload.update(
+            {
+                "num_packets": int(len(y_true)),
+                "probability_path": str(probability_path),
+                "alignment": "packet_uid" if not flow_ids[0].startswith("packet:") else "strict_shared_row_order",
+            }
+        )
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -66,22 +66,40 @@ Frozen TLS-120 Flow Test results on the shared 11,542-flow test split:
 |---|---:|---:|
 | strict unified semantic fold 0 | 0.7558 | 0.7465 |
 | rich structural folds (range) | 0.8348-0.8367 | 0.8129-0.8138 |
-| cross-environment reliability router | 0.9024 | 0.8910 |
-| router + bounded OOF-selected prior transport | **0.9025** | **0.8913** |
+| cross-environment reliability router | 0.9020 | 0.8909 |
+| router + bounded OOF-selected prior transport | **0.9023** | **0.8912** |
 | previous heterogeneous consensus | 0.8461 | 0.8292 |
 
 TLS-120 uses the same expert slots, router inputs, GroupDRO objective,
 consensus rule, and prior-strength search as VPN. No TLS-specific class rule,
 feature branch, or loss was introduced. The bounded prior contributes only
-`+0.0002` accuracy and `+0.0003` Macro-F1 on TLS-120; almost all improvement
-comes from the learned cross-environment router. The result is stored at
+about `+0.0003` accuracy and Macro-F1 on TLS-120; almost all improvement comes
+from the learned cross-environment router. The result is stored at
 `/tmp/two_tower_runs/pcfrr_v1_results/tls120_flow_cross_environment_reliability_router_safe_prior.json`.
+
+Strict one-packet TLS-120 routing milestone on 553,994 Test packets:
+
+| candidate | accuracy | macro-F1 |
+|---|---:|---:|
+| fixed semantic fold consensus | 0.8557 | 0.8234 |
+| cross-environment reliability router | **0.8692** | **0.8429** |
+| unsafe target-weighted prior selection (negative ablation) | 0.8678 | 0.8217 |
+
+The shared LOEO Macro-F1 plateau rule automatically selects prior strength
+`0.30` for VPN Flow, `0.05` for TLS-120 Flow, and `0.00` for TLS-120 Packet.
+The Packet result obeys one-packet inference and validates reuse of the expert
+slot and routing algorithm. It is not yet the final cross-task shared-core
+claim: these existing TLS packet probabilities use a local Byte Transformer,
+whereas the Flow semantic slot uses Qwen/Tower1. The final paper matrix must
+rerun the router with all three Qwen plus native-byte shared-core Packet folds.
+The milestone artifact is
+`/tmp/two_tower_runs/pcfrr_v1_results/tls120_packet_cross_environment_reliability_router_safe_prior.json`.
 
 Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 494 passed
+pytest: 497 passed
 ```
 
 ---
