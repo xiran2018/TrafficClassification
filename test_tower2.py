@@ -20,6 +20,8 @@ from train_tower2 import (
     build_class_to_coarse,
     parse_label_groups,
     file_evidence,
+    build_flow_groups,
+    aligned_graph_items,
 )
 from models.flow_transformer import FlowTransformerClassifier
 from models.flow_graph_transformer import FlowGraphTransformerClassifier
@@ -122,6 +124,33 @@ def load_model(ckpt_path: str, device: str):
                 "identifiability_residual_max_weight", 0.0
             ),
             identifiability_residual_init=ckpt.get("identifiability_residual_init", 0.5),
+            dual_channel_mode=ckpt.get("dual_channel_mode", "concat"),
+            meta_feature_dim=ckpt.get("meta_feature_dim", 14),
+            native_structural_dim=ckpt.get("native_structural_dim", 0),
+            channel_fusion_base_mode=ckpt.get(
+                "channel_fusion_base_mode", "legacy"
+            ),
+            dual_channel_max_weight=ckpt.get("dual_channel_max_weight", 0.25),
+            use_intervention_views=ckpt.get("use_intervention_views", False),
+            intervention_max_residual_weight=ckpt.get(
+                "intervention_max_residual_weight", 0.25
+            ),
+            intervention_view_base_mode=ckpt.get(
+                "intervention_view_base_mode", "symmetric_mean"
+            ),
+            exact_shared_packet_encoder=ckpt.get(
+                "exact_shared_packet_encoder", False
+            ),
+            shared_packet_hidden_dim=ckpt.get("shared_packet_hidden_dim", 128),
+            train_ablate_input_channel=ckpt.get(
+                "train_ablate_input_channel", "none"
+            ),
+            train_ablate_intervention_view=ckpt.get(
+                "train_ablate_intervention_view", "none"
+            ),
+            train_fixed_channel_fusion=ckpt.get(
+                "train_fixed_channel_fusion", False
+            ),
         )
     model.load_state_dict(ckpt["model_state"])
     model.to(device).eval()
@@ -409,24 +438,151 @@ def predict_seq(
     return y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics
 
 
+def summarize_shared_graph_gate(model, gate_name: str, values: torch.Tensor) -> dict:
+    """Report raw router outputs and the effective bounded graph weights."""
+    summary = {
+        "num_samples": int(values.shape[0]),
+        "mean": values.mean(dim=0).tolist(),
+        "std": values.std(dim=0, unbiased=False).tolist(),
+        "p05": torch.quantile(values, 0.05, dim=0).tolist(),
+        "p50": torch.quantile(values, 0.50, dim=0).tolist(),
+        "p95": torch.quantile(values, 0.95, dim=0).tolist(),
+    }
+    if gate_name == "intervention_view_gate":
+        fusion = model.shared_packet_encoder.intervention_view_fusion
+        names = ("factual", "intervened")
+        bounds = fusion.effective_weight_bounds()
+        effective = fusion.effective_weights(values)
+        summary.update(
+            {
+                "base_mode": fusion.base_mode,
+                "view_names": list(names),
+                "weight_semantics": (
+                    "bounded_effective_routing_weights_before_channel_fusion"
+                ),
+                "max_residual_weight": float(fusion.max_residual_weight),
+            }
+        )
+    elif (
+        gate_name == "dual_channel_gate"
+        and model.channel_fusion_base_mode == "semantic_anchor"
+    ):
+        fusion = model.shared_packet_fusion
+        names = fusion.channel_names
+        fixed_fusion = bool(model.train_fixed_channel_fusion)
+        if fixed_fusion:
+            effective = values
+            fixed_weight = 1.0 / len(names)
+            bounds = {name: (fixed_weight, fixed_weight) for name in names}
+        else:
+            effective = fusion.effective_weights(values)
+            bounds = fusion.effective_weight_bounds()
+        summary.update(
+            {
+                "base_mode": "semantic_anchor",
+                "channel_names": list(names),
+                "weight_semantics": (
+                    "fixed_equal_normalized_channel_mean"
+                    if fixed_fusion
+                    else "bounded_effective_routing_weights_excluding_interaction_correction"
+                ),
+                "max_residual_weight": (
+                    0.0 if fixed_fusion else model.dual_channel_max_weight
+                ),
+            }
+        )
+    else:
+        return summary
+    lower = torch.tensor([bounds[name][0] for name in names], dtype=effective.dtype)
+    upper = torch.tensor([bounds[name][1] for name in names], dtype=effective.dtype)
+    summary.update(
+        {
+            "effective_routing_mean": effective.mean(dim=0).tolist(),
+            "effective_routing_p05": torch.quantile(effective, 0.05, dim=0).tolist(),
+            "effective_routing_p50": torch.quantile(effective, 0.50, dim=0).tolist(),
+            "effective_routing_p95": torch.quantile(effective, 0.95, dim=0).tolist(),
+            "theoretical_bounds": {name: list(bounds[name]) for name in names},
+            "bounds_satisfied": bool(
+                torch.all(effective >= lower - 1e-6)
+                and torch.all(effective <= upper + 1e-6)
+            ),
+        }
+    )
+    return summary
+
+
 @torch.no_grad()
-def predict_graph(model, dataset_path: str, device: str):
+def predict_graph(
+    model,
+    dataset_path: str,
+    device: str,
+    intervened_dataset_path: str = "",
+    ablate_input_channel: str = "none",
+    ablate_intervention_view: str = "none",
+):
     ds = GraphDataset(dataset_path)
+    factual_groups = build_flow_groups(ds)
+    paired_groups = {}
+    if getattr(model, "use_intervention_views", False):
+        if not intervened_dataset_path:
+            raise ValueError("intervention-aware graph checkpoint requires a paired dataset")
+        paired_groups = {
+            str(group["flow_id"]): group
+            for group in build_flow_groups(GraphDataset(intervened_dataset_path))
+        }
     y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges = [], [], [], [], [], [], []
-    for item in ds:
-        label = int(item.get("label", -1))
-        if label < 0:
+    gate_values = {"intervention_view_gate": [], "dual_channel_gate": []}
+    for group in factual_groups:
+        if getattr(model, "use_intervention_views", False):
+            item_pairs = aligned_graph_items(
+                group, paired_groups.get(str(group["flow_id"]))
+            )
+        else:
+            item_pairs = [(item, None) for item in group["items"]]
+        for item, paired_item in item_pairs:
+            label = int(item.get("label", -1))
+            if label < 0:
+                continue
+            factual_x = ablate_seq_input_channel(
+                item["x"].to(device), model, ablate_input_channel
+            )
+            intervened_x = None
+            if paired_item is not None:
+                intervened_x = ablate_seq_input_channel(
+                    paired_item["x"].to(device), model, ablate_input_channel
+                )
+                factual_x, intervened_x = ablate_intervention_inputs(
+                    factual_x, intervened_x, ablate_intervention_view
+                )
+            out = model(
+                factual_x,
+                item["edge_index"].to(device),
+                item["edge_attr"].to(device),
+                intervened_x=intervened_x,
+            )
+            for gate_name in gate_values:
+                gate = out.get(gate_name)
+                if gate is not None:
+                    gate_values[gate_name].append(
+                        gate.detach().cpu().reshape(-1, gate.shape[-1])
+                    )
+            logits = out["logits"].squeeze(0).cpu().numpy()
+            y_true.append(label)
+            y_pred.append(int(logits.argmax()))
+            flow_ids.append(str(item.get("flow_id", "")))
+            logits_all.append(logits)
+            emb_all.append(out["embedding"].cpu().numpy())
+            x_all.append(factual_x.cpu().numpy())
+            window_ranges.append(item.get("window"))
+    gate_diagnostics = {}
+    for gate_name, chunks in gate_values.items():
+        if not chunks:
             continue
-        out = model(item["x"].to(device), item["edge_index"].to(device), item["edge_attr"].to(device))
-        logits = out["logits"].squeeze(0).cpu().numpy()
-        y_true.append(label)
-        y_pred.append(int(logits.argmax()))
-        flow_ids.append(str(item.get("flow_id", "")))
-        logits_all.append(logits)
-        emb_all.append(out["embedding"].cpu().numpy())
-        x_all.append(item["x"].cpu().numpy())
-        window_ranges.append(item.get("window"))
-    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges
+        values = torch.cat(chunks, dim=0).float()
+        gate_diagnostics[gate_name] = summarize_shared_graph_gate(
+            model, gate_name, values
+        )
+    return y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics
 
 
 def aggregate_by_flow(
@@ -744,8 +900,18 @@ def main():
             ablate_intervention_view=args.ablate_intervention_view,
         )
     else:
-        y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges = predict_graph(model, args.dataset, args.device)
-        gate_diagnostics = {}
+        y_true, y_pred, flow_ids, logits_all, emb_all, x_all, window_ranges, gate_diagnostics = predict_graph(
+            model,
+            args.dataset,
+            args.device,
+            intervened_dataset_path=(
+                args.paired_view_dataset
+                if ckpt.get("use_intervention_views", False)
+                else ""
+            ),
+            ablate_input_channel=args.ablate_input_channel,
+            ablate_intervention_view=args.ablate_intervention_view,
+        )
 
     window_prob = softmax_np(np.stack(logits_all, axis=0)) if logits_all else np.zeros((0, ckpt["num_classes"]))
     window_metrics = compute_metrics(y_true, y_pred)

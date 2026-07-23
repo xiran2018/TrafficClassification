@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from .flow_transformer import AttentionPooling
+from .unified_packet_encoder import SharedPacketRepresentationEncoder
 
 
 class EdgeAwareGraphLayer(nn.Module):
@@ -66,9 +67,73 @@ class EdgeAwareGraphLayer(nn.Module):
 
 
 class FlowGraphTransformerClassifier(nn.Module):
-    def __init__(self, input_dim: int, num_classes: int, hidden_dim: int = 256, num_layers: int = 2, num_heads: int = 4, num_edge_types: int = 7, edge_attr_dim: int = 4, dropout: float = 0.1, identifiability_feature_index: int = -1, identifiability_pooling: bool = False, identifiability_feature_mode: str = "observed", identifiability_prior_init: float = 0.1, identifiability_dual_pooling: bool = False, identifiability_evidence_adapter: bool = False, identifiability_adapter_max_delta: float = 0.25, identifiability_residual_max_weight: float = 0.0, identifiability_residual_init: float = 0.5):
+    def __init__(self, input_dim: int, num_classes: int, hidden_dim: int = 256, num_layers: int = 2, num_heads: int = 4, num_edge_types: int = 7, edge_attr_dim: int = 4, dropout: float = 0.1, identifiability_feature_index: int = -1, identifiability_pooling: bool = False, identifiability_feature_mode: str = "observed", identifiability_prior_init: float = 0.1, identifiability_dual_pooling: bool = False, identifiability_evidence_adapter: bool = False, identifiability_adapter_max_delta: float = 0.25, identifiability_residual_max_weight: float = 0.0, identifiability_residual_init: float = 0.5, dual_channel_mode: str = "concat", meta_feature_dim: int = 14, native_structural_dim: int = 0, channel_fusion_base_mode: str = "legacy", dual_channel_max_weight: float = 0.25, use_intervention_views: bool = False, intervention_max_residual_weight: float = 0.25, intervention_view_base_mode: str = "symmetric_mean", exact_shared_packet_encoder: bool = False, shared_packet_hidden_dim: int = 128, train_ablate_input_channel: str = "none", train_ablate_intervention_view: str = "none", train_fixed_channel_fusion: bool = False):
         super().__init__()
-        self.proj = nn.Linear(input_dim, hidden_dim)
+        self.dual_channel_mode = str(dual_channel_mode)
+        self.channel_fusion_base_mode = str(channel_fusion_base_mode)
+        self.dual_channel_max_weight = float(
+            max(0.0, min(1.0, dual_channel_max_weight))
+        )
+        self.meta_feature_dim = int(meta_feature_dim)
+        self.native_structural_dim = int(native_structural_dim)
+        self.structural_feature_dim = self.meta_feature_dim - self.native_structural_dim
+        self.embedding_feature_dim = int(input_dim) - self.meta_feature_dim
+        self.use_intervention_views = bool(use_intervention_views)
+        self.exact_shared_packet_encoder = bool(exact_shared_packet_encoder)
+        self.shared_packet_hidden_dim = int(shared_packet_hidden_dim)
+        self.train_ablate_input_channel = str(train_ablate_input_channel)
+        self.train_ablate_intervention_view = str(train_ablate_intervention_view)
+        self.train_fixed_channel_fusion = bool(train_fixed_channel_fusion)
+        if self.dual_channel_mode not in {"concat", "residual"}:
+            raise ValueError("dual_channel_mode must be 'concat' or 'residual'")
+        if not 0 <= self.native_structural_dim <= self.meta_feature_dim:
+            raise ValueError("native_structural_dim must be within the structural channel")
+        if self.train_ablate_input_channel not in {
+            "none", "semantic", "content", "structural"
+        }:
+            raise ValueError("invalid train_ablate_input_channel")
+        if self.train_ablate_intervention_view not in {
+            "none", "factual_only", "intervened_only"
+        }:
+            raise ValueError("invalid train_ablate_intervention_view")
+        if self.exact_shared_packet_encoder:
+            if self.dual_channel_mode != "residual":
+                raise ValueError("exact shared graph packet encoder requires residual channel mode")
+            if not self.use_intervention_views:
+                raise ValueError("exact shared graph packet encoder requires intervention views")
+            if self.embedding_feature_dim <= 0:
+                raise ValueError("exact shared graph packet encoder requires semantic features")
+            if self.native_structural_dim <= 0 or self.structural_feature_dim <= 0:
+                raise ValueError(
+                    "exact shared graph packet encoder requires content and structural features"
+                )
+            self.shared_packet_encoder = SharedPacketRepresentationEncoder(
+                semantic_dim=self.embedding_feature_dim,
+                content_dim=self.native_structural_dim,
+                structural_dim=self.structural_feature_dim,
+                hidden_dim=self.shared_packet_hidden_dim,
+                dropout=dropout,
+                use_intervention_views=True,
+                intervention_max_residual_weight=intervention_max_residual_weight,
+                intervention_view_base_mode=intervention_view_base_mode,
+                channel_fusion_base_mode=self.channel_fusion_base_mode,
+                channel_fusion_max_weight=self.dual_channel_max_weight,
+            )
+            self.shared_packet_fusion = self.shared_packet_encoder.channel_fusion
+            self.channel_interaction = self.shared_packet_fusion.interaction
+            self.packet_to_flow_proj = nn.Linear(self.shared_packet_hidden_dim, hidden_dim)
+            self.semantic_channel_cls = nn.Linear(self.shared_packet_hidden_dim, num_classes)
+            self.structural_channel_cls = nn.Linear(self.shared_packet_hidden_dim, num_classes)
+        else:
+            if self.dual_channel_mode != "concat":
+                raise ValueError(
+                    "graph residual channel mode currently requires exact_shared_packet_encoder"
+                )
+            if self.use_intervention_views:
+                raise ValueError(
+                    "graph intervention views currently require exact_shared_packet_encoder"
+                )
+            self.proj = nn.Linear(input_dim, hidden_dim)
         self.edge_attr_dim = edge_attr_dim
         self.identifiability_feature_index = int(identifiability_feature_index)
         self.identifiability_feature_mode = str(identifiability_feature_mode)
@@ -92,7 +157,7 @@ class FlowGraphTransformerClassifier(nn.Module):
         self.next_length = nn.Linear(hidden_dim, 4)
         self.next_iat = nn.Linear(hidden_dim, 4)
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor):
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor, intervened_x: torch.Tensor | None = None):
         if self.identifiability_feature_mode == "zero" and self.identifiability_feature_index >= 0:
             x = x.clone()
             x[:, self.identifiability_feature_index:self.identifiability_feature_index + 2] = 0
@@ -101,7 +166,35 @@ class FlowGraphTransformerClassifier(nn.Module):
             if self.identifiability_feature_index >= 0
             else None
         )
-        h = self.proj(x)
+        channel_gate = None
+        intervention_gate = None
+        semantic_summary = None
+        structural_summary = None
+        if self.exact_shared_packet_encoder:
+            if intervened_x is None or intervened_x.shape != x.shape:
+                raise ValueError(
+                    "exact shared graph packet encoder requires an aligned intervention view"
+                )
+            semantic_end = self.embedding_feature_dim
+            content_end = semantic_end + self.native_structural_dim
+            semantic = x[:, :semantic_end]
+            intervened_semantic = intervened_x[:, :semantic_end]
+            content = x[:, semantic_end:content_end]
+            structural = x[:, content_end:]
+            packet_h, channel_gate, intervention_gate, channels = self.shared_packet_encoder(
+                semantic,
+                content,
+                structural,
+                intervened_semantic=intervened_semantic,
+                ablate_channel=self.train_ablate_input_channel,
+                ablate_intervention_view=self.train_ablate_intervention_view,
+                fixed_channel_fusion=self.train_fixed_channel_fusion,
+            )
+            h = self.packet_to_flow_proj(packet_h)
+            semantic_summary = channels["semantic"].mean(dim=0, keepdim=True)
+            structural_summary = channels["structural"].mean(dim=0, keepdim=True)
+        else:
+            h = self.proj(x)
         if edge_attr.numel() == 0:
             edge_attr = torch.zeros((0, self.edge_attr_dim), dtype=x.dtype, device=x.device)
         else:
@@ -127,6 +220,11 @@ class FlowGraphTransformerClassifier(nn.Module):
             "next_length_logits": self.next_length(g.unsqueeze(0)),
             "next_iat_logits": self.next_iat(g.unsqueeze(0)),
         }
+        if semantic_summary is not None and structural_summary is not None:
+            out["semantic_channel_logits"] = self.semantic_channel_cls(semantic_summary)
+            out["structural_channel_logits"] = self.structural_channel_cls(structural_summary)
+            out["dual_channel_gate"] = channel_gate
+            out["intervention_view_gate"] = intervention_gate
         if self.pool.last_reliability_gate is not None:
             out["identifiability_gate"] = self.pool.last_reliability_gate.squeeze(0)
         if self.pool.last_reliability_adapter_norm is not None:

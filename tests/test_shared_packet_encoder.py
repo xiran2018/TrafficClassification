@@ -8,6 +8,7 @@ import pytest
 
 from build_packet_semantic_cache import main as build_semantic_cache
 from models.flow_transformer import FlowTransformerClassifier
+from models.flow_graph_transformer import FlowGraphTransformerClassifier
 from models.native_flow_encoder import NativeFlowEncoder, ProtocolAwarePacketContentEncoder
 from models.packet_byte_transformer import PacketByteTransformer
 from models.unified_packet_encoder import (
@@ -20,7 +21,8 @@ from train_packet_byte_transformer import (
     PacketByteDataset,
     summarize_packet_gate_diagnostics,
 )
-from test_tower2 import predict_seq
+from test_tower2 import load_model, predict_graph, predict_seq
+from train_tower2 import aligned_graph_items
 
 
 def test_packet_and_flow_use_the_same_protocol_content_encoder_class():
@@ -64,7 +66,7 @@ def test_shared_protocol_content_encoder_accepts_packet_and_flow_shapes():
     assert flow_token_repr.shape == (2, 3, 16, 12)
 
 
-def test_exact_packet_and_flow_paths_reuse_identical_representation_module_schema():
+def test_exact_packet_and_both_flow_paths_reuse_identical_representation_module_schema():
     packet = PacketByteTransformer(
         num_classes=3,
         max_bytes=16,
@@ -95,6 +97,21 @@ def test_exact_packet_and_flow_paths_reuse_identical_representation_module_schem
         exact_shared_packet_encoder=True,
         shared_packet_hidden_dim=8,
     )
+    graph = FlowGraphTransformerClassifier(
+        input_dim=16 + 8 + 13,
+        num_classes=3,
+        hidden_dim=16,
+        num_layers=1,
+        num_heads=4,
+        dropout=0.1,
+        dual_channel_mode="residual",
+        meta_feature_dim=8 + 13,
+        native_structural_dim=8,
+        channel_fusion_base_mode="semantic_anchor",
+        use_intervention_views=True,
+        exact_shared_packet_encoder=True,
+        shared_packet_hidden_dim=8,
+    )
 
     assert isinstance(packet.shared_packet_encoder, SharedPacketRepresentationEncoder)
     assert isinstance(flow.shared_packet_encoder, SharedPacketRepresentationEncoder)
@@ -106,9 +123,144 @@ def test_exact_packet_and_flow_paths_reuse_identical_representation_module_schem
         key: tuple(value.shape)
         for key, value in flow.shared_packet_encoder.state_dict().items()
     }
+    graph_schema = {
+        key: tuple(value.shape)
+        for key, value in graph.shared_packet_encoder.state_dict().items()
+    }
     assert packet_schema == flow_schema
+    assert packet_schema == graph_schema
     assert flow.packet_to_flow_proj.in_features == 8
     assert flow.packet_to_flow_proj.out_features == 16
+    assert graph.packet_to_flow_proj.in_features == 8
+    assert graph.packet_to_flow_proj.out_features == 16
+
+
+def build_shared_graph_model() -> FlowGraphTransformerClassifier:
+    return FlowGraphTransformerClassifier(
+        input_dim=8 + 4 + 3,
+        num_classes=3,
+        hidden_dim=12,
+        num_layers=1,
+        num_heads=3,
+        edge_attr_dim=4,
+        dropout=0.0,
+        dual_channel_mode="residual",
+        meta_feature_dim=4 + 3,
+        native_structural_dim=4,
+        channel_fusion_base_mode="semantic_anchor",
+        use_intervention_views=True,
+        exact_shared_packet_encoder=True,
+        shared_packet_hidden_dim=6,
+    )
+
+
+def make_graph_item(flow_id: str = "flow-a", window=(0, 4)) -> dict:
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3], [1, 2, 3, 0]], dtype=torch.long
+    )
+    return {
+        "x": torch.randn(4, 8 + 4 + 3),
+        "edge_index": edge_index,
+        "edge_attr": torch.tensor(
+            [
+                [0.0, 0.1, 0.2, 0.3],
+                [1.0, 0.2, 0.3, 0.4],
+                [2.0, 0.3, 0.4, 0.5],
+                [3.0, 0.4, 0.5, 0.6],
+            ]
+        ),
+        "label": 1,
+        "flow_id": flow_id,
+        "window": window,
+    }
+
+
+def test_exact_shared_graph_encoder_backpropagates_through_packet_and_edge_modules():
+    model = build_shared_graph_model()
+    factual = make_graph_item()
+    intervened = factual["x"].clone()
+    intervened[:, :8] = torch.randn_like(intervened[:, :8])
+    output = model(
+        factual["x"],
+        factual["edge_index"],
+        factual["edge_attr"],
+        intervened_x=intervened,
+    )
+    assert output["logits"].shape == (1, 3)
+    assert output["embedding"].shape == (12,)
+    assert output["dual_channel_gate"].shape == (4, 3)
+    assert output["intervention_view_gate"].shape == (4, 2)
+    output["logits"].square().mean().backward()
+    assert model.shared_packet_encoder.semantic_proj[0].weight.grad.abs().sum() > 0
+    assert model.layers[0].edge_attr_bias[-1].weight.grad.abs().sum() > 0
+
+
+def test_graph_intervention_alignment_rejects_window_and_edge_mismatch():
+    factual = make_graph_item()
+    paired = {**factual, "x": factual["x"].clone()}
+    group = {"flow_id": "flow-a", "label": 1, "items": [factual]}
+    paired_group = {"flow_id": "flow-a", "label": 1, "items": [paired]}
+    assert aligned_graph_items(group, paired_group) == [(factual, paired)]
+
+    wrong_window = {**paired, "window": (1, 5)}
+    with pytest.raises(ValueError, match="window ranges"):
+        aligned_graph_items(group, {**paired_group, "items": [wrong_window]})
+
+    wrong_edges = {**paired, "edge_index": paired["edge_index"].flip(0)}
+    with pytest.raises(ValueError, match="edge indices"):
+        aligned_graph_items(group, {**paired_group, "items": [wrong_edges]})
+
+
+def test_predict_graph_consumes_aligned_intervention_dataset(tmp_path):
+    model = build_shared_graph_model().eval()
+    factual = make_graph_item()
+    paired = {**factual, "x": factual["x"].clone()}
+    paired["x"][:, :8] = torch.randn_like(paired["x"][:, :8])
+    factual_path = tmp_path / "factual.pt"
+    paired_path = tmp_path / "paired.pt"
+    checkpoint_path = tmp_path / "graph.pt"
+    torch.save([factual], factual_path)
+    torch.save([paired], paired_path)
+    torch.save(
+        {
+            "model_state": model.state_dict(),
+            "model_type": "graph",
+            "input_dim": 8 + 4 + 3,
+            "num_classes": 3,
+            "hidden_dim": 12,
+            "num_layers": 1,
+            "num_heads": 3,
+            "edge_attr_dim": 4,
+            "dropout": 0.0,
+            "dual_channel_mode": "residual",
+            "meta_feature_dim": 4 + 3,
+            "native_structural_dim": 4,
+            "channel_fusion_base_mode": "semantic_anchor",
+            "dual_channel_max_weight": 0.25,
+            "use_intervention_views": True,
+            "exact_shared_packet_encoder": True,
+            "shared_packet_hidden_dim": 6,
+        },
+        checkpoint_path,
+    )
+    restored, checkpoint, flow_head = load_model(str(checkpoint_path), "cpu")
+    assert checkpoint["model_type"] == "graph"
+    assert flow_head is None
+
+    outputs = predict_graph(
+        restored,
+        str(factual_path),
+        "cpu",
+        intervened_dataset_path=str(paired_path),
+    )
+    assert outputs[0] == [1]
+    assert outputs[2] == ["flow-a"]
+    assert outputs[7]["dual_channel_gate"]["num_samples"] == 4
+    assert outputs[7]["intervention_view_gate"]["num_samples"] == 4
+    channel_diag = outputs[7]["dual_channel_gate"]
+    assert channel_diag["bounds_satisfied"]
+    assert channel_diag["effective_routing_mean"][0] >= 0.75
+    assert outputs[7]["intervention_view_gate"]["bounds_satisfied"]
 
 
 def test_exact_shared_packet_module_runs_before_flow_only_aggregation():

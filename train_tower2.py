@@ -818,6 +818,40 @@ def paired_flow_group_lookup(path: str, dataset_cls) -> Dict[str, dict]:
     return {str(group["flow_id"]): group for group in groups}
 
 
+def aligned_graph_items(factual_group: dict, paired_group: dict | None) -> List[tuple[dict, dict]]:
+    """Validate and align factual/intervened graph windows for one flow."""
+    if paired_group is None:
+        raise ValueError(
+            f"intervention-aware graph evaluation is missing flow {factual_group['flow_id']}"
+        )
+    if str(paired_group.get("flow_id")) != str(factual_group.get("flow_id")):
+        raise ValueError("factual/intervened graph flow IDs differ")
+    if int(paired_group.get("label", -1)) != int(factual_group.get("label", -2)):
+        raise ValueError("factual/intervened graph labels differ")
+    factual_items = factual_group["items"]
+    paired_items = paired_group["items"]
+    if len(factual_items) != len(paired_items):
+        raise ValueError("factual/intervened graph window counts differ")
+    aligned = []
+    for factual, intervened in zip(factual_items, paired_items):
+        factual_window = factual.get("window")
+        intervened_window = intervened.get("window")
+        if torch.is_tensor(factual_window):
+            factual_window = factual_window.detach().cpu().tolist()
+        if torch.is_tensor(intervened_window):
+            intervened_window = intervened_window.detach().cpu().tolist()
+        if factual_window != intervened_window:
+            raise ValueError("factual/intervened graph window ranges differ")
+        if factual["x"].shape != intervened["x"].shape:
+            raise ValueError("factual/intervened graph node feature shapes differ")
+        if not torch.equal(factual["edge_index"], intervened["edge_index"]):
+            raise ValueError("factual/intervened graph edge indices differ")
+        if factual["edge_attr"].shape != intervened["edge_attr"].shape:
+            raise ValueError("factual/intervened graph edge feature shapes differ")
+        aligned.append((factual, intervened))
+    return aligned
+
+
 def window_identifiability(item: dict) -> float:
     reliability = item.get("packet_identifiability")
     if not isinstance(reliability, torch.Tensor) or reliability.numel() == 0:
@@ -2722,6 +2756,19 @@ def train_graph(args):
         identifiability_adapter_max_delta=args.identifiability_adapter_max_delta,
         identifiability_residual_max_weight=args.identifiability_residual_max_weight,
         identifiability_residual_init=args.identifiability_residual_init,
+        dual_channel_mode=args.dual_channel_mode,
+        meta_feature_dim=args.meta_feature_dim,
+        native_structural_dim=args.native_structural_dim,
+        channel_fusion_base_mode=args.channel_fusion_base_mode,
+        dual_channel_max_weight=args.dual_channel_max_weight,
+        use_intervention_views=args.use_intervention_views,
+        intervention_max_residual_weight=args.intervention_max_residual_weight,
+        intervention_view_base_mode=args.intervention_view_base_mode,
+        exact_shared_packet_encoder=args.exact_shared_packet_encoder,
+        shared_packet_hidden_dim=args.shared_packet_hidden_dim,
+        train_ablate_input_channel=args.train_ablate_input_channel,
+        train_ablate_intervention_view=args.train_ablate_intervention_view,
+        train_fixed_channel_fusion=args.train_fixed_channel_fusion,
     ).to(args.device)
     maybe_load_init_checkpoint(args, model)
     distill_targets = load_distillation_targets(
@@ -2788,6 +2835,9 @@ def train_graph_flow(args):
     tr_groups, va_groups = split_or_external_flow_groups(ds, GraphDataset, args)
     attach_flow_environments(tr_groups, args.environment_map_json, "train_graph_flow")
     paired_groups = paired_flow_group_lookup(args.paired_view_dataset, GraphDataset)
+    paired_valid_groups = paired_flow_group_lookup(
+        args.paired_valid_dataset, GraphDataset
+    ) if args.use_intervention_views else {}
     distill_targets = load_distillation_targets(
         args.distill_targets_json,
         args.num_classes,
@@ -2832,6 +2882,19 @@ def train_graph_flow(args):
         identifiability_adapter_max_delta=args.identifiability_adapter_max_delta,
         identifiability_residual_max_weight=args.identifiability_residual_max_weight,
         identifiability_residual_init=args.identifiability_residual_init,
+        dual_channel_mode=args.dual_channel_mode,
+        meta_feature_dim=args.meta_feature_dim,
+        native_structural_dim=args.native_structural_dim,
+        channel_fusion_base_mode=args.channel_fusion_base_mode,
+        dual_channel_max_weight=args.dual_channel_max_weight,
+        use_intervention_views=args.use_intervention_views,
+        intervention_max_residual_weight=args.intervention_max_residual_weight,
+        intervention_view_base_mode=args.intervention_view_base_mode,
+        exact_shared_packet_encoder=args.exact_shared_packet_encoder,
+        shared_packet_hidden_dim=args.shared_packet_hidden_dim,
+        train_ablate_input_channel=args.train_ablate_input_channel,
+        train_ablate_intervention_view=args.train_ablate_intervention_view,
+        train_fixed_channel_fusion=args.train_fixed_channel_fusion,
     ).to(args.device)
     flow_head = FlowAggregationHead(
         args.hidden_dim,
@@ -2884,6 +2947,7 @@ def train_graph_flow(args):
             class_to_coarse=class_to_coarse,
             hierarchical_logit_weight=effective_hierarchical_logit_weight(args),
             hierarchical_mode=args.hierarchical_mode,
+            paired_groups=paired_valid_groups or None,
         )
         best = selected_metric_value(init_metrics, args.select_metric)
         save_ckpt(
@@ -2917,6 +2981,8 @@ def train_graph_flow(args):
             window_labels = []
             window_embs_all = []
             window_owners = []
+            semantic_window_logits = []
+            structural_window_logits = []
             multi_view_gates = []
             stat_logits = []
             labels = []
@@ -2933,21 +2999,57 @@ def train_graph_flow(args):
                 active_items = maybe_drop_windows(
                     group["items"], args.window_dropout_prob
                 )
+                paired_group = paired_groups.get(str(group["flow_id"]))
+                shared_paired_by_item = {}
+                if args.use_intervention_views:
+                    shared_paired_by_item = {
+                        id(factual): intervened
+                        for factual, intervened in aligned_graph_items(
+                            group, paired_group
+                        )
+                    }
                 for item in active_items:
                     x_clean = item["x"].to(args.device)
+                    intervened_x = (
+                        shared_paired_by_item[id(item)]["x"].to(args.device)
+                        if args.use_intervention_views
+                        else None
+                    )
                     window_xs.append(x_clean)
                     window_reliability.append(window_identifiability(item))
                     edge_attr = apply_edge_attr_dropout(item["edge_attr"].to(args.device), args.edge_attr_dropout_prob)
                     if args.consistency_weight > 0:
-                        out = model(x_clean, item["edge_index"].to(args.device), item["edge_attr"].to(args.device))
-                        out_aug = model(apply_input_augmentation(x_clean, args), item["edge_index"].to(args.device), edge_attr)
+                        out = model(
+                            x_clean,
+                            item["edge_index"].to(args.device),
+                            item["edge_attr"].to(args.device),
+                            intervened_x=intervened_x,
+                        )
+                        out_aug = model(
+                            apply_input_augmentation(x_clean, args),
+                            item["edge_index"].to(args.device),
+                            edge_attr,
+                            intervened_x=intervened_x,
+                        )
                     else:
-                        out = model(apply_input_augmentation(x_clean, args), item["edge_index"].to(args.device), edge_attr)
+                        out = model(
+                            apply_input_augmentation(x_clean, args),
+                            item["edge_index"].to(args.device),
+                            edge_attr,
+                            intervened_x=intervened_x,
+                        )
                         out_aug = None
                     window_embs.append(out["embedding"])
                     window_logits.append(out["logits"].squeeze(0))
                     window_logits_all.append(out["logits"].squeeze(0))
                     window_labels.append(int(item.get("label", -1)))
+                    if out.get("semantic_channel_logits") is not None:
+                        semantic_window_logits.append(
+                            out["semantic_channel_logits"].squeeze(0)
+                        )
+                        structural_window_logits.append(
+                            out["structural_channel_logits"].squeeze(0)
+                        )
                     if out_aug is not None:
                         window_embs_aug.append(out_aug["embedding"])
                         window_logits_aug.append(out_aug["logits"].squeeze(0))
@@ -2991,8 +3093,7 @@ def train_graph_flow(args):
                     environments.append(int(group.get("environment", -1)))
                     flow_ids.append(str(group["flow_id"]))
                     content_group_ids.append(group.get("content_group_id"))
-                    paired_group = paired_groups.get(str(group["flow_id"]))
-                    if paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (
+                    if not args.use_intervention_views and paired_group is not None and int(paired_group["label"]) == int(group["label"]) and (
                         args.paired_view_weight > 0
                         or args.paired_consistency_weight > 0
                         or args.view_domain_adversarial_weight > 0
@@ -3051,6 +3152,26 @@ def train_graph_flow(args):
                 args,
                 content_group_ids=content_group_ids,
             )
+            if semantic_window_logits:
+                loss = loss + dual_channel_auxiliary_loss(
+                    {
+                        "logits": torch.stack(window_logits_all, dim=0),
+                        "semantic_channel_logits": torch.stack(
+                            semantic_window_logits, dim=0
+                        ),
+                        "structural_channel_logits": torch.stack(
+                            structural_window_logits, dim=0
+                        ),
+                    },
+                    y,
+                    class_weight,
+                    args,
+                    owners=torch.tensor(
+                        window_owners, dtype=torch.long, device=args.device
+                    ),
+                    num_flows=len(labels),
+                    content_group_ids=content_group_ids,
+                )
             loss = loss + environment_risk_variance_loss(
                 logits, y, environment_ids, class_weight, args.environment_risk_weight
             )
@@ -3125,6 +3246,7 @@ def train_graph_flow(args):
             class_to_coarse=class_to_coarse,
             hierarchical_logit_weight=effective_hierarchical_logit_weight(args),
             hierarchical_mode=args.hierarchical_mode,
+            paired_groups=paired_valid_groups or None,
         ) if va_groups else {"accuracy": ok / max(1, cnt), "macro_f1": ok / max(1, cnt)}
         select_score = selected_metric_value(val_metrics, args.select_metric)
         print(
@@ -3166,6 +3288,7 @@ def evaluate_graph_flow(
     class_to_coarse: torch.Tensor | None = None,
     hierarchical_logit_weight: float = 0.0,
     hierarchical_mode: str = "logit",
+    paired_groups: Dict[str, dict] | None = None,
 ):
     model.eval(); y_true = []; y_pred = []; content_group_ids = []
     if flow_head is not None:
@@ -3173,8 +3296,27 @@ def evaluate_graph_flow(
     for group in groups:
         window_logits = []
         window_embs = []
+        paired_items = None
+        if getattr(model, "use_intervention_views", False):
+            if not paired_groups:
+                raise ValueError("intervention-aware graph evaluation requires paired_groups")
+            paired_items = {
+                id(factual): intervened
+                for factual, intervened in aligned_graph_items(
+                    group, paired_groups.get(str(group["flow_id"]))
+                )
+            }
         for item in group["items"]:
-            out = model(item["x"].to(device), item["edge_index"].to(device), item["edge_attr"].to(device))
+            out = model(
+                item["x"].to(device),
+                item["edge_index"].to(device),
+                item["edge_attr"].to(device),
+                intervened_x=(
+                    paired_items[id(item)]["x"].to(device)
+                    if paired_items is not None
+                    else None
+                ),
+            )
             window_logits.append(out["logits"].squeeze(0))
             window_embs.append(out["embedding"])
         if not window_logits:
@@ -3587,16 +3729,26 @@ def main():
     ):
         ap.error("dual-channel restricted training/losses require --dual_channel_mode residual")
     if args.use_intervention_views:
-        if args.model_type != "seq" or args.train_level != "flow":
-            ap.error("--use_intervention_views currently requires seq flow training")
+        if args.train_level != "flow":
+            ap.error("--use_intervention_views requires flow-level training")
+        if args.model_type == "graph" and not args.exact_shared_packet_encoder:
+            ap.error(
+                "graph intervention views require --exact_shared_packet_encoder"
+            )
         if args.dual_channel_mode != "residual":
             ap.error("--use_intervention_views requires --dual_channel_mode residual")
         if not args.paired_view_dataset or not args.paired_valid_dataset:
             ap.error("--use_intervention_views requires aligned paired train/valid datasets")
         if args.counterfactual_fusion != "none":
             ap.error("shared intervention views cannot be combined with flow-level counterfactual fusion")
-    if args.dual_channel_mode == "residual" and args.model_type != "seq":
-        ap.error("dual-channel residual mode is currently implemented for --model_type seq")
+    if (
+        args.dual_channel_mode == "residual"
+        and args.model_type == "graph"
+        and not args.exact_shared_packet_encoder
+    ):
+        ap.error(
+            "graph residual channel mode requires --exact_shared_packet_encoder"
+        )
     if not 0.0 <= args.packet_evidence_max_weight <= 1.0:
         ap.error("--packet_evidence_max_weight must be in [0, 1]")
     if args.train_ablate_input_channel != "none" and not args.exact_shared_packet_encoder:
@@ -3617,6 +3769,8 @@ def main():
                 "packet evidence is a flow candidate and requires "
                 "--train_level flow --flow_pooling late_fusion"
             )
+        if args.model_type != "seq":
+            ap.error("packet evidence late fusion is currently implemented for seq")
     if args.dual_channel_train_scope != "full" and args.train_level != "flow":
         ap.error("dual-channel restricted training scopes require --train_level flow")
     torch.manual_seed(args.seed); random.seed(args.seed); np.random.seed(args.seed)
