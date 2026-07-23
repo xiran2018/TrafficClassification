@@ -8,7 +8,10 @@ import pytest
 
 from freeze_shared_core_v2_config import canonical_sha256
 from audit_flow_embeddings import sha256_file
-from run_packet_level_pipeline import semantic_cache_policy_evidence
+from run_packet_level_pipeline import (
+    semantic_cache_policy_evidence,
+    verify_reused_protocol_content_checkpoint,
+)
 from shared_core_v2 import (
     apply_frozen_shared_core,
     capture_training_hyperparameter_overrides,
@@ -787,6 +790,150 @@ def test_packet_runner_can_screen_valid_without_test_evaluation(tmp_path):
             / "vpn-app/fold0/valid_unified_packet_single_head.json"
         )
     ]
+
+
+def test_packet_runner_can_reuse_verified_label_free_native_checkpoint(tmp_path):
+    config = write_payload(tmp_path / "frozen.json", frozen_payload())
+    reused = tmp_path / "native" / "best.pt"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "run_packet_level_pipeline.py"),
+            "--dataset",
+            "vpn-app",
+            "--fold",
+            "0",
+            "--stage",
+            "paper_unified",
+            "--dry_run",
+            "--prepared_splits",
+            "train,valid",
+            "--eval_splits",
+            "valid",
+            "--reuse_protocol_content_checkpoint",
+            str(reused),
+            "--artifact_root",
+            str(tmp_path / "packet_artifacts"),
+            "--checkpoint_root",
+            str(tmp_path / "packet_checkpoints"),
+            "--shared_core_config",
+            str(config),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pretrain_native_flow_encoder.py" not in result.stdout
+    byte_train = next(
+        line for line in result.stdout.splitlines() if "train_packet_byte_transformer.py" in line
+    )
+    assert f"--protocol_content_checkpoint {reused}" in byte_train
+    manifest = json.loads(
+        next((tmp_path / "packet_artifacts").glob("vpn-app/fold0/packet_framework_manifest.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    execution = manifest["framework"]["notes"]["protocol_content_pretraining_execution"]
+    assert execution["status"] == "pending_dry_run_verification"
+    assert execution["checkpoint"] == str(reused)
+
+
+def test_reused_native_checkpoint_requires_exact_contract_and_input_hashes(tmp_path):
+    source_train = tmp_path / "source_train.jsonl"
+    source_valid = tmp_path / "source_valid.jsonl"
+    current_train = tmp_path / "current_train.jsonl"
+    current_valid = tmp_path / "current_valid.jsonl"
+    for source, current, text in (
+        (source_train, current_train, "train\n"),
+        (source_valid, current_valid, "valid\n"),
+    ):
+        source.write_text(text, encoding="utf-8")
+        current.write_text(text, encoding="utf-8")
+    checkpoint_dir = tmp_path / "native"
+    checkpoint_dir.mkdir()
+    checkpoint = checkpoint_dir / "best.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    args = SimpleNamespace(
+        byte_max_bytes=128,
+        protocol_pretrain_max_packets=64,
+        byte_hidden_dim=128,
+        byte_num_layers=2,
+        protocol_pretrain_flow_layers=2,
+        byte_num_heads=4,
+        byte_dropout=0.1,
+        protocol_pretrain_projection_dim=128,
+        protocol_pretrain_epochs=20,
+        protocol_pretrain_batch_size=8,
+        protocol_pretrain_eval_batch_size=16,
+        protocol_pretrain_learning_rate=3e-4,
+        protocol_pretrain_weight_decay=0.01,
+        protocol_pretrain_field_mask_probability=0.2,
+        protocol_pretrain_payload_dropout_probability=0.5,
+        protocol_pretrain_session_mask_probability=1.0,
+        protocol_pretrain_masked_byte_weight=1.0,
+        protocol_pretrain_relative_order_weight=0.25,
+        protocol_pretrain_same_flow_weight=0.25,
+        protocol_pretrain_next_length_weight=0.2,
+        protocol_pretrain_next_iat_weight=0.2,
+        protocol_pretrain_direction_weight=0.1,
+        protocol_pretrain_packet_consistency_weight=0.25,
+        protocol_pretrain_flow_contrastive_weight=0.25,
+        protocol_pretrain_temperature=0.1,
+        protocol_pretrain_patience=4,
+        protocol_pretrain_seed=42,
+    )
+    metrics = {
+        "uses_downstream_labels": False,
+        "model_config": {
+            "max_bytes": 128,
+            "max_packets": 64,
+            "hidden_dim": 128,
+            "byte_layers": 2,
+            "flow_layers": 2,
+            "num_heads": 4,
+            "dropout": 0.1,
+            "projection_dim": 128,
+        },
+        "pretraining_config": {
+            "train_index": str(source_train),
+            "valid_index": str(source_valid),
+            "epochs": 20,
+            "batch_size": 8,
+            "eval_batch_size": 16,
+            "learning_rate": 3e-4,
+            "weight_decay": 0.01,
+            "field_mask_probability": 0.2,
+            "payload_dropout_probability": 0.5,
+            "session_mask_probability": 1.0,
+            "masked_byte_weight": 1.0,
+            "relative_order_weight": 0.25,
+            "same_flow_weight": 0.25,
+            "next_length_weight": 0.2,
+            "next_iat_weight": 0.2,
+            "direction_weight": 0.1,
+            "packet_consistency_weight": 0.25,
+            "flow_contrastive_weight": 0.25,
+            "temperature": 0.1,
+            "patience": 4,
+            "seed": 42,
+        },
+    }
+    (checkpoint_dir / "pretraining_metrics.json").write_text(
+        json.dumps(metrics), encoding="utf-8"
+    )
+    evidence = verify_reused_protocol_content_checkpoint(
+        args, checkpoint, current_train, current_valid
+    )
+    assert evidence["status"] == "pass"
+    assert evidence["uses_downstream_labels"] is False
+
+    current_valid.write_text("drifted\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="input mismatch"):
+        verify_reused_protocol_content_checkpoint(
+            args, checkpoint, current_train, current_valid
+        )
 
 
 def test_packet_runner_preserves_declared_numeric_overrides(tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -139,6 +140,113 @@ def run(command: list[str], dry_run: bool) -> None:
     if not dry_run:
         with gpu_command_guard(command, dry_run=False):
             subprocess.run(command, check=True)
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_reused_protocol_content_checkpoint(
+    args, checkpoint: Path, train_index: Path, valid_index: Path
+) -> dict:
+    """Prove that a reused label-free checkpoint matches this execution contract."""
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"reused protocol-content checkpoint not found: {checkpoint}")
+    metrics_path = checkpoint.parent / "pretraining_metrics.json"
+    if not metrics_path.is_file():
+        raise FileNotFoundError(
+            f"reused protocol-content checkpoint lacks pretraining_metrics.json: {metrics_path}"
+        )
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    if metrics.get("uses_downstream_labels") is not False:
+        raise ValueError("reused protocol-content checkpoint is not proven label-free")
+
+    expected_model = {
+        "max_bytes": args.byte_max_bytes,
+        "max_packets": args.protocol_pretrain_max_packets,
+        "hidden_dim": args.byte_hidden_dim,
+        "byte_layers": args.byte_num_layers,
+        "flow_layers": args.protocol_pretrain_flow_layers,
+        "num_heads": args.byte_num_heads,
+        "dropout": args.byte_dropout,
+        "projection_dim": args.protocol_pretrain_projection_dim,
+    }
+    actual_model = metrics.get("model_config", {})
+    model_mismatches = {
+        key: {"expected": expected, "actual": actual_model.get(key)}
+        for key, expected in expected_model.items()
+        if actual_model.get(key) != expected
+    }
+
+    expected_training = {
+        "epochs": args.protocol_pretrain_epochs,
+        "batch_size": args.protocol_pretrain_batch_size,
+        "eval_batch_size": args.protocol_pretrain_eval_batch_size,
+        "learning_rate": args.protocol_pretrain_learning_rate,
+        "weight_decay": args.protocol_pretrain_weight_decay,
+        "field_mask_probability": args.protocol_pretrain_field_mask_probability,
+        "payload_dropout_probability": args.protocol_pretrain_payload_dropout_probability,
+        "session_mask_probability": args.protocol_pretrain_session_mask_probability,
+        "masked_byte_weight": args.protocol_pretrain_masked_byte_weight,
+        "relative_order_weight": args.protocol_pretrain_relative_order_weight,
+        "same_flow_weight": args.protocol_pretrain_same_flow_weight,
+        "next_length_weight": args.protocol_pretrain_next_length_weight,
+        "next_iat_weight": args.protocol_pretrain_next_iat_weight,
+        "direction_weight": args.protocol_pretrain_direction_weight,
+        "packet_consistency_weight": args.protocol_pretrain_packet_consistency_weight,
+        "flow_contrastive_weight": args.protocol_pretrain_flow_contrastive_weight,
+        "temperature": args.protocol_pretrain_temperature,
+        "patience": args.protocol_pretrain_patience,
+        "seed": args.protocol_pretrain_seed,
+    }
+    actual_training = metrics.get("pretraining_config", {})
+    training_mismatches = {
+        key: {"expected": expected, "actual": actual_training.get(key)}
+        for key, expected in expected_training.items()
+        if actual_training.get(key) != expected
+    }
+    if model_mismatches or training_mismatches:
+        raise ValueError(
+            "reused protocol-content checkpoint contract mismatch: "
+            f"model={model_mismatches}, training={training_mismatches}"
+        )
+
+    reference_train = Path(str(actual_training.get("train_index", "")))
+    reference_valid = Path(str(actual_training.get("valid_index", "")))
+    if not reference_train.is_file() or not reference_valid.is_file():
+        raise FileNotFoundError(
+            "cannot verify reused checkpoint training inputs: "
+            f"train={reference_train}, valid={reference_valid}"
+        )
+    input_hashes = {
+        "current_train_index_sha256": file_sha256(train_index),
+        "reference_train_index_sha256": file_sha256(reference_train),
+        "current_valid_index_sha256": file_sha256(valid_index),
+        "reference_valid_index_sha256": file_sha256(reference_valid),
+    }
+    if (
+        input_hashes["current_train_index_sha256"]
+        != input_hashes["reference_train_index_sha256"]
+        or input_hashes["current_valid_index_sha256"]
+        != input_hashes["reference_valid_index_sha256"]
+    ):
+        raise ValueError(f"reused protocol-content checkpoint input mismatch: {input_hashes}")
+    return {
+        "status": "pass",
+        "execution": "reused_frozen_label_free_checkpoint",
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": file_sha256(checkpoint),
+        "pretraining_metrics": str(metrics_path),
+        "pretraining_metrics_sha256": file_sha256(metrics_path),
+        "uses_downstream_labels": False,
+        "model_contract": expected_model,
+        "training_contract": expected_training,
+        "input_hashes": input_hashes,
+    }
 
 
 def semantic_embedding_command(
@@ -507,12 +615,15 @@ def write_framework_manifest(
                 "byte_dropout": args.byte_dropout,
                 "byte_content_group_loss_reduction": args.byte_content_group_loss_reduction,
                 "protocol_content_checkpoint": args.protocol_content_checkpoint,
+                "reuse_protocol_content_checkpoint": args.reuse_protocol_content_checkpoint,
                 "pretrain_protocol_content": (
                     (args.pretrain_protocol_content or args.stage == "protocol_pretrain")
                     and args.stage != "shared_core_ablation"
                 ),
                 "resolved_protocol_content_checkpoint": (
-                    args.protocol_content_checkpoint
+                    args.reuse_protocol_content_checkpoint
+                    if args.reuse_protocol_content_checkpoint
+                    else args.protocol_content_checkpoint
                     if args.stage == "shared_core_ablation"
                     else (
                         str(
@@ -524,6 +635,16 @@ def write_framework_manifest(
                         if args.pretrain_protocol_content or args.stage == "protocol_pretrain"
                         else args.protocol_content_checkpoint
                     )
+                ),
+                "protocol_content_pretraining_execution": getattr(
+                    args,
+                    "_protocol_content_reuse_evidence",
+                    {
+                        "status": "not_reused",
+                        "execution": "trained_in_current_pipeline"
+                        if args.pretrain_protocol_content
+                        else "externally_provided_or_disabled",
+                    },
                 ),
                 "packet_model_checkpoint": str(
                     Path(args.checkpoint_root)
@@ -813,6 +934,15 @@ def main() -> None:
         help="Optional shared native pretraining checkpoint for the packet content encoder.",
     )
     ap.add_argument(
+        "--reuse_protocol_content_checkpoint",
+        default="",
+        help=(
+            "Reuse a frozen label-free native checkpoint while retaining the frozen "
+            "pretraining method contract. Its sidecar config and Train/Valid index "
+            "hashes must exactly match the current execution."
+        ),
+    )
+    ap.add_argument(
         "--pretrain_protocol_content",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1040,6 +1170,15 @@ def main() -> None:
             "--protocol_content_checkpoint is mutually exclusive with "
             "--pretrain_protocol_content/--stage protocol_pretrain"
         )
+    if args.reuse_protocol_content_checkpoint and args.protocol_content_checkpoint:
+        ap.error(
+            "--reuse_protocol_content_checkpoint is mutually exclusive with "
+            "--protocol_content_checkpoint"
+        )
+    if args.reuse_protocol_content_checkpoint and args.stage == "protocol_pretrain":
+        ap.error(
+            "--reuse_protocol_content_checkpoint cannot be used with --stage protocol_pretrain"
+        )
     if args.protocol_pretrain_epochs <= 0:
         ap.error("--protocol_pretrain_epochs must be positive")
     if args.protocol_pretrain_max_packets < 2:
@@ -1069,12 +1208,22 @@ def main() -> None:
     label_map = train_dir / "label_map.json"
     fusion_stem = "byte_structural_nested_one_se"
     protocol_pretrain_dir = checkpoint / "shared_content_pretraining"
-    should_pretrain_protocol_content = args.stage == "protocol_pretrain" or (
-        args.pretrain_protocol_content
-        and args.stage in {"byte", "packet_best", "paper_unified", "all"}
+    reused_protocol_content_checkpoint = (
+        Path(args.reuse_protocol_content_checkpoint)
+        if args.reuse_protocol_content_checkpoint
+        else None
+    )
+    should_pretrain_protocol_content = not reused_protocol_content_checkpoint and (
+        args.stage == "protocol_pretrain"
+        or (
+            args.pretrain_protocol_content
+            and args.stage in {"byte", "packet_best", "paper_unified", "all"}
+        )
     )
     resolved_protocol_content_checkpoint = (
-        protocol_pretrain_dir / "best.pt"
+        reused_protocol_content_checkpoint
+        if reused_protocol_content_checkpoint
+        else protocol_pretrain_dir / "best.pt"
         if should_pretrain_protocol_content
         else Path(args.protocol_content_checkpoint) if args.protocol_content_checkpoint else None
     )
@@ -1279,6 +1428,21 @@ def main() -> None:
         if "test" in args.prepared_splits:
             audit_command.extend(["--test", str(test_dir / "packet_auxiliary.jsonl")])
         run(audit_command, args.dry_run)
+
+    if reused_protocol_content_checkpoint:
+        if args.dry_run:
+            args._protocol_content_reuse_evidence = {
+                "status": "pending_dry_run_verification",
+                "execution": "reused_frozen_label_free_checkpoint",
+                "checkpoint": str(reused_protocol_content_checkpoint),
+            }
+        else:
+            args._protocol_content_reuse_evidence = verify_reused_protocol_content_checkpoint(
+                args,
+                reused_protocol_content_checkpoint,
+                train_dir / "packet_index.jsonl",
+                valid_dir / "packet_index.jsonl",
+            )
 
     if should_pretrain_protocol_content:
         run(protocol_content_pretrain_command(), args.dry_run)
