@@ -38,9 +38,9 @@ Datasets train independent numerical parameters, while retaining the same
 semantic/structural slots, router features, GroupDRO objective, and bounded
 prior-transfer protocol. For packet classification, the same slot contract is
 used with one-packet semantic and structural experts; flow classification adds
-the flow feature extractor and aggregation boundary. Packet/TLS validation of
-this newest router remains required before it can replace the paper-main
-cross-task framework.
+the flow feature extractor and aggregation boundary. VPN and TLS-120 Flow
+validation is complete; Packet validation remains required before this router
+can replace the paper-main cross-task framework.
 
 Frozen VPN Flow Test results on the shared 1,672-flow test split:
 
@@ -59,6 +59,23 @@ The selected strength is restricted to `[0, 0.30]` and selected from pooled
 leave-one-environment-out predictions, never from Test labels. Single-fold
 prior transfer is retained only as a negative stability ablation because it
 collapsed rare-class Macro-F1 on fold 2.
+
+Frozen TLS-120 Flow Test results on the shared 11,542-flow test split:
+
+| candidate | accuracy | macro-F1 |
+|---|---:|---:|
+| strict unified semantic fold 0 | 0.7558 | 0.7465 |
+| rich structural folds (range) | 0.8348-0.8367 | 0.8129-0.8138 |
+| cross-environment reliability router | 0.9024 | 0.8910 |
+| router + bounded OOF-selected prior transport | **0.9025** | **0.8913** |
+| previous heterogeneous consensus | 0.8461 | 0.8292 |
+
+TLS-120 uses the same expert slots, router inputs, GroupDRO objective,
+consensus rule, and prior-strength search as VPN. No TLS-specific class rule,
+feature branch, or loss was introduced. The bounded prior contributes only
+`+0.0002` accuracy and `+0.0003` Macro-F1 on TLS-120; almost all improvement
+comes from the learned cross-environment router. The result is stored at
+`/tmp/two_tower_runs/pcfrr_v1_results/tls120_flow_cross_environment_reliability_router_safe_prior.json`.
 
 Implementation verification:
 
