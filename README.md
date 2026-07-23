@@ -18,6 +18,55 @@ Tower 2: Packet Interaction Encoder
 
 Compared with v2, v3 adds a real **Tower-1 multi-objective training script**. Tower 1 is no longer trained only with generative packet Q&A. It also learns packet representations aligned with downstream traffic classes through weak packet classification and supervised contrastive learning.
 
+## Current research candidate: cross-environment evidence routing
+
+The current VPN Flow milestone replaces validation-only selector searches with
+one learned, dataset-agnostic expert topology:
+
+1. every fold trains the same Qwen/Tower1 semantic expert;
+2. every fold trains the same protocol-structural forest expert over packet
+   length, direction, IAT, burst/message, and shortcut-controlled header fields;
+3. `train_cross_environment_reliability_router.py` learns one class-aware router
+   from complete expert distributions, uncertainty, agreement, and JS conflict;
+4. GroupDRO optimizes the worst validation environment, while
+   leave-one-environment-out predictions select a bounded, label-free EM prior
+   transport; and
+5. routed fold predictions use a fixed log-mean consensus.
+
+The router contains no VPN class names or dataset-specific expert branches.
+Datasets train independent numerical parameters, while retaining the same
+semantic/structural slots, router features, GroupDRO objective, and bounded
+prior-transfer protocol. For packet classification, the same slot contract is
+used with one-packet semantic and structural experts; flow classification adds
+the flow feature extractor and aggregation boundary. Packet/TLS validation of
+this newest router remains required before it can replace the paper-main
+cross-task framework.
+
+Frozen VPN Flow Test results on the shared 1,672-flow test split:
+
+| candidate | accuracy | macro-F1 |
+|---|---:|---:|
+| strict unified semantic fold consensus | 0.6477 | 0.6120 |
+| rich structural fold consensus | 0.6657 | 0.6278 |
+| cross-environment reliability router | 0.6854 | 0.6436 |
+| router + bounded OOF-selected prior transport | **0.6950** | **0.6738** |
+| SWEET VPN Flow reference | 0.6920 | 0.6220 |
+
+The final result is stored outside the repository's large-artifact boundary at
+`/tmp/two_tower_runs/pcfrr_v1_results/vpn_flow_cross_environment_reliability_router_safe_prior.json`.
+Its pre-transfer ECE is `0.0440`; bounded prior transport lowers ECE to `0.0321`.
+The selected strength is restricted to `[0, 0.30]` and selected from pooled
+leave-one-environment-out predictions, never from Test labels. Single-fold
+prior transfer is retained only as a negative stability ablation because it
+collapsed rare-class Macro-F1 on fold 2.
+
+Implementation verification:
+
+```text
+conda environment: llm-factory
+pytest: 494 passed
+```
+
 ---
 
 ## SWEET dataset layout
