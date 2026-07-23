@@ -39,6 +39,68 @@ def action_fingerprint(action: Dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def canonical_sha256(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def verify_plan_shared_core_config(plan: Dict[str, Any]) -> Dict[str, Any] | None:
+    evidence = plan.get("shared_core_config")
+    training_actions = [
+        action for action in plan.get("actions") or []
+        if action.get("fold") is not None
+    ]
+    if evidence is None:
+        if any("--shared_core_config" in action_argv(action) for action in training_actions):
+            raise ValueError(
+                "training actions bind a shared-core config but the plan has no hash evidence"
+            )
+        return None
+    if not isinstance(evidence, dict):
+        raise ValueError("plan shared_core_config evidence must be an object")
+
+    source = Path(str(evidence.get("path") or "")).resolve()
+    if not source.is_file():
+        raise ValueError(f"plan shared-core config does not exist: {source}")
+    file_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+    if file_sha256 != evidence.get("file_sha256"):
+        raise ValueError("plan shared-core config file hash mismatch")
+
+    payload = load_json(str(source))
+    if payload.get("schema") != "exact_shared_packet_core_v2":
+        raise ValueError("plan shared-core config has the wrong schema")
+    recorded = str(payload.get("config_sha256") or "")
+    unsigned = dict(payload)
+    unsigned.pop("config_sha256", None)
+    if recorded != canonical_sha256(unsigned):
+        raise ValueError("plan shared-core config canonical fingerprint mismatch")
+    if recorded != evidence.get("config_sha256"):
+        raise ValueError("plan shared-core config fingerprint differs from the plan")
+
+    expected_path = str(source)
+    for action in training_actions:
+        argv = action_argv(action)
+        positions = [
+            index for index, value in enumerate(argv)
+            if value == "--shared_core_config"
+        ]
+        if len(positions) != 1 or positions[0] + 1 >= len(argv):
+            raise ValueError(
+                f"training action {action.get('id')} does not bind exactly one shared-core config"
+            )
+        actual_path = str(Path(argv[positions[0] + 1]).resolve())
+        if actual_path != expected_path:
+            raise ValueError(
+                f"training action {action.get('id')} binds a different shared-core config"
+            )
+    return evidence
+
+
 def action_completion_key(action: Dict[str, Any]) -> str:
     return f"{action.get('id', '')}|{action_fingerprint(action)}"
 
@@ -140,11 +202,14 @@ def run_actions(
     log_dir: Path,
     dry_run: bool,
     continue_on_error: bool,
+    plan: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     ledger = load_ledger(ledger_path)
     new_runs = 0
     batch_statuses: List[str] = []
     for action in actions:
+        if plan is not None:
+            verify_plan_shared_core_config(plan)
         print(f"+ run {action.get('id')}: {action.get('command')}", flush=True)
         record = run_action(action, log_dir, dry_run)
         ledger.setdefault("runs", []).append(record)
@@ -178,6 +243,7 @@ def main() -> None:
     args = ap.parse_args()
 
     plan = load_json(args.plan_json)
+    verify_plan_shared_core_config(plan)
     ledger_path = Path(args.ledger_json)
     ledger = load_ledger(ledger_path)
     skip = set() if args.no_skip_completed else completed_ids(ledger)
@@ -198,6 +264,7 @@ def main() -> None:
         log_dir=Path(args.log_dir),
         dry_run=args.dry_run,
         continue_on_error=args.continue_on_error,
+        plan=plan,
     )
     batch_statuses = ledger.get("last_batch_statuses", [])
     historical_failures = sum(1 for row in ledger.get("runs", []) if row.get("status") == "failed")

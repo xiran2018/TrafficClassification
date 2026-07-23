@@ -1,5 +1,16 @@
+import hashlib
+import json
+
+import pytest
+
+import run_unified_repro_plan as repro_executor
 from make_unified_repro_plan import build_plan
-from run_unified_repro_plan import action_fingerprint, completed_ids, selected_actions
+from run_unified_repro_plan import (
+    action_fingerprint,
+    completed_ids,
+    selected_actions,
+    verify_plan_shared_core_config,
+)
 
 
 def fake_audit():
@@ -28,6 +39,24 @@ def fake_audit():
             }
         ],
     }
+
+
+def frozen_config(tmp_path):
+    payload = {
+        "schema": "exact_shared_packet_core_v2",
+        "status": "frozen_from_cross_dataset_validation",
+        "packet_core": {"hidden_dim": 128},
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload["config_sha256"] = hashlib.sha256(encoded).hexdigest()
+    path = tmp_path / "frozen_config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 
 def test_repro_plan_records_safe_argv_and_stable_ids():
@@ -136,3 +165,122 @@ def test_repro_plan_skips_packet_folds_with_matching_manifests():
         "packet-consensus:tls-120",
         "packet-result:tls-120",
     ]
+
+
+def test_repro_plan_binds_one_verified_frozen_config_to_every_training_action(
+    tmp_path,
+):
+    config = frozen_config(tmp_path)
+    plan = build_plan(
+        fake_audit(),
+        flow_stage="all",
+        packet_stage="paper_unified",
+        run_tag="paper_unified_repro",
+        shared_core_config=str(config),
+    )
+
+    evidence = plan["shared_core_config"]
+    assert evidence["path"] == str(config.resolve())
+    assert evidence["file_sha256"] == hashlib.sha256(config.read_bytes()).hexdigest()
+    assert evidence["config_sha256"] == json.loads(config.read_text())["config_sha256"]
+
+    training = [row for row in plan["actions"] if row.get("fold") is not None]
+    assert training
+    for action in training:
+        argv = action["argv"]
+        assert argv[argv.index("--shared_core_config") + 1] == str(config.resolve())
+    non_training = [row for row in plan["actions"] if row.get("fold") is None]
+    assert all("--shared_core_config" not in row["argv"] for row in non_training)
+
+
+def test_repro_plan_rejects_mutated_frozen_config(tmp_path):
+    config = frozen_config(tmp_path)
+    payload = json.loads(config.read_text())
+    payload["packet_core"]["hidden_dim"] = 256
+    config.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="canonical fingerprint mismatch"):
+        build_plan(
+            fake_audit(),
+            flow_stage="all",
+            packet_stage="paper_unified",
+            run_tag="paper_unified_repro",
+            shared_core_config=str(config),
+        )
+
+
+def test_repro_executor_rechecks_frozen_config_after_plan_creation(tmp_path):
+    config = frozen_config(tmp_path)
+    plan = build_plan(
+        fake_audit(),
+        flow_stage="all",
+        packet_stage="paper_unified",
+        run_tag="paper_unified_repro",
+        shared_core_config=str(config),
+    )
+    assert verify_plan_shared_core_config(plan) == plan["shared_core_config"]
+
+    payload = json.loads(config.read_text())
+    payload["packet_core"]["hidden_dim"] = 256
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="file hash mismatch"):
+        verify_plan_shared_core_config(plan)
+
+
+def test_repro_executor_rejects_training_action_with_different_config(tmp_path):
+    config = frozen_config(tmp_path)
+    plan = build_plan(
+        fake_audit(),
+        flow_stage="all",
+        packet_stage="paper_unified",
+        run_tag="paper_unified_repro",
+        shared_core_config=str(config),
+    )
+    action = next(row for row in plan["actions"] if row.get("fold") is not None)
+    index = action["argv"].index("--shared_core_config") + 1
+    action["argv"][index] = str(tmp_path / "different.json")
+
+    with pytest.raises(ValueError, match="binds a different shared-core config"):
+        verify_plan_shared_core_config(plan)
+
+
+def test_repro_executor_rechecks_config_before_every_action(tmp_path, monkeypatch):
+    config = frozen_config(tmp_path)
+    plan = build_plan(
+        fake_audit(),
+        flow_stage="all",
+        packet_stage="paper_unified",
+        run_tag="paper_unified_repro",
+        shared_core_config=str(config),
+    )
+    actions = [row for row in plan["actions"] if row.get("fold") is not None][:2]
+    calls = 0
+
+    def fake_run_action(action, log_dir, dry_run):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            payload = json.loads(config.read_text())
+            payload["packet_core"]["hidden_dim"] = 256
+            config.write_text(json.dumps(payload), encoding="utf-8")
+        return {
+            "id": action["id"],
+            "status": "dry_run",
+            "action_fingerprint": action_fingerprint(action),
+        }
+
+    monkeypatch.setattr(repro_executor, "run_action", fake_run_action)
+    ledger_path = tmp_path / "ledger.json"
+    with pytest.raises(ValueError, match="file hash mismatch"):
+        repro_executor.run_actions(
+            actions,
+            ledger_path=ledger_path,
+            log_dir=tmp_path / "logs",
+            dry_run=True,
+            continue_on_error=False,
+            plan=plan,
+        )
+
+    ledger = json.loads(ledger_path.read_text())
+    assert calls == 1
+    assert [row["id"] for row in ledger["runs"]] == [actions[0]["id"]]

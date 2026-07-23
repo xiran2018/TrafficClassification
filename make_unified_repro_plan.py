@@ -9,6 +9,7 @@ gaps into concrete conda commands for the next automated loop.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, List
@@ -28,6 +29,43 @@ def shell_join(parts: List[str]) -> str:
     return " ".join(parts)
 
 
+def canonical_sha256(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def frozen_config_evidence(path: str) -> Dict[str, Any]:
+    source = Path(path).resolve()
+    if not source.is_file():
+        raise ValueError(f"shared-core config does not exist: {source}")
+    payload = load_json(str(source))
+    if payload.get("schema") != "exact_shared_packet_core_v2":
+        raise ValueError("shared-core config has the wrong schema")
+    recorded = str(payload.get("config_sha256") or "")
+    unsigned = dict(payload)
+    unsigned.pop("config_sha256", None)
+    recomputed = canonical_sha256(unsigned)
+    if recorded != recomputed:
+        raise ValueError("shared-core config canonical fingerprint mismatch")
+    return {
+        "path": str(source),
+        "file_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "config_sha256": recorded,
+        "status": payload.get("status"),
+    }
+
+
+def append_shared_core_config(argv: List[str], path: str | None) -> List[str]:
+    if path:
+        argv += ["--shared_core_config", str(Path(path).resolve())]
+    return argv
+
+
 def flow_embedding_suffix(fold: int) -> str:
     return f"rawproj_paper_unified_dualview_fold{fold}"
 
@@ -36,7 +74,13 @@ def flow_run_tag(run_tag: str, fold: int) -> str:
     return f"{run_tag}_fold{fold}"
 
 
-def flow_argv(dataset: str, fold: int, run_tag: str, stage: str) -> List[str]:
+def flow_argv(
+    dataset: str,
+    fold: int,
+    run_tag: str,
+    stage: str,
+    shared_core_config: str | None = None,
+) -> List[str]:
     argv = [
         "conda",
         "run",
@@ -84,7 +128,7 @@ def flow_argv(dataset: str, fold: int, run_tag: str, stage: str) -> List[str]:
         "--paper_unified_stages",
         "model",
     ]
-    return argv
+    return append_shared_core_config(argv, shared_core_config)
 
 
 def flow_fold_result_path(dataset: str, fold: int, run_tag: str) -> str:
@@ -168,8 +212,13 @@ def packet_consensus_argv(dataset: str, output_json: str) -> List[str]:
     ]
 
 
-def packet_argv(dataset: str, fold: int, stage: str) -> List[str]:
-    return [
+def packet_argv(
+    dataset: str,
+    fold: int,
+    stage: str,
+    shared_core_config: str | None = None,
+) -> List[str]:
+    argv = [
         "conda",
         "run",
         "--no-capture-output",
@@ -186,6 +235,7 @@ def packet_argv(dataset: str, fold: int, stage: str) -> List[str]:
         "--framework_profile",
         "paper_unified",
     ]
+    return append_shared_core_config(argv, shared_core_config)
 
 
 def completed_packet_folds(row: Dict[str, Any]) -> set[int]:
@@ -226,7 +276,18 @@ def can_bind_existing_result(provenance: Dict[str, Any]) -> bool:
     )
 
 
-def build_plan(audit: Dict[str, Any], flow_stage: str, packet_stage: str, run_tag: str) -> Dict[str, Any]:
+def build_plan(
+    audit: Dict[str, Any],
+    flow_stage: str,
+    packet_stage: str,
+    run_tag: str,
+    shared_core_config: str | None = None,
+) -> Dict[str, Any]:
+    config_evidence = (
+        frozen_config_evidence(shared_core_config)
+        if shared_core_config
+        else None
+    )
     flow_gaps = missing_rows(audit, "flow_level")
     packet_gaps = missing_rows(audit, "packet_level")
     actions: List[Dict[str, Any]] = []
@@ -237,7 +298,13 @@ def build_plan(audit: Dict[str, Any], flow_stage: str, packet_stage: str, run_ta
         for fold in FLOW_FOLDS:
             if fold in completed_folds:
                 continue
-            argv = flow_argv(dataset, fold, run_tag, flow_stage)
+            argv = flow_argv(
+                dataset,
+                fold,
+                run_tag,
+                flow_stage,
+                shared_core_config,
+            )
             actions.append(
                 {
                     "id": f"flow:{dataset}:fold{fold}",
@@ -286,7 +353,12 @@ def build_plan(audit: Dict[str, Any], flow_stage: str, packet_stage: str, run_ta
         for fold in PACKET_FOLDS:
             if fold in completed_folds:
                 continue
-            argv = packet_argv(dataset, fold, packet_stage)
+            argv = packet_argv(
+                dataset,
+                fold,
+                packet_stage,
+                shared_core_config,
+            )
             actions.append(
                 {
                     "id": f"packet:{dataset}:fold{fold}",
@@ -349,6 +421,7 @@ def build_plan(audit: Dict[str, Any], flow_stage: str, packet_stage: str, run_ta
         "audit_status": audit.get("status"),
         "flow_gaps": len(flow_gaps),
         "packet_gaps": len(packet_gaps),
+        "shared_core_config": config_evidence,
         "num_actions": len(actions),
         "actions": actions,
     }
@@ -409,12 +482,27 @@ def main() -> None:
         ),
     )
     ap.add_argument("--run_tag", default="paper_unified_repro")
+    ap.add_argument(
+        "--shared_core_config",
+        default="",
+        help=(
+            "Optional frozen exact_shared_packet_core_v2 config. When supplied, "
+            "its file hash and canonical method fingerprint are verified and the "
+            "absolute path is embedded in every Packet/Flow training action."
+        ),
+    )
     ap.add_argument("--output_json", default="reasoningDataset/unified_repro_plan.json")
     ap.add_argument("--output_md", default="reasoningDataset/unified_repro_plan.md")
     args = ap.parse_args()
 
     audit = load_json(args.audit_json)
-    plan = build_plan(audit, args.flow_stage, args.packet_stage, args.run_tag)
+    plan = build_plan(
+        audit,
+        args.flow_stage,
+        args.packet_stage,
+        args.run_tag,
+        args.shared_core_config or None,
+    )
     out_json = Path(args.output_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
