@@ -13,6 +13,11 @@ import numpy as np
 
 COMMON_SERVER_PORTS = {80, 443, 22, 21, 23, 3389, 53, 25, 110, 143, 3306, 5432}
 
+PROTOCOL_CLOSED_INTERVENTION_GROUPS = {
+    "mask_endpoint_closed": 0,
+    "mask_session_fields": 1,
+}
+
 
 def stable_id(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
@@ -28,6 +33,22 @@ def pseudo_port(value: int, salt: str) -> int:
         return value
     digest = hashlib.sha1(f"{salt}|port|{value}".encode("utf-8", errors="ignore")).digest()
     return 1024 + (int.from_bytes(digest[:2], "big") % (65535 - 1024))
+
+
+def resolve_embedding_header_policy(
+    m: "PacketMeta", header_policy: str, header_random_salt: str = ""
+) -> str:
+    """Resolve the deterministic intervention assigned to one packet."""
+    if header_policy != "protocol_closed_mixture":
+        return header_policy
+    key = (
+        f"{header_random_salt}|{m.packet_id}|{m.src_ip}|{m.dst_ip}|"
+        f"{m.sport}|{m.dport}|{m.l4}"
+    )
+    index = hashlib.blake2b(key.encode("utf-8"), digest_size=1).digest()[0] % len(
+        PROTOCOL_CLOSED_INTERVENTION_GROUPS
+    )
+    return tuple(PROTOCOL_CLOSED_INTERVENTION_GROUPS)[index]
 
 
 def iter_labeled_pcaps(root: str | Path) -> Iterable[Tuple[str, Path]]:
@@ -524,6 +545,9 @@ def format_packet_embedding_prompt(
 
     It includes raw header fields and payload prefix, but not checksum validity labels.
     """
+    header_policy = resolve_embedding_header_policy(
+        m, header_policy, header_random_salt
+    )
     src_ip, dst_ip = m.src_ip, m.dst_ip
     sport, dport = str(m.sport), str(m.dport)
     direction = m.direction
@@ -541,6 +565,14 @@ def format_packet_embedding_prompt(
     elif header_policy == "mask_ip_port":
         src_ip = dst_ip = "[MASK_IP]"
         sport = dport = "[MASK_PORT]"
+    elif header_policy == "mask_endpoint_closed":
+        # Endpoint changes also change direction and both checksums. Keeping
+        # those dependent values would expose a deterministic side channel.
+        src_ip = dst_ip = "[MASK_IP]"
+        sport = dport = "[MASK_PORT]"
+        direction = "[MASK_DIRECTION]"
+        ip_checksum = "[MASK_CHECKSUM]"
+        l4_checksum = "[MASK_CHECKSUM]"
     elif header_policy == "mask_session_fields":
         src_ip = dst_ip = "[MASK_IP]"
         sport = dport = "[MASK_PORT]"

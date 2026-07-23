@@ -25,6 +25,8 @@ from traffic_utils import (
     make_label_map,
     stable_id,
     packet_information_weight,
+    PROTOCOL_CLOSED_INTERVENTION_GROUPS,
+    resolve_embedding_header_policy,
 )
 
 
@@ -175,7 +177,14 @@ def main() -> None:
     ap.add_argument("--write_label_map", action="store_true", help="Write label_map.json to output_dir.")
     ap.add_argument(
         "--embedding_header_policy",
-        choices=["full", "randomize_ip_port", "mask_ip_port", "mask_session_fields"],
+        choices=[
+            "full",
+            "randomize_ip_port",
+            "mask_ip_port",
+            "mask_endpoint_closed",
+            "mask_session_fields",
+            "protocol_closed_mixture",
+        ],
         default="full",
         help="Header policy for packet_index prompts used during embedding extraction; QA/SFT prompts stay unchanged.",
     )
@@ -257,6 +266,12 @@ def main() -> None:
                     for meta_obj, qa_prompt, embed_prompt in zip(metas, qa_prompts, embed_prompts):
                         meta = asdict(meta_obj)
                         packet_uid = f"{flow_id}_{meta['packet_id']}"
+                        effective_header_policy = resolve_embedding_header_policy(
+                            meta_obj, args.embedding_header_policy, flow_id
+                        )
+                        intervention_group = PROTOCOL_CLOSED_INTERVENTION_GROUPS.get(
+                            effective_header_policy, -1
+                        )
                         row = {
                             "flow_id": flow_id,
                             "pcap_path": str(pcap),
@@ -267,6 +282,8 @@ def main() -> None:
                             "prompt": embed_prompt,
                             "qa_prompt": qa_prompt,
                             "embedding_header_policy": args.embedding_header_policy,
+                            "embedding_header_policy_effective": effective_header_policy,
+                            "intervention_group": intervention_group,
                             "input_layout": args.input_layout,
                             "sample_unit": "packet" if args.input_layout == "class_packet_pcaps" else "flow_packet",
                             "packet_context_policy": packet_context_policy,
@@ -282,6 +299,8 @@ def main() -> None:
                             "packet_uid": packet_uid,
                             "prompt": embed_prompt,
                             "embedding_header_policy": args.embedding_header_policy,
+                            "embedding_header_policy_effective": effective_header_policy,
+                            "intervention_group": intervention_group,
                             "input_layout": args.input_layout,
                             "sample_unit": "packet" if args.input_layout == "class_packet_pcaps" else "flow_packet",
                             "packet_context_policy": packet_context_policy,

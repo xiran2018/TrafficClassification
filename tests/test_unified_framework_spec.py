@@ -214,8 +214,8 @@ def test_direct_runners_default_to_paper_unified_profile():
     assert "--content_group_index" in stage8_source
     assert "--content_group_loss_reduction" in stage8_source
     assert "--content_group_loss_reduction" in packet_source
-    assert "paper_unified fixes --intervention_view_base_mode symmetric_mean" in stage8_source
-    assert "paper_unified fixes --intervention_view_base_mode symmetric_mean" in packet_source
+    assert 'choices=["symmetric_mean", "factual_anchor"]' in stage8_source
+    assert 'choices=["symmetric_mean", "factual_anchor"]' in packet_source
     assert "paper_unified fixes --channel_fusion_max_weight 0.25" in packet_source
 
 
@@ -354,7 +354,7 @@ def test_paper_unified_profile_aligns_packet_and_flow_switches():
 
     assert packet_args.embedding_header_policy == "full"
     assert packet_args.packet_context_policy == "single_packet"
-    assert packet_args.intervened_embedding_header_policy == "mask_ip_port"
+    assert packet_args.intervened_embedding_header_policy == "protocol_closed_mixture"
     assert packet_args.use_intervention_views is True
     assert packet_args.byte_use_payload_channel is False
     assert packet_args.byte_use_protocol_fields is True
@@ -365,7 +365,7 @@ def test_paper_unified_profile_aligns_packet_and_flow_switches():
     assert packet_args.same_flow_positive_weight == 1.0
     assert flow_args.embedding_header_policy == "full"
     assert flow_args.packet_context_policy == "single_packet"
-    assert flow_args.intervened_embedding_header_policy == "mask_ip_port"
+    assert flow_args.intervened_embedding_header_policy == "protocol_closed_mixture"
     assert flow_args.use_intervention_views is True
     assert flow_args.flow_pooling == "mean"
     assert flow_args.model_types == "seq"
@@ -534,7 +534,7 @@ def test_paper_unified_shared_status_aliases_cover_runner_and_bound_manifests():
     assert not shared_status_matches(legacy_single_view_status)
     result_bound_status = {
         "label_free_protocol_content_pretraining": "native_flow_multitask_v1",
-        "field_aware_header_intervention": "factual_full_plus_mask_ip_port_intervention",
+        "field_aware_header_intervention": "protocol_closed_field_reliability_v1",
         "semantic_tower1_channel": "present_or_available_in_source_inputs",
         "current_packet_structural_encoder": "strict_current_packet_13d",
         "shared_intervention_view_fusion": "required_representation_level",

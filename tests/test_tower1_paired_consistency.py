@@ -1,7 +1,11 @@
 import pytest
 import torch
 
-from models.qwen_packet_multitask import paired_view_consistency_loss
+from models.qwen_packet_multitask import (
+    active_group_objective,
+    grouped_means,
+    paired_view_consistency_loss,
+)
 
 
 def test_raw_consistency_covers_concat_embedding_component():
@@ -58,3 +62,34 @@ def test_raw_consistency_weight_must_be_non_negative():
             paired_raw_z=value,
             raw_consistency_weight=-1.0,
         )
+
+
+def test_factual_teacher_stops_gradient_only_on_factual_view():
+    factual = torch.tensor([[1.0, 0.2]], requires_grad=True)
+    intervened = torch.tensor([[0.2, 1.0]], requires_grad=True)
+    factual_logits = torch.tensor([[2.0, -1.0]], requires_grad=True)
+    intervened_logits = torch.tensor([[-1.0, 2.0]], requires_grad=True)
+    loss = paired_view_consistency_loss(
+        factual,
+        intervened,
+        factual_logits,
+        intervened_logits,
+        consistency_mode="factual_teacher",
+    )
+    loss.backward()
+    assert factual.grad is None
+    assert factual_logits.grad is None
+    assert intervened.grad.abs().sum() > 0
+    assert intervened_logits.grad.abs().sum() > 0
+
+
+def test_group_objective_uses_group_means_not_group_frequency():
+    values = torch.tensor([1.0, 3.0, 10.0])
+    groups = torch.tensor([0, 0, 1])
+    means, counts = grouped_means(values, groups, num_groups=2)
+    objective = active_group_objective(
+        means, counts, torch.tensor([0.25, 0.75])
+    )
+    assert means.tolist() == [2.0, 10.0]
+    assert counts.tolist() == [2.0, 1.0]
+    assert objective.item() == pytest.approx(8.0)

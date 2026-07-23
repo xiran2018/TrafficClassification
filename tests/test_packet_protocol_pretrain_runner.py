@@ -158,7 +158,7 @@ def test_paper_unified_eval_only_builds_requested_split_and_never_trains(tmp_pat
     commands = result.stdout
     assert "preprocess_tower1.py" in commands
     assert "--embedding_header_policy full" in commands
-    assert "--embedding_header_policy mask_ip_port" in commands
+    assert "--embedding_header_policy protocol_closed_mixture" in commands
     assert commands.count("extract_packet_embeddings_qwen.py") == 2
     assert "test_packet_byte_transformer.py" in commands
     assert "train_tower1_multitask.py" not in commands

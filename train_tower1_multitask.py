@@ -108,6 +108,9 @@ class PacketAuxDataset(Dataset):
                     continue
                 row["paired_prompt"] = paired_prompt
                 row["paired_embedding_header_policy"] = paired_row.get("embedding_header_policy", "")
+                row["paired_intervention_group"] = int(
+                    paired_row.get("intervention_group", -1)
+                )
                 self.paired_rows += 1
             extra = sorted(set(paired_by_uid) - factual_uids)
             if missing or extra or label_mismatches or empty_prompts:
@@ -274,6 +277,10 @@ def tower1_training_config(args) -> dict:
         "paired_cls_weight",
         "paired_logit_kl_weight",
         "paired_raw_consistency_weight",
+        "paired_consistency_mode",
+        "paired_group_dro",
+        "paired_group_dro_eta",
+        "paired_num_groups",
         "flow_balanced_packet_batches",
         "packets_per_flow",
         "packet_batch_scheduler",
@@ -537,6 +544,10 @@ class PacketAuxCollator:
             batch["paired_input_ids"] = paired_toks["input_ids"]
             batch["paired_attention_mask"] = paired_toks["attention_mask"]
             batch["paired_mask"] = torch.tensor([bool(r.get("paired_prompt")) for r in rows], dtype=torch.bool)
+            batch["paired_group_ids"] = torch.tensor(
+                [int(r.get("paired_intervention_group", -1)) for r in rows],
+                dtype=torch.long,
+            )
         return batch
 
 
@@ -778,6 +789,14 @@ def main() -> None:
         default=1.0,
         help="Raw last-token cosine consistency inside Tower-1 paired loss; concat extraction exposes this representation downstream.",
     )
+    ap.add_argument(
+        "--paired_consistency_mode",
+        choices=["symmetric", "factual_teacher"],
+        default="symmetric",
+    )
+    ap.add_argument("--paired_group_dro", action="store_true")
+    ap.add_argument("--paired_group_dro_eta", type=float, default=0.05)
+    ap.add_argument("--paired_num_groups", type=int, default=2)
     ap.add_argument("--flow_balanced_packet_batches", action="store_true", help="Sample packet batches as multiple packets per flow for flow-aware SupCon.")
     ap.add_argument("--packets_per_flow", type=int, default=2, help="Packets sampled per flow when --flow_balanced_packet_batches is set.")
     ap.add_argument(
@@ -822,6 +841,12 @@ def main() -> None:
         ap.error("--class_weight_strength must be in [0, 1]")
     if args.paired_raw_consistency_weight < 0:
         ap.error("--paired_raw_consistency_weight must be non-negative")
+    if args.paired_group_dro_eta < 0:
+        ap.error("--paired_group_dro_eta must be non-negative")
+    if args.paired_group_dro and (
+        not args.paired_packet_aux_jsonl or args.paired_num_groups < 2
+    ):
+        ap.error("paired GroupDRO requires paired data and at least two groups")
     if args.paired_validation_selection != "disabled":
         if not args.valid_packet_aux_jsonl or not args.valid_paired_packet_aux_jsonl:
             ap.error(
@@ -897,6 +922,17 @@ def main() -> None:
         show_progress=show_load_progress,
         paired_path=args.paired_packet_aux_jsonl,
     )
+    if args.paired_group_dro:
+        observed_groups = {
+            int(row.get("paired_intervention_group", -1))
+            for row in packet_ds.rows
+        }
+        expected_groups = set(range(args.paired_num_groups))
+        if observed_groups != expected_groups:
+            raise ValueError(
+                "paired GroupDRO intervention groups mismatch: "
+                f"observed={sorted(observed_groups)} expected={sorted(expected_groups)}"
+            )
     class_weights = configure_packet_weights(
         packet_ds.rows,
         weighting=args.class_weighting,
@@ -1048,6 +1084,14 @@ def main() -> None:
     history_path = Path(args.output_dir) / "packet_validation_history.jsonl"
     training_config = tower1_training_config(args)
     history_path.unlink(missing_ok=True)
+    paired_group_weights = None
+    if args.paired_group_dro:
+        paired_group_weights = torch.full(
+            (args.paired_num_groups,),
+            1.0 / args.paired_num_groups,
+            dtype=torch.float32,
+            device=device,
+        )
     for step in pbar:
         sft_batch = next(sft_iter) if sft_iter is not None else None
         packet_batch = next(packet_iter)
@@ -1069,6 +1113,8 @@ def main() -> None:
             paired_cls_weight=args.paired_cls_weight,
             paired_logit_kl_weight=args.paired_logit_kl_weight,
             paired_raw_consistency_weight=args.paired_raw_consistency_weight,
+            paired_consistency_mode=args.paired_consistency_mode,
+            paired_group_weights=paired_group_weights,
         )
         if not torch.isfinite(out.loss):
             skipped_nonfinite += 1
@@ -1095,6 +1141,16 @@ def main() -> None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             opt.zero_grad(set_to_none=True)
+
+        if paired_group_weights is not None and out.paired_group_losses is not None:
+            with torch.no_grad():
+                active = out.paired_group_counts > 0
+                updated = paired_group_weights.clamp_min(1e-12).log()
+                updated[active] += (
+                    args.paired_group_dro_eta
+                    * out.paired_group_losses.detach()[active]
+                )
+                paired_group_weights = torch.softmax(updated, dim=0)
 
         with torch.no_grad():
             running["loss"] += float(out.loss.detach().cpu())
@@ -1135,6 +1191,14 @@ def main() -> None:
                     **msg,
                 )
             )
+            if paired_group_weights is not None:
+                tqdm.write(
+                    "paired_group_weights="
+                    + ",".join(
+                        f"{value:.4f}"
+                        for value in paired_group_weights.detach().cpu().tolist()
+                    )
+                )
             running = {"loss": 0.0, "lm": 0.0, "cls": 0.0, "con": 0.0, "proto": 0.0, "pair": 0.0, "acc": 0.0, "lm_tokens": 0.0, "n": 0}
 
         if args.save_steps and (step + 1) % args.save_steps == 0:
@@ -1227,6 +1291,17 @@ def main() -> None:
         training_config=training_config,
     )
     output_dir = Path(args.output_dir)
+    if paired_group_weights is not None:
+        with open(output_dir / "paired_group_dro_state.json", "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "eta": args.paired_group_dro_eta,
+                    "num_groups": args.paired_num_groups,
+                    "weights": paired_group_weights.detach().cpu().tolist(),
+                },
+                f,
+                indent=2,
+            )
     completed_artifacts = {
         name: {
             "path": str(path.resolve()),
@@ -1236,6 +1311,7 @@ def main() -> None:
             "validation_history": output_dir / "packet_validation_history.jsonl",
             "final_heads": output_dir / "final" / "tower1_heads.pt",
             "final_config": output_dir / "final" / "tower1_config.json",
+            "paired_group_dro_state": output_dir / "paired_group_dro_state.json",
         }.items()
         if path.is_file()
     }

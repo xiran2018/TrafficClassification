@@ -285,7 +285,17 @@ def tower1_train_cmd(args) -> List[str]:
             str(args.tower1_paired_logit_kl_weight),
             "--paired_raw_consistency_weight",
             str(args.tower1_paired_raw_consistency_weight),
+            "--paired_consistency_mode",
+            args.tower1_paired_consistency_mode,
         ]
+        if args.tower1_paired_group_dro:
+            cmd += [
+                "--paired_group_dro",
+                "--paired_group_dro_eta",
+                str(args.tower1_paired_group_dro_eta),
+                "--paired_num_groups",
+                "2",
+            ]
         if args.tower1_paired_validation_selection != "disabled":
             cmd += [
                 "--valid_paired_packet_aux_jsonl",
@@ -1247,7 +1257,10 @@ def embedding_policy_evidence(
 
 
 def intervention_embedding_suffix(args) -> str:
-    return f"{args.embedding_suffix}_mask_ip_port_intervention"
+    return (
+        f"{args.embedding_suffix}_"
+        f"{safe_name(args.intervened_embedding_header_policy)}_intervention"
+    )
 
 
 def intervention_policy_evidence(args) -> dict | None:
@@ -1268,6 +1281,8 @@ def field_aware_policy_status(
     if args.framework_profile == "paper_unified":
         if not factual_evidence["verified"] or not intervention_evidence or not intervention_evidence["verified"]:
             return "unverified"
+        if intervention_evidence["expected"] == "protocol_closed_mixture":
+            return "protocol_closed_field_reliability_v1"
         return (
             f"factual_{factual_evidence['expected']}_plus_"
             f"{intervention_evidence['expected']}_intervention"
@@ -1682,14 +1697,14 @@ def main() -> None:
     ap.add_argument("--payload_prefix_len", type=int, default=128)
     ap.add_argument("--l3_prefix_len", type=int, default=512)
     ap.add_argument("--preprocess_max_flows", type=int, default=0)
-    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port", "mask_ip_port"], default="full", help="Header policy for packet-index prompts used by embedding extraction.")
+    ap.add_argument("--embedding_header_policy", choices=["full", "randomize_ip_port", "mask_ip_port", "mask_endpoint_closed", "mask_session_fields", "protocol_closed_mixture"], default="full", help="Header policy for packet-index prompts used by embedding extraction.")
     ap.add_argument(
         "--packet_context_policy",
         choices=["auto", "single_packet", "flow_context"],
         default="auto",
         help="Context available to each Tower1 semantic packet prompt.",
     )
-    ap.add_argument("--intervened_embedding_header_policy", choices=["randomize_ip_port", "mask_ip_port"], default="mask_ip_port", help="Second semantic prompt view used by the shared intervention router.")
+    ap.add_argument("--intervened_embedding_header_policy", choices=["randomize_ip_port", "mask_ip_port", "mask_endpoint_closed", "mask_session_fields", "protocol_closed_mixture"], default="mask_ip_port", help="Second semantic prompt view used by the shared intervention router.")
     ap.add_argument("--tower1_epochs", type=int, default=2)
     ap.add_argument("--tower1_use_sft", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--tower1_max_steps", type=int, default=0)
@@ -1720,6 +1735,9 @@ def main() -> None:
     ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0, help="Extra paired-view packet CE multiplier in Tower-1.")
     ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5, help="Logit symmetric-KL weight inside Tower-1 paired consistency.")
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0, help="Raw last-token cosine term inside Tower-1 paired consistency.")
+    ap.add_argument("--tower1_paired_consistency_mode", choices=["symmetric", "factual_teacher"], default="symmetric")
+    ap.add_argument("--tower1_paired_group_dro", action="store_true")
+    ap.add_argument("--tower1_paired_group_dro_eta", type=float, default=0.05)
     ap.add_argument(
         "--tower1_paired_validation_selection",
         choices=["disabled", "worst_view_macro_f1", "mean_view_macro_f1"],
@@ -2101,14 +2119,6 @@ def main() -> None:
         # Packet evidence reaches the final flow prediction through the existing
         # learned late-fusion path; this is one registered cross-dataset candidate.
         args.flow_pooling = "late_fusion"
-    if (
-        args.framework_profile == "paper_unified"
-        and args.intervention_view_base_mode != "symmetric_mean"
-    ):
-        ap.error(
-            "paper_unified fixes --intervention_view_base_mode symmetric_mean; "
-            "use a direct train_tower2.py ablation for factual_anchor"
-        )
     if args.framework_profile == "paper_unified" and args.native_structural_suffix == "shared_content":
         # Native current-packet encoders are trained inside each fold. A static
         # suffix would silently share fold-0 weights with folds 1/2.
@@ -2116,8 +2126,9 @@ def main() -> None:
 
     intervention_args = None
     if args.framework_profile == "paper_unified" and args.use_intervention_views:
-        intervention_suffix = f"{args.output_suffix}_mask_ip_port_intervention"
-        intervention_embedding_suffix = f"{args.embedding_suffix}_mask_ip_port_intervention"
+        policy_tag = safe_name(args.intervened_embedding_header_policy)
+        intervention_suffix = f"{args.output_suffix}_{policy_tag}_intervention"
+        intervention_embedding_suffix = f"{args.embedding_suffix}_{policy_tag}_intervention"
         intervention_args = argparse.Namespace(
             **{
                 **vars(args),

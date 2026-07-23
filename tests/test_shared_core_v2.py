@@ -1029,13 +1029,13 @@ def test_flow_runner_consumes_same_config_and_preprocesses_paired_view_first(tmp
     intervened_preprocess = next(
         i
         for i, line in enumerate(lines)
-        if "preprocess_tower1.py" in line and "mask_ip_port_intervention" in line
+        if "preprocess_tower1.py" in line and "_intervention" in line
     )
     tower1 = lines[tower1_index]
     factual_preprocess = next(
         line
         for line in lines
-        if "preprocess_tower1.py" in line and "mask_ip_port_intervention" not in line
+        if "preprocess_tower1.py" in line and "_intervention" not in line
     )
     intervened_preprocess_line = lines[intervened_preprocess]
     assert "--packet_context_policy single_packet" in factual_preprocess

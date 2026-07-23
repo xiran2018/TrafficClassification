@@ -478,6 +478,9 @@ def semantic_cache_policy_evidence(args, artifacts: Path) -> dict:
     expected_flow_batch_packets = int(
         getattr(args, "semantic_embedding_flow_batch_packets", 128)
     )
+    intervened_policy = str(
+        getattr(args, "intervened_embedding_header_policy", "mask_ip_port")
+    )
     expected_scheduler = (
         "cross_flow_length_bucketed_v1"
         if expected_flow_batch_packets > 0
@@ -488,7 +491,7 @@ def semantic_cache_policy_evidence(args, artifacts: Path) -> dict:
         views = {}
         for view, suffix, expected_header in (
             ("factual", "_full", "full"),
-            ("intervened", "_mask_ip_port", "mask_ip_port"),
+            ("intervened", "_mask_ip_port", intervened_policy),
         ):
             path = artifacts / f"{split}_semantic_embeddings{suffix}_manifest.json"
             manifest = {}
@@ -511,7 +514,9 @@ def semantic_cache_policy_evidence(args, artifacts: Path) -> dict:
                 actual_num_shards == 1
                 or actual_merge_scheduler == "deterministic_flow_sha1_v1"
             )
-            embedding_policy = "full" if view == "factual" else "mask_ip_port"
+            embedding_policy = (
+                "full" if view == "factual" else intervened_policy
+            )
             audit = audit_report_evidence(
                 artifacts
                 / f"{split}_semantic_flow_embeddings_{embedding_policy}"
@@ -605,7 +610,12 @@ def write_framework_manifest(
     shared_status.update(
         {
             "field_aware_header_intervention": (
-                "factual_full_plus_mask_ip_port_intervention"
+                (
+                    "protocol_closed_field_reliability_v1"
+                    if args.intervened_embedding_header_policy
+                    == "protocol_closed_mixture"
+                    else f"factual_full_plus_{args.intervened_embedding_header_policy}_intervention"
+                )
                 if args.framework_profile == "paper_unified"
                 else args.embedding_header_policy
             ),
@@ -771,7 +781,9 @@ def write_framework_manifest(
                     "full" if args.framework_profile == "paper_unified" else args.embedding_header_policy
                 ),
                 "intervened_header_policy": (
-                    "mask_ip_port" if args.framework_profile == "paper_unified" else ""
+                    args.intervened_embedding_header_policy
+                    if args.framework_profile == "paper_unified"
+                    else ""
                 ),
                 "shared_test_dir": args.shared_test_dir,
                 "dry_run": args.dry_run,
@@ -924,6 +936,13 @@ def main() -> None:
     ap.add_argument("--tower1_paired_cls_weight", type=float, default=0.0)
     ap.add_argument("--tower1_paired_logit_kl_weight", type=float, default=0.5)
     ap.add_argument("--tower1_paired_raw_consistency_weight", type=float, default=1.0)
+    ap.add_argument(
+        "--tower1_paired_consistency_mode",
+        choices=["symmetric", "factual_teacher"],
+        default="symmetric",
+    )
+    ap.add_argument("--tower1_paired_group_dro", action="store_true")
+    ap.add_argument("--tower1_paired_group_dro_eta", type=float, default=0.05)
     ap.add_argument(
         "--tower1_paired_validation_selection",
         choices=["disabled", "worst_view_macro_f1", "mean_view_macro_f1"],
@@ -1080,7 +1099,7 @@ def main() -> None:
     ap.add_argument("--byte_invariant_blend_grid_size", type=int, default=21)
     ap.add_argument(
         "--embedding_header_policy",
-        choices=["full", "randomize_ip_port", "mask_ip_port", "mask_session_fields"],
+        choices=["full", "randomize_ip_port", "mask_ip_port", "mask_endpoint_closed", "mask_session_fields", "protocol_closed_mixture"],
         default="full",
     )
     ap.add_argument(
@@ -1091,7 +1110,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--intervened_embedding_header_policy",
-        choices=["randomize_ip_port", "mask_ip_port"],
+        choices=["randomize_ip_port", "mask_ip_port", "mask_endpoint_closed", "mask_session_fields", "protocol_closed_mixture"],
         default="mask_ip_port",
     )
     ap.add_argument("--use_intervention_views", action=argparse.BooleanOptionalAction, default=False)
@@ -1212,14 +1231,6 @@ def main() -> None:
             )
         if not args.ablation_output_dir:
             ap.error("--stage shared_core_ablation requires --ablation_output_dir")
-    if (
-        args.framework_profile == "paper_unified"
-        and args.intervention_view_base_mode != "symmetric_mean"
-    ):
-        ap.error(
-            "paper_unified fixes --intervention_view_base_mode symmetric_mean; "
-            "use a direct ablation command for factual_anchor"
-        )
     if (
         args.framework_profile == "paper_unified"
         and abs(args.channel_fusion_max_weight - 0.25) > 1e-12
@@ -1368,8 +1379,19 @@ def main() -> None:
                     "--paired_cls_weight", str(args.tower1_paired_cls_weight),
                     "--paired_logit_kl_weight", str(args.tower1_paired_logit_kl_weight),
                     "--paired_raw_consistency_weight", str(args.tower1_paired_raw_consistency_weight),
+                    "--paired_consistency_mode", args.tower1_paired_consistency_mode,
                 ]
             )
+            if args.tower1_paired_group_dro:
+                command.extend(
+                    [
+                        "--paired_group_dro",
+                        "--paired_group_dro_eta",
+                        str(args.tower1_paired_group_dro_eta),
+                        "--paired_num_groups",
+                        "2",
+                    ]
+                )
             if args.tower1_paired_validation_selection != "disabled":
                 command.extend(
                     [
@@ -1489,7 +1511,7 @@ def main() -> None:
                     "--max_packets_per_flow", str(args.max_packets_per_flow),
                     "--payload_prefix_len", "128",
                     "--l3_prefix_len", "512",
-                    "--embedding_header_policy", "mask_ip_port",
+                    "--embedding_header_policy", args.intervened_embedding_header_policy,
                     "--classification_only",
                     "--label_map_in", str(label_map),
                 ]
@@ -1546,7 +1568,7 @@ def main() -> None:
             split_dir = prepared_directories[split_name]
             for intervened, prompt_dir, policy in (
                 (False, split_dir, "full"),
-                (True, intervention_dirs[split_name], "mask_ip_port"),
+                (True, intervention_dirs[split_name], args.intervened_embedding_header_policy),
             ):
                 embedding_dir = artifacts / f"{split_name}_semantic_flow_embeddings_{policy}"
                 run_semantic_embedding_stage(
@@ -1687,7 +1709,7 @@ def main() -> None:
                     "--intervened_semantic_embedding_manifest", str(train_intervened_manifest),
                     "--valid_intervened_semantic_embedding_cache", str(valid_intervened_cache),
                     "--valid_intervened_semantic_embedding_manifest", str(valid_intervened_manifest),
-                    "--required_intervened_semantic_header_policy", "mask_ip_port",
+                    "--required_intervened_semantic_header_policy", args.intervened_embedding_header_policy,
                     "--intervention_max_residual_weight", str(args.intervention_max_residual_weight),
                     "--intervention_view_base_mode", args.intervention_view_base_mode,
                 ]
@@ -1767,7 +1789,7 @@ def main() -> None:
                         "--required_semantic_packet_context_policy", args.packet_context_policy,
                         "--intervened_semantic_embedding_cache", str(intervened_cache_path),
                         "--intervened_semantic_embedding_manifest", str(intervened_manifest_path),
-                        "--required_intervened_semantic_header_policy", "mask_ip_port",
+                        "--required_intervened_semantic_header_policy", args.intervened_embedding_header_policy,
                     ]
                 )
             run(test_command, args.dry_run)

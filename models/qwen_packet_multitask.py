@@ -39,6 +39,8 @@ class Tower1LossOutput:
     packet_logits: Optional[torch.Tensor]
     packet_embeddings: Optional[torch.Tensor]
     projected_embeddings: Optional[torch.Tensor]
+    paired_group_losses: Optional[torch.Tensor]
+    paired_group_counts: Optional[torch.Tensor]
 
 
 def last_token_pooling(hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
@@ -164,6 +166,8 @@ class QwenPacketMultiTaskModel(nn.Module):
         paired_cls_weight: float = 0.0,
         paired_logit_kl_weight: float = 0.5,
         paired_raw_consistency_weight: float = 1.0,
+        paired_consistency_mode: str = "symmetric",
+        paired_group_weights: Optional[torch.Tensor] = None,
     ) -> Tower1LossOutput:
         device = next(self.parameters()).device
         zero = torch.zeros((), device=device)
@@ -172,6 +176,8 @@ class QwenPacketMultiTaskModel(nn.Module):
         supcon_loss = zero
         flow_proto_loss = zero
         paired_consistency_loss = zero
+        paired_group_losses = None
+        paired_group_counts = None
         packet_logits = None
         packet_embeddings = None
         projected_embeddings = None
@@ -229,7 +235,7 @@ class QwenPacketMultiTaskModel(nn.Module):
                     paired_embeddings, paired_projected, paired_logits = self.encode_packets(
                         packet_batch["paired_input_ids"], packet_batch["paired_attention_mask"]
                     )
-                    paired_consistency_loss = paired_view_consistency_loss(
+                    paired_consistency_each = paired_view_consistency_loss(
                         projected_embeddings[paired_mask],
                         paired_projected[paired_mask],
                         packet_logits[paired_mask],
@@ -238,11 +244,49 @@ class QwenPacketMultiTaskModel(nn.Module):
                         raw_z=packet_embeddings[paired_mask],
                         paired_raw_z=paired_embeddings[paired_mask],
                         raw_consistency_weight=paired_raw_consistency_weight,
+                        consistency_mode=paired_consistency_mode,
+                        reduction="none",
                     )
+                    paired_ce_each = F.cross_entropy(
+                        paired_logits[paired_mask], labels[paired_mask], reduction="none"
+                    )
+                    paired_group_ids = packet_batch.get("paired_group_ids")
+                    if paired_group_weights is not None:
+                        if paired_group_ids is None:
+                            raise ValueError("paired GroupDRO requires paired_group_ids")
+                        group_ids = paired_group_ids[paired_mask].long()
+                        paired_group_losses, paired_group_counts = grouped_paired_risks(
+                            paired_consistency_each,
+                            paired_ce_each,
+                            group_ids,
+                            paired_group_weights.numel(),
+                            consistency_weight=paired_consistency_weight,
+                            cls_weight=cls_weight * paired_cls_weight,
+                        )
+                        paired_consistency_loss = active_group_objective(
+                            grouped_means(
+                                paired_consistency_each,
+                                group_ids,
+                                paired_group_weights.numel(),
+                            )[0],
+                            paired_group_counts,
+                            paired_group_weights,
+                        )
+                    else:
+                        paired_consistency_loss = paired_consistency_each.mean()
                     if paired_cls_weight > 0:
-                        paired_ce_each = F.cross_entropy(paired_logits[paired_mask], labels[paired_mask], reduction="none")
                         paired_weights = weights[paired_mask] if weights is not None else None
-                        if paired_weights is not None:
+                        if paired_group_weights is not None:
+                            paired_cls_loss = active_group_objective(
+                                grouped_means(
+                                    paired_ce_each,
+                                    group_ids,
+                                    paired_group_weights.numel(),
+                                )[0],
+                                paired_group_counts,
+                                paired_group_weights,
+                            )
+                        elif paired_weights is not None:
                             paired_cls_loss = (paired_ce_each * paired_weights).sum() / paired_weights.sum().clamp(min=1.0)
                         else:
                             paired_cls_loss = paired_ce_each.mean()
@@ -265,6 +309,8 @@ class QwenPacketMultiTaskModel(nn.Module):
             packet_logits,
             packet_embeddings,
             projected_embeddings,
+            paired_group_losses,
+            paired_group_counts,
         )
 
     def save_packet_heads(self, output_dir: str) -> None:
@@ -414,6 +460,8 @@ def paired_view_consistency_loss(
     raw_z: torch.Tensor | None = None,
     paired_raw_z: torch.Tensor | None = None,
     raw_consistency_weight: float = 1.0,
+    consistency_mode: str = "symmetric",
+    reduction: str = "mean",
 ) -> torch.Tensor:
     """Keep full-header and randomized/masked-header packet views close.
 
@@ -423,9 +471,14 @@ def paired_view_consistency_loss(
     """
     if z.numel() == 0:
         return logits.sum() * 0.0
+    if consistency_mode not in {"symmetric", "factual_teacher"}:
+        raise ValueError(f"unknown paired consistency mode: {consistency_mode}")
+    if reduction not in {"mean", "none"}:
+        raise ValueError(f"unknown paired consistency reduction: {reduction}")
     z = F.normalize(z.float(), p=2, dim=-1)
     paired_z = F.normalize(paired_z.float(), p=2, dim=-1)
-    rep_loss = (1.0 - (z * paired_z).sum(dim=-1)).mean()
+    target_z = z.detach() if consistency_mode == "factual_teacher" else z
+    rep_loss = 1.0 - (target_z * paired_z).sum(dim=-1)
     if (raw_z is None) != (paired_raw_z is None):
         raise ValueError("raw paired consistency requires both raw_z and paired_raw_z")
     if raw_consistency_weight < 0:
@@ -433,16 +486,71 @@ def paired_view_consistency_loss(
     if raw_z is not None and raw_consistency_weight > 0:
         raw_z = F.normalize(raw_z.float(), p=2, dim=-1)
         paired_raw_z = F.normalize(paired_raw_z.float(), p=2, dim=-1)
-        raw_loss = (1.0 - (raw_z * paired_raw_z).sum(dim=-1)).mean()
+        if consistency_mode == "factual_teacher":
+            raw_z = raw_z.detach()
+        raw_loss = 1.0 - (raw_z * paired_raw_z).sum(dim=-1)
         rep_loss = rep_loss + float(raw_consistency_weight) * raw_loss
     if logit_kl_weight <= 0:
-        return rep_loss
+        return rep_loss.mean() if reduction == "mean" else rep_loss
     p_log = F.log_softmax(logits.float(), dim=-1)
     q_log = F.log_softmax(paired_logits.float(), dim=-1)
     p = p_log.exp()
     q = q_log.exp()
-    kl = 0.5 * (
-        F.kl_div(p_log, q, reduction="batchmean")
-        + F.kl_div(q_log, p, reduction="batchmean")
+    if consistency_mode == "factual_teacher":
+        kl = F.kl_div(q_log, p.detach(), reduction="none").sum(dim=-1)
+    else:
+        kl = 0.5 * (
+            F.kl_div(p_log, q, reduction="none").sum(dim=-1)
+            + F.kl_div(q_log, p, reduction="none").sum(dim=-1)
+        )
+    loss = rep_loss + float(logit_kl_weight) * kl
+    return loss.mean() if reduction == "mean" else loss
+
+
+def grouped_means(
+    values: torch.Tensor, group_ids: torch.Tensor, num_groups: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if values.ndim != 1 or group_ids.shape != values.shape:
+        raise ValueError("grouped values and group IDs must be aligned vectors")
+    if ((group_ids < 0) | (group_ids >= num_groups)).any():
+        raise ValueError("paired intervention group ID is outside the configured range")
+    means = values.new_zeros(num_groups)
+    counts = values.new_zeros(num_groups)
+    for group in range(num_groups):
+        mask = group_ids == group
+        counts[group] = mask.sum()
+        if mask.any():
+            means[group] = values[mask].mean()
+    return means, counts
+
+
+def active_group_objective(
+    means: torch.Tensor, counts: torch.Tensor, group_weights: torch.Tensor
+) -> torch.Tensor:
+    active = counts > 0
+    if not active.any():
+        return means.sum() * 0.0
+    weights = group_weights.to(means).clamp_min(0)[active]
+    weights = weights / weights.sum().clamp_min(1e-12)
+    return (weights * means[active]).sum()
+
+
+def grouped_paired_risks(
+    consistency_each: torch.Tensor,
+    paired_ce_each: torch.Tensor,
+    group_ids: torch.Tensor,
+    num_groups: int,
+    *,
+    consistency_weight: float,
+    cls_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    consistency, counts = grouped_means(
+        consistency_each, group_ids, num_groups
     )
-    return rep_loss + float(logit_kl_weight) * kl
+    paired_ce, ce_counts = grouped_means(paired_ce_each, group_ids, num_groups)
+    if not torch.equal(counts, ce_counts):
+        raise ValueError("paired group risk components have inconsistent counts")
+    return (
+        float(consistency_weight) * consistency + float(cls_weight) * paired_ce,
+        counts,
+    )
