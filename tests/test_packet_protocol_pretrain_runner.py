@@ -2,6 +2,11 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from run_packet_level_pipeline import verify_paper_unified_evaluation_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,3 +129,127 @@ def test_byte_stage_wires_generated_checkpoint_into_packet_training(tmp_path):
     assert lines.index(pretrain_line) < lines.index(packet_line)
     assert f"--protocol_content_checkpoint {generated}" in packet_line
     assert "--content_group_loss_reduction group_mean" in packet_line
+
+
+def test_paper_unified_eval_only_builds_requested_split_and_never_trains(tmp_path):
+    artifact_root = tmp_path / "artifacts"
+    checkpoint_root = tmp_path / "checkpoints"
+    result = run_cli(
+        "--dataset",
+        "vpn-app",
+        "--fold",
+        "0",
+        "--stage",
+        "paper_unified_eval",
+        "--framework_profile",
+        "paper_unified",
+        "--prepared_splits",
+        "test",
+        "--eval_splits",
+        "test",
+        "--dry_run",
+        "--artifact_root",
+        str(artifact_root),
+        "--checkpoint_root",
+        str(checkpoint_root),
+    )
+
+    assert result.returncode == 0, result.stderr
+    commands = result.stdout
+    assert "preprocess_tower1.py" in commands
+    assert "--embedding_header_policy full" in commands
+    assert "--embedding_header_policy mask_ip_port" in commands
+    assert commands.count("extract_packet_embeddings_qwen.py") == 2
+    assert "test_packet_byte_transformer.py" in commands
+    assert "train_tower1_multitask.py" not in commands
+    assert "pretrain_native_flow_encoder.py" not in commands
+    assert "train_packet_byte_transformer.py" not in commands
+    assert "/train/packet_index.jsonl --output_dir" not in commands
+    assert "/valid/packet_index.jsonl --output_dir" not in commands
+
+    artifacts = artifact_root / "vpn-app" / "fold0"
+    assert not (artifacts / "packet_framework_manifest.json").exists()
+    eval_manifest = json.loads(
+        (artifacts / "packet_framework_manifest_evaluation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    notes = eval_manifest["framework"]["notes"]
+    assert eval_manifest["stage"] == "paper_unified_eval"
+    assert notes["prepared_splits"] == ["test"]
+    assert notes["eval_splits"] == ["test"]
+    assert notes["evaluation_source"]["status"] == "pending_dry_run_verification"
+    assert notes["completed"] is False
+
+
+def test_paper_unified_eval_requires_paper_profile(tmp_path):
+    result = run_cli(
+        "--dataset",
+        "vpn-app",
+        "--fold",
+        "0",
+        "--stage",
+        "paper_unified_eval",
+        "--framework_profile",
+        "legacy",
+        "--prepared_splits",
+        "test",
+        "--eval_splits",
+        "test",
+        "--dry_run",
+        "--artifact_root",
+        str(tmp_path / "artifacts"),
+        "--checkpoint_root",
+        str(tmp_path / "checkpoints"),
+    )
+
+    assert result.returncode != 0
+    assert "requires --framework_profile paper_unified" in result.stderr
+
+
+def test_paper_unified_eval_verifies_frozen_training_provenance(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    checkpoint = tmp_path / "checkpoints" / "vpn-app_fold0"
+    manifest = {
+        "dataset": "vpn-app",
+        "fold": 0,
+        "framework": {
+            "notes": {
+                "completed": True,
+                "framework_profile": "paper_unified",
+                "shared_core_method_sha256": "m" * 64,
+                "shared_core_config_sha256": "c" * 64,
+            }
+        },
+    }
+    artifacts.mkdir(parents=True)
+    (artifacts / "packet_framework_manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    required = (
+        checkpoint / "best" / "adapter" / "adapter_config.json",
+        checkpoint / "best" / "tower1_heads.pt",
+        checkpoint / "byte_transformer" / "best.pt",
+    )
+    for path in required:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"frozen")
+    args = SimpleNamespace(
+        dataset="vpn-app",
+        fold=0,
+        shared_core_method_sha256="m" * 64,
+        shared_core_config_sha256="c" * 64,
+    )
+
+    evidence = verify_paper_unified_evaluation_source(args, artifacts, checkpoint)
+    assert evidence["status"] == "pass"
+    assert evidence["training_manifest_sha256"]
+    assert set(evidence["checkpoints"]) == {
+        "tower1_adapter_config",
+        "tower1_heads",
+        "packet_classifier",
+    }
+
+    args.shared_core_config_sha256 = "different"
+    with pytest.raises(ValueError, match="matching completed run"):
+        verify_paper_unified_evaluation_source(args, artifacts, checkpoint)

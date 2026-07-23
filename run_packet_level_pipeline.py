@@ -249,6 +249,62 @@ def verify_reused_protocol_content_checkpoint(
     }
 
 
+def verify_paper_unified_evaluation_source(
+    args, artifacts: Path, checkpoint: Path
+) -> dict:
+    """Bind evaluation-only execution to one completed frozen training run."""
+    manifest_path = artifacts / "packet_framework_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"paper-unified evaluation requires a completed training manifest: {manifest_path}"
+        )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    notes = (payload.get("framework") or {}).get("notes") or {}
+    expected = {
+        "dataset": args.dataset,
+        "fold": args.fold,
+        "framework_profile": "paper_unified",
+        "shared_core_method_sha256": args.shared_core_method_sha256,
+        "shared_core_config_sha256": args.shared_core_config_sha256,
+    }
+    actual = {
+        "dataset": payload.get("dataset"),
+        "fold": payload.get("fold"),
+        "framework_profile": notes.get("framework_profile"),
+        "shared_core_method_sha256": notes.get("shared_core_method_sha256"),
+        "shared_core_config_sha256": notes.get("shared_core_config_sha256"),
+    }
+    mismatches = {
+        key: {"expected": value, "actual": actual.get(key)}
+        for key, value in expected.items()
+        if actual.get(key) != value
+    }
+    if notes.get("completed") is not True or mismatches:
+        raise ValueError(
+            "paper-unified evaluation source is not a matching completed run: "
+            f"completed={notes.get('completed')}, mismatches={mismatches}"
+        )
+    required = {
+        "tower1_adapter_config": checkpoint / "best" / "adapter" / "adapter_config.json",
+        "tower1_heads": checkpoint / "best" / "tower1_heads.pt",
+        "packet_classifier": checkpoint / "byte_transformer" / "best.pt",
+    }
+    missing = [str(path) for path in required.values() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "paper-unified evaluation source lacks frozen checkpoints: " + ", ".join(missing)
+        )
+    return {
+        "status": "pass",
+        "training_manifest": str(manifest_path),
+        "training_manifest_sha256": file_sha256(manifest_path),
+        "checkpoints": {
+            name: {"path": str(path), "sha256": file_sha256(path)}
+            for name, path in required.items()
+        },
+    }
+
+
 def semantic_embedding_command(
     args,
     *,
@@ -618,7 +674,7 @@ def write_framework_manifest(
                 "reuse_protocol_content_checkpoint": args.reuse_protocol_content_checkpoint,
                 "pretrain_protocol_content": (
                     (args.pretrain_protocol_content or args.stage == "protocol_pretrain")
-                    and args.stage != "shared_core_ablation"
+                    and args.stage not in {"shared_core_ablation", "paper_unified_eval"}
                 ),
                 "resolved_protocol_content_checkpoint": (
                     args.reuse_protocol_content_checkpoint
@@ -641,9 +697,13 @@ def write_framework_manifest(
                     "_protocol_content_reuse_evidence",
                     {
                         "status": "not_reused",
-                        "execution": "trained_in_current_pipeline"
-                        if args.pretrain_protocol_content
-                        else "externally_provided_or_disabled",
+                        "execution": (
+                            "reused_from_frozen_training_run"
+                            if args.stage == "paper_unified_eval"
+                            else "trained_in_current_pipeline"
+                            if args.pretrain_protocol_content
+                            else "externally_provided_or_disabled"
+                        ),
                     },
                 ),
                 "packet_model_checkpoint": str(
@@ -657,7 +717,7 @@ def write_framework_manifest(
                 "result_paths": [
                     str(artifacts / f"{split}_unified_packet_single_head.json")
                     for split in args.eval_splits
-                ] if args.stage == "paper_unified" else (
+                ] if args.stage in {"paper_unified", "paper_unified_eval"} else (
                     [
                         str(
                             artifacts
@@ -678,6 +738,9 @@ def write_framework_manifest(
                 "tower1_execution_evidence": tower1_execution_evidence(
                     tower1_checkpoint_dir,
                     tower1_training_contract(args, "packet-level"),
+                ),
+                "evaluation_source": getattr(
+                    args, "_paper_unified_evaluation_source", None
                 ),
                 "packet_module_training_source": "packet_task_train_split_packets",
                 "cross_task_trained_weights_reused": False,
@@ -717,6 +780,8 @@ def write_framework_manifest(
         ),
     }
     manifest_name = "packet_framework_manifest.json"
+    if args.stage == "paper_unified_eval":
+        manifest_name = "packet_framework_manifest_evaluation.json"
     if args.stage == "shared_core_ablation":
         fixed_suffix = "_fixed" if args.train_fixed_channel_fusion else ""
         risk_suffix = "_row_risk" if args.train_row_risk_ablation else ""
@@ -749,6 +814,7 @@ def main() -> None:
             "fusion",
             "packet_best",
             "paper_unified",
+            "paper_unified_eval",
             "shared_core_ablation",
             "train",
             "test",
@@ -1056,8 +1122,12 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--local_files_only", action="store_true")
     args = ap.parse_args()
-    if "train" not in args.prepared_splits or "valid" not in args.prepared_splits:
+    if args.stage != "paper_unified_eval" and (
+        "train" not in args.prepared_splits or "valid" not in args.prepared_splits
+    ):
         ap.error("--prepared_splits must include train and valid")
+    if args.stage == "paper_unified_eval" and args.framework_profile != "paper_unified":
+        ap.error("--stage paper_unified_eval requires --framework_profile paper_unified")
     missing_eval_splits = sorted(set(args.eval_splits) - set(args.prepared_splits))
     if missing_eval_splits:
         ap.error(
@@ -1361,12 +1431,21 @@ def main() -> None:
             artifacts / f"{split_name}_semantic_embeddings{suffix}.npy",
             artifacts / f"{split_name}_semantic_embeddings{suffix}_manifest.json",
         )
+    if args.stage == "paper_unified_eval":
+        args._paper_unified_evaluation_source = (
+            {
+                "status": "pending_dry_run_verification",
+                "training_manifest": str(artifacts / "packet_framework_manifest.json"),
+            }
+            if args.dry_run
+            else verify_paper_unified_evaluation_source(args, artifacts, checkpoint)
+        )
     write_framework_manifest(
         args, result_artifacts, train_dir, valid_dir, test_dir, profile_overrides,
         completed=False,
     )
 
-    if args.stage in {"preprocess", "paper_unified", "all"}:
+    if args.stage in {"preprocess", "paper_unified", "paper_unified_eval", "all"}:
         for split, input_dir, output_dir in (
             ("train", train_source, train_dir),
             ("valid", valid_source, valid_dir),
@@ -1399,7 +1478,7 @@ def main() -> None:
             else:
                 command.extend(["--label_map_in", str(label_map)])
             run(command, args.dry_run)
-            if args.stage == "paper_unified":
+            if args.stage in {"paper_unified", "paper_unified_eval"}:
                 intervention_command = [
                     sys.executable,
                     "preprocess_tower1.py",
@@ -1416,7 +1495,7 @@ def main() -> None:
                 ]
                 run(intervention_command, args.dry_run)
 
-    if args.stage in {"audit", "paper_unified", "all"}:
+    if args.stage in {"audit", "paper_unified", "paper_unified_eval", "all"}:
         audit_command = [
             sys.executable,
             "audit_packet_flow_split.py",
@@ -1459,8 +1538,9 @@ def main() -> None:
         )
         return
 
-    if args.stage == "paper_unified":
-        run(tower1_packet_train_command(), args.dry_run)
+    if args.stage in {"paper_unified", "paper_unified_eval"}:
+        if args.stage == "paper_unified":
+            run(tower1_packet_train_command(), args.dry_run)
         prepared_directories = {"train": train_dir, "valid": valid_dir, "test": test_dir}
         for split_name in args.prepared_splits:
             split_dir = prepared_directories[split_name]
@@ -1526,7 +1606,7 @@ def main() -> None:
             )
 
     if args.stage in {
-        "byte", "packet_best", "paper_unified", "shared_core_ablation", "all"
+        "byte", "packet_best", "paper_unified", "paper_unified_eval", "shared_core_ablation", "all"
     }:
         byte_checkpoint = checkpoint / "byte_transformer"
         ablation_tag = (
@@ -1590,7 +1670,7 @@ def main() -> None:
             byte_command.extend(
                 ["--protocol_content_checkpoint", str(resolved_protocol_content_checkpoint)]
             )
-        if args.stage in {"paper_unified", "shared_core_ablation"}:
+        if args.stage in {"paper_unified", "paper_unified_eval", "shared_core_ablation"}:
             train_cache, train_manifest = semantic_cache_paths("train")
             valid_cache, valid_manifest = semantic_cache_paths("valid")
             train_intervened_cache, train_intervened_manifest = semantic_cache_paths("train", True)
@@ -1646,13 +1726,14 @@ def main() -> None:
                     str(args.byte_invariant_blend_grid_size),
                 ]
             )
-        run(byte_command, args.dry_run)
+        if args.stage != "paper_unified_eval":
+            run(byte_command, args.dry_run)
         eval_directories = {"valid": valid_dir, "test": test_dir}
         for split_name in args.eval_splits:
             split_dir = eval_directories[split_name]
             output_stem = (
                 f"{split_name}_unified_packet_single_head"
-                if args.stage == "paper_unified"
+                if args.stage in {"paper_unified", "paper_unified_eval"}
                 else (
                     f"{split_name}_shared_core_{ablation_tag}"
                     if args.stage == "shared_core_ablation"
@@ -1675,7 +1756,7 @@ def main() -> None:
                     ),
                     "--batch_size", str(args.byte_eval_batch_size),
                 ]
-            if args.stage in {"paper_unified", "shared_core_ablation"}:
+            if args.stage in {"paper_unified", "paper_unified_eval", "shared_core_ablation"}:
                 cache_path, manifest_path = semantic_cache_paths(split_name)
                 intervened_cache_path, intervened_manifest_path = semantic_cache_paths(split_name, True)
                 test_command.extend(
