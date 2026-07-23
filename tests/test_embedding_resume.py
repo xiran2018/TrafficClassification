@@ -347,3 +347,63 @@ def test_post_tower1_resumes_both_views_and_shared_tower2(monkeypatch):
     assert ("tower2_preprocess", "intervened", "valid") in events
     assert ("tower2_train",) in events
     assert not any(event and event[0] == "tower1_train" for event in events)
+
+
+def test_post_tower1_eval_only_never_runs_a_training_stage(monkeypatch):
+    events = []
+    args = SimpleNamespace(
+        splits="test",
+        dry_run=False,
+        native_structural_suffix="",
+        native_checkpoint="",
+        paper_unified_stages="eval",
+    )
+    intervention_args = SimpleNamespace(view="intervened")
+
+    monkeypatch.setattr(
+        stage8,
+        "run_embedding_stage",
+        lambda current_args, split: events.append(
+            (
+                "embedding",
+                "intervened" if current_args is intervention_args else "factual",
+                split,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        stage8,
+        "tower1_preprocess_cmd",
+        lambda _args, split: ["intervention_preprocess", split],
+    )
+    monkeypatch.setattr(
+        stage8,
+        "tower2_preprocess_cmd",
+        lambda current_args, split: [
+            "tower2_preprocess",
+            "intervened" if current_args is intervention_args else "factual",
+            split,
+        ],
+    )
+    monkeypatch.setattr(
+        stage8,
+        "commands",
+        lambda stage_args: [["tower2_eval", stage_args.stage]],
+    )
+    monkeypatch.setattr(
+        stage8,
+        "run",
+        lambda cmd, dry_run=False: events.append(tuple(cmd)),
+    )
+
+    stage8.run_post_tower1_pipeline(args, intervention_args)
+
+    assert events == [
+        ("embedding", "factual", "test"),
+        ("intervention_preprocess", "test"),
+        ("embedding", "intervened", "test"),
+        ("tower2_preprocess", "factual", "test"),
+        ("tower2_preprocess", "intervened", "test"),
+        ("tower2_eval", "eval"),
+    ]
+    assert not any("train" in item for event in events for item in event)
