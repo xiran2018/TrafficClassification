@@ -348,7 +348,55 @@ def endpoint_features(metas: List[Dict[str, Any]], buckets: int = 256) -> List[f
     return feats
 
 
+def protocol_payload_prefix(meta: Dict[str, Any], limit: int = 8) -> List[int]:
+    """Extract payload bytes while excluding IP and transport header fields."""
+    raw = parse_hex_prefix(meta.get("l3_hex_prefix", ""))
+    ip_header_len = max(int(meta.get("ip_header_len", 0) or 0), 0)
+    if not raw or ip_header_len <= 0:
+        return []
+    l4 = str(meta.get("l4", "")).upper()
+    if l4 == "TCP":
+        transport_header_len = max(int(meta.get("tcp_data_offset", 0) or 0), 0)
+        if transport_header_len <= 0:
+            return []
+    elif l4 == "UDP":
+        transport_header_len = 8
+    else:
+        transport_header_len = 0
+    start = min(ip_header_len + transport_header_len, len(raw))
+    declared = max(int(meta.get("payload_prefix_len", 0) or 0), 0)
+    available = min(declared, max(len(raw) - start, 0), limit)
+    return raw[start : start + available]
+
+
+def protocol_closed_payload_features(
+    metas: List[Dict[str, Any]], prefix_len: int, bytes_per_packet: int = 8
+) -> List[float]:
+    feats: List[float] = []
+    histogram = np.zeros(16, dtype=np.float64)
+    total_bytes = 0
+    for index in range(prefix_len):
+        payload = (
+            protocol_payload_prefix(metas[index], bytes_per_packet)
+            if index < len(metas)
+            else []
+        )
+        feats.extend([value / 255.0 for value in payload])
+        feats.extend([0.0] * (bytes_per_packet - len(payload)))
+        feats.append(len(payload) / max(bytes_per_packet, 1))
+        for value in payload:
+            histogram[min(value // 16, 15)] += 1.0
+            total_bytes += 1
+    if total_bytes:
+        histogram /= total_bytes
+    feats.extend(histogram.tolist())
+    return feats
+
+
 def flow_features(row: Dict[str, Any], max_packets: int, prefix_len: int, use_ports: bool, feature_version: str = "basic") -> List[float]:
+    protocol_closed = feature_version in {"protocol_closed", "protocol_closed_payload"}
+    if protocol_closed and use_ports:
+        raise ValueError("protocol_closed flow features cannot include ports")
     metas = list(row.get("packet_metas", []))[:max_packets]
     feats: List[float] = [math.log1p(len(metas))]
     if not metas:
@@ -384,7 +432,8 @@ def flow_features(row: Dict[str, Any], max_packets: int, prefix_len: int, use_po
     feats.extend(hist(lengths, [64, 128, 256, 512, 768, 1024, 1280, 1514]))
     feats.extend(hist(payloads, [1, 16, 64, 128, 256, 512, 1024, 1400]))
     feats.extend(hist([math.log1p(x) for x in iats], [0.0001, 0.001, 0.01, 0.1, 1.0, 5.0]))
-    feats.extend(stats(ttl))
+    if not protocol_closed:
+        feats.extend(stats(ttl))
 
     flag_counts = Counter()
     for m in metas:
@@ -402,13 +451,15 @@ def flow_features(row: Dict[str, Any], max_packets: int, prefix_len: int, use_po
         else:
             feats.extend([0.0, 0.0, 0.0, 0.0])
 
-    if feature_version in {"message", "message_header", "message_header_endpoint", "message_header_fullbytes"}:
+    if feature_version in {"protocol_closed", "protocol_closed_payload", "message", "message_header", "message_header_endpoint", "message_header_fullbytes"}:
         feats.extend(message_features(dirs, lengths, payloads, iats, entropies))
+    if feature_version == "protocol_closed_payload":
+        feats.extend(protocol_closed_payload_features(metas, prefix_len))
     if feature_version in {"message_header", "message_header_endpoint", "message_header_fullbytes"}:
         feats.extend(header_features(metas, dirs, prefix_len, full_byte_sketch=feature_version == "message_header_fullbytes"))
     if feature_version == "message_header_endpoint":
         feats.extend(endpoint_features(metas))
-    elif feature_version not in {"basic", "message", "message_header", "message_header_fullbytes"}:
+    elif feature_version not in {"basic", "protocol_closed", "protocol_closed_payload", "message", "message_header", "message_header_fullbytes"}:
         raise ValueError(f"Unknown feature_version: {feature_version}")
 
     if use_ports:
@@ -579,11 +630,26 @@ def main() -> None:
     ap.add_argument("--max_packets", type=int, default=64)
     ap.add_argument("--prefix_len", type=int, default=32)
     ap.add_argument("--use_ports", action="store_true")
-    ap.add_argument("--feature_version", choices=["basic", "message", "message_header", "message_header_endpoint", "message_header_fullbytes"], default="basic")
+    ap.add_argument(
+        "--feature_version",
+        choices=[
+            "basic",
+            "protocol_closed",
+            "protocol_closed_payload",
+            "message",
+            "message_header",
+            "message_header_endpoint",
+            "message_header_fullbytes",
+        ],
+        default="basic",
+    )
     ap.add_argument("--select_metric", choices=["accuracy", "macro_f1"], default="macro_f1")
     ap.add_argument("--output_json", default="")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+
+    if args.feature_version in {"protocol_closed", "protocol_closed_payload"} and args.use_ports:
+        ap.error("protocol-closed feature versions cannot be combined with --use_ports")
 
     x_train, y_train, _ = load_split(args.train_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
     x_valid, y_valid, valid_fids = load_split(args.valid_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)

@@ -24,8 +24,9 @@ The current VPN Flow milestone replaces validation-only selector searches with
 one learned, dataset-agnostic expert topology:
 
 1. every fold trains the same Qwen/Tower1 semantic expert;
-2. every fold trains the same protocol-structural forest expert over packet
-   length, direction, IAT, burst/message, and shortcut-controlled header fields;
+2. every fold trains the same protocol-closed structural forest expert over
+   packet length, direction, IAT, payload entropy, L4 flags, and burst/message
+   structure, while excluding IP, port, TTL, sequence, and header-byte fields;
 3. `train_cross_environment_reliability_router.py` learns one class-aware router
    from complete expert distributions, uncertainty, agreement, and JS conflict;
 4. GroupDRO optimizes the worst validation environment, while
@@ -48,12 +49,24 @@ Frozen VPN Flow Test results on the shared 1,672-flow test split:
 | candidate | accuracy | macro-F1 |
 |---|---:|---:|
 | strict unified semantic fold consensus | 0.6477 | 0.6120 |
-| rich structural fold consensus | 0.6657 | 0.6278 |
-| cross-environment reliability router | 0.6854 | 0.6436 |
-| router + bounded OOF-selected prior transport | **0.6950** | **0.6738** |
+| protocol-closed structural fold consensus | 0.6172 | 0.5880 |
+| **protocol-closed reliability router (validation-selected main)** | **0.6633** | **0.6221** |
+| protocol-closed payload-byte router (rejected ablation) | 0.6669 | 0.6240 |
+| header/port structural fold consensus (specialized diagnostic) | 0.6657 | 0.6278 |
+| header/port router + bounded prior (specialized upper bound) | 0.6950 | 0.6738 |
 | SWEET VPN Flow reference | 0.6920 | 0.6220 |
 
-The final result is stored outside the repository's large-artifact boundary at
+The protocol-closed result is stored outside the repository's large-artifact
+boundary at
+`/tmp/two_tower_runs/pcfrr_v1_results/vpn_flow_protocol_closed_reliability_router.json`.
+It automatically selects zero prior transport. Its mean LOEO Macro-F1 is
+`0.6315`, compared with `0.6282` for the same deterministic router using the
+header/port expert. Adding eight header-stripped payload bytes per packet raises
+the Test point estimate slightly but lowers mean LOEO Macro-F1 to `0.6275`, so
+it is not promoted. The protocol-closed main reaches the SWEET Macro-F1 but is
+`2.87` accuracy points lower; this limitation must remain explicit.
+
+The previous specialized result is stored at
 `/tmp/two_tower_runs/pcfrr_v1_results/vpn_flow_cross_environment_reliability_router_safe_prior.json`.
 Its pre-transfer ECE is `0.0440`; bounded prior transport lowers ECE to `0.0321`.
 The selected strength is restricted to `[0, 0.30]` and selected from pooled
@@ -96,6 +109,11 @@ rerun the router with all three Qwen plus native-byte shared-core Packet folds.
 The milestone artifact is
 `/tmp/two_tower_runs/pcfrr_v1_results/tls120_packet_cross_environment_reliability_router_safe_prior.json`.
 
+The Qwen/native shared-core rerun is in progress. Fold 0 already covers all
+`553,994` strict one-packet Test rows and obtains `0.8605` accuracy / `0.8358`
+Macro-F1; its validation result is `0.8480/0.8467`. The final comparison is
+withheld until folds 1/2 and the identical protocol-closed router complete.
+
 Frozen VPN Packet Test results on the shared 111,678-packet test split:
 
 | candidate | accuracy | macro-F1 |
@@ -127,6 +145,12 @@ difference is statistically conclusive. The main designation follows the
 held-out LOEO result and the anti-shortcut method contract, not Test
 preference. The raw-header rows are retained only to quantify the specialized
 environment upper bound.
+
+For the protocol-closed paper-main result, a separate 5,000-sample
+class-stratified flow-cluster bootstrap gives Accuracy 95% CI
+`[0.8759,0.9348]` and Macro-F1 95% CI `[0.7522,0.8520]`. These wider intervals
+correctly reflect that several VPN classes contain only 12-18 independent Test
+flows despite contributing many packet rows.
 
 No target-prior transport is used for either Packet result. Router training is
 fixed to CPU for deterministic reproduction. Routed NPZ files retain exact
@@ -162,7 +186,7 @@ Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 500 passed
+pytest: 505 passed
 ```
 
 ---
