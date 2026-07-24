@@ -141,13 +141,15 @@ Strict one-packet TLS-120 routing milestone on 553,994 Test packets:
 | cross-environment reliability router | **0.8692** | **0.8429** |
 | unsafe target-weighted prior selection (negative ablation) | 0.8678 | 0.8217 |
 
-The shared LOEO Macro-F1 plateau rule automatically selects prior strength
-`0.30` for VPN Flow, `0.05` for TLS-120 Flow, and `0.00` for TLS-120 Packet.
-The Packet result obeys one-packet inference and validates reuse of the expert
-slot and routing algorithm. It is not yet the final cross-task shared-core
-claim: these existing TLS packet probabilities use a local Byte Transformer,
-whereas the Flow semantic slot uses Qwen/Tower1. The final paper matrix must
-rerun the router with all three Qwen plus native-byte shared-core Packet folds.
+This earlier milestone used a LOEO Macro-F1 plateau rule to select prior
+strength. It selected `0.00` for TLS-120 Packet, so the reported Packet result
+does not use Test-prior transport. The current paper method removes prior
+transport entirely and uses pooled cross-environment ERM for every task. The
+Packet result obeys one-packet inference and validates reuse of the expert slot
+and routing algorithm. It is not yet the final cross-task shared-core claim:
+these existing TLS packet probabilities use a local Byte Transformer, whereas
+the Flow semantic slot uses Qwen/Tower1. The final paper matrix must rerun the
+router with all three Qwen plus native-byte shared-core Packet folds.
 The milestone artifact is
 `/tmp/two_tower_runs/pcfrr_v1_results/tls120_packet_cross_environment_reliability_router_safe_prior.json`.
 
@@ -162,7 +164,7 @@ Frozen VPN Packet Test results on the shared 111,678-packet test split:
 |---|---:|---:|
 | Qwen/native shared-core packet-head consensus | 0.8790 | 0.7653 |
 | protocol-closed structural consensus | 0.8511 | 0.7325 |
-| **protocol-closed reliability router (paper main)** | **0.9085** | **0.8229** |
+| **protocol-closed simple reliability router (paper main)** | **0.9102** | **0.8264** |
 | raw-header structural consensus (shortcut diagnostic) | 0.9070 | 0.8222 |
 | raw-header reliability router (specialized upper bound) | 0.9122 | 0.8143 |
 
@@ -172,33 +174,42 @@ alignment; row-order fallback is rejected whenever either slot supplies
 explicit identities. The paper-main structural expert masks IP addresses,
 ports, IPv4 identification/TTL/checksum, IPv6 flow label/hop limit, transport
 checksums, TCP sequence/acknowledgement numbers, and inferred direction. The
-router raises accuracy by `+0.0295` and Macro-F1 by `+0.0576` over the
+router raises accuracy by `+0.0312` and Macro-F1 by `+0.0611` over the
 shared-core packet-head consensus, while lowering ECE from `0.0482` to
-`0.0132`. Its mean Test structural gate is only `0.0792`, so the weaker
+`0.0104`. Its mean Test structural gate is only `0.0828`, so the weaker
 protocol-closed expert acts as selective residual evidence rather than a
 replacement classifier.
 
-Selection is validation-only: the protocol-closed router obtains pooled LOEO
-`0.8206/0.8192` accuracy/Macro-F1 versus `0.8152/0.8126` for the raw-header
-router. On Test, masking trades `-0.0038` accuracy for `+0.0086` Macro-F1. A
-5,000-sample paired flow-cluster bootstrap gives 95% intervals
-`[-0.0098,+0.0017]` and `[-0.0055,+0.0246]`, respectively, so neither Test
-difference is statistically conclusive. The main designation follows the
-held-out LOEO result and the anti-shortcut method contract, not Test
-preference. The raw-header rows are retained only to quantify the specialized
-environment upper bound.
+Selection is validation-only: under the same simple router objective, the
+protocol-closed router obtains pooled LOEO `0.8203/0.8191`
+accuracy/Macro-F1 versus approximately `0.8150/0.8124` for the raw-header
+router. Its paper-main designation follows the held-out LOEO result and the
+anti-shortcut method contract, not Test preference. The raw-header rows are
+retained only to quantify the specialized-environment upper bound.
+
+An earlier regularized masked-versus-raw ablation gave Test Accuracy and
+Macro-F1 differences of `-0.0038` and `+0.0086`. A 5,000-sample paired
+flow-cluster bootstrap gave 95% intervals `[-0.0098,+0.0017]` and
+`[-0.0055,+0.0246]`, respectively, so neither difference was statistically
+conclusive. It is retained as a historical anti-shortcut ablation and is not
+used to select the current simple router objective.
 
 For the protocol-closed paper-main result, a separate 5,000-sample
 class-stratified flow-cluster bootstrap gives Accuracy 95% CI
-`[0.8759,0.9348]` and Macro-F1 95% CI `[0.7522,0.8520]`. These wider intervals
+`[0.8778,0.9358]` and Macro-F1 95% CI `[0.7540,0.8538]`. These wider intervals
 correctly reflect that several VPN classes contain only 12-18 independent Test
-flows despite contributing many packet rows.
+flows despite contributing many packet rows. The exact tracked report is
+`paper_evidence/vpn_packet_simple_router_flow_cluster_bootstrap_20260724.json`.
 
 No target-prior transport is used for either Packet result. Router training is
 fixed to CPU for deterministic reproduction. Routed NPZ files retain exact
 `packet_uid` and `flow_ids`, and JSON reports record SHA-256 provenance for
-every expert input and routed output. The paper-main artifact is
-`/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_masked_structural_reliability_router.json`.
+every expert input and routed output. The paper-main artifacts are
+`/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_masked_structural_simple_router.json`
+and its aligned NPZ. Relative to the regularized protocol-closed router, pooled
+LOEO Macro-F1 changes only from `0.81916` to `0.81908`, while Test Accuracy,
+Macro-F1, and ECE all improve. This supports the same simple router objective
+for Packet and Flow rather than retaining task-specific regularization.
 
 VPN Packet router regularization ablation, using the shortcut-sensitive
 raw-header expert artifacts:
@@ -228,7 +239,7 @@ Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 512 passed
+pytest: 514 passed
 ```
 
 ---

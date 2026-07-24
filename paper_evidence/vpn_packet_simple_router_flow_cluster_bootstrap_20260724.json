@@ -1,0 +1,48 @@
+{
+  "method": "class_stratified_flow_cluster_bootstrap",
+  "task": "packet",
+  "num_samples": 111678,
+  "num_flow_clusters": 6681,
+  "num_classes": 16,
+  "clusters_per_class": {
+    "0": 16,
+    "1": 177,
+    "2": 1161,
+    "3": 18,
+    "4": 37,
+    "5": 2916,
+    "6": 12,
+    "7": 55,
+    "8": 339,
+    "9": 126,
+    "10": 1345,
+    "11": 42,
+    "12": 70,
+    "13": 72,
+    "14": 162,
+    "15": 133
+  },
+  "bootstrap_samples": 5000,
+  "seed": 42,
+  "metrics": {
+    "accuracy": {
+      "point_estimate": 0.9101524024427372,
+      "bootstrap_mean": 0.9097117638260348,
+      "bootstrap_95_ci": [
+        0.8777500226404904,
+        0.9358127216816315
+      ],
+      "bootstrap_std": 0.014989847890957324
+    },
+    "macro_f1": {
+      "point_estimate": 0.826364049464363,
+      "bootstrap_mean": 0.8100207029511918,
+      "bootstrap_95_ci": [
+        0.753964484866603,
+        0.8538434310908336
+      ],
+      "bootstrap_std": 0.02565020770869041
+    }
+  },
+  "source_probability_artifact": "/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_masked_structural_simple_router.npz"
+}

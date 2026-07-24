@@ -1,0 +1,66 @@
+{
+  "schema": "cross_task_reliability_router_simplification_v1",
+  "date": "2026-07-24",
+  "selected_protocol": {
+    "objective": "pooled_cross_environment_cross_entropy",
+    "groupdro_eta": 0.0,
+    "gate_entropy_weight": 0.0,
+    "target_prior_max_strength": 0.0,
+    "selection_basis": "cross-dataset LOEO plus simplicity; Test is report-only"
+  },
+  "vpn_flow": {
+    "regularized": {
+      "loeo_accuracy_mean": 0.6268939393939394,
+      "loeo_macro_f1_mean": 0.6206028450587607,
+      "test_accuracy": 0.6836124401913876,
+      "test_macro_f1": 0.6522847810404823
+    },
+    "simple": {
+      "loeo_accuracy_mean": 0.631628787878788,
+      "loeo_macro_f1_mean": 0.6231195220276597,
+      "test_accuracy": 0.6854066985645934,
+      "test_macro_f1": 0.6548266415469022
+    }
+  },
+  "tls_120_flow_provisional": {
+    "regularized": {
+      "loeo_accuracy_mean": 0.7510853835021707,
+      "loeo_macro_f1_mean": 0.7424077810579268,
+      "test_accuracy": 0.8749783399757408,
+      "test_macro_f1": 0.8607858738209264
+    },
+    "simple": {
+      "loeo_accuracy_mean": 0.7492522913651712,
+      "loeo_macro_f1_mean": 0.7403393840759679,
+      "test_accuracy": 0.8763645815283313,
+      "test_macro_f1": 0.8625066022957344
+    }
+  },
+  "vpn_packet": {
+    "regularized": {
+      "loeo_accuracy_mean": 0.8205731946536966,
+      "loeo_macro_f1_mean": 0.8191596468311996,
+      "test_accuracy": 0.908477945521947,
+      "test_macro_f1": 0.8228720268015579,
+      "test_ece": 0.013222346529001696
+    },
+    "simple": {
+      "loeo_accuracy_mean": 0.8203283221978769,
+      "loeo_macro_f1_mean": 0.8190837401120338,
+      "test_accuracy": 0.9101524024427372,
+      "test_macro_f1": 0.826364049464363,
+      "test_ece": 0.010403109238408714,
+      "flow_cluster_bootstrap_samples": 5000,
+      "num_test_flow_clusters": 6681,
+      "test_accuracy_ci95": [
+        0.8777500226404904,
+        0.9358127216816315
+      ],
+      "test_macro_f1_ci95": [
+        0.753964484866603,
+        0.8538434310908336
+      ],
+      "bootstrap_artifact": "paper_evidence/vpn_packet_simple_router_flow_cluster_bootstrap_20260724.json"
+    }
+  }
+}
