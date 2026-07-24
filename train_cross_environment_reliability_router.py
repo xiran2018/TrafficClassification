@@ -3,8 +3,10 @@
 
 Each environment exposes the same two expert slots: a semantic neural expert and
 a protocol-structural expert. The router is trained once over all environments
-with GroupDRO and is then applied independently before fixed cross-environment
-log-mean aggregation. Test labels are used only for the final report.
+with pooled empirical risk and is then applied independently before fixed
+cross-environment log-mean aggregation. Test labels are used only for the final
+report. GroupDRO, gate-entropy regularization, and target-prior transport remain
+available as ablations but are disabled by default.
 """
 from __future__ import annotations
 
@@ -505,8 +507,8 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--lr", type=float, default=3e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
-    parser.add_argument("--groupdro_eta", type=float, default=0.05)
-    parser.add_argument("--gate_entropy_weight", type=float, default=0.01)
+    parser.add_argument("--groupdro_eta", type=float, default=0.0)
+    parser.add_argument("--gate_entropy_weight", type=float, default=0.0)
     parser.add_argument(
         "--prior_max_strength",
         type=float,

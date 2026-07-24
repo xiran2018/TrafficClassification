@@ -15,6 +15,20 @@
     "uses_ports": false,
     "uses_header_bytes": false
   },
+  "router_training": {
+    "objective": "pooled_cross_environment_cross_entropy",
+    "groupdro_eta": 0.0,
+    "gate_entropy_weight": 0.0,
+    "target_prior_max_strength": 0.0,
+    "consensus": "fixed_log_mean"
+  },
+  "router_simplification_ablation": {
+    "full_groupdro_entropy_pooled_loeo_accuracy": 0.688989661448055,
+    "full_groupdro_entropy_pooled_loeo_macro_f1": 0.6815053130583437,
+    "simple_pooled_loeo_accuracy": 0.6904405396219796,
+    "simple_pooled_loeo_macro_f1": 0.6817294530518138,
+    "decision": "remove GroupDRO, gate entropy, and target-prior transport from paper main"
+  },
   "vpn_app": {
     "test_flows": 1672,
     "single_fold": [
@@ -27,18 +41,18 @@
       "macro_f1": 0.5986107287301259
     },
     "fixed_structural_reliability_router": {
-      "accuracy": 0.6836124401913876,
-      "macro_f1": 0.6522847810404823,
+      "accuracy": 0.6854066985645934,
+      "macro_f1": 0.6548266415469022,
       "prior_strength": 0.0
     },
     "router_mechanism": {
-      "semantic_wrong_gate_mean": 0.41357530266552534,
-      "semantic_correct_gate_mean": 0.3873638599644202,
-      "structural_only_correct_gate_mean": 0.5112443709612657,
-      "semantic_only_correct_gate_mean": 0.392538742177296,
-      "rescues": 130,
-      "harms": 72,
-      "net_rescues": 58
+      "semantic_wrong_gate_mean": 0.43717724587243745,
+      "semantic_correct_gate_mean": 0.3826600820900034,
+      "structural_only_correct_gate_mean": 0.559615192177298,
+      "semantic_only_correct_gate_mean": 0.4067772220299126,
+      "rescues": 131,
+      "harms": 70,
+      "net_rescues": 61
     },
     "sweet_reference": {"accuracy": 0.692, "macro_f1": 0.622}
   },
@@ -60,19 +74,19 @@
       "macro_f1": 0.7059406652330353
     },
     "fixed_structural_reliability_router_provisional": {
-      "accuracy": 0.8749783399757408,
-      "macro_f1": 0.8607858738209264,
+      "accuracy": 0.8763645815283313,
+      "macro_f1": 0.8625066022957344,
       "prior_strength": 0.0,
       "final_status": "awaiting identical frozen shared-core semantic inputs"
     },
     "router_mechanism": {
-      "semantic_wrong_gate_mean": 0.40570892055443747,
-      "semantic_correct_gate_mean": 0.13348013278884824,
-      "structural_only_correct_gate_mean": 0.5475653058057413,
-      "semantic_only_correct_gate_mean": 0.13405505453232475,
-      "rescues": 869,
-      "harms": 219,
-      "net_rescues": 650
+      "semantic_wrong_gate_mean": 0.4056084804748184,
+      "semantic_correct_gate_mean": 0.1337952906429737,
+      "structural_only_correct_gate_mean": 0.5463943897029132,
+      "semantic_only_correct_gate_mean": 0.12603192919492134,
+      "rescues": 873,
+      "harms": 207,
+      "net_rescues": 666
     },
     "sweet_reference": {"accuracy": 0.713, "macro_f1": 0.681}
   }
