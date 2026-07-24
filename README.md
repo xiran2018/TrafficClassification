@@ -186,7 +186,7 @@ Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 505 passed
+pytest: 506 passed
 ```
 
 ---
