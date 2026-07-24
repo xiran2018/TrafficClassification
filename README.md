@@ -34,6 +34,13 @@ one learned, dataset-agnostic expert topology:
    transport; and
 5. routed fold predictions use a fixed log-mean consensus.
 
+The paper-facing packet structural expert is fixed to one 200-tree random
+forest with a 64-byte prefix and `min_samples_leaf=1`; it is no longer selected
+from an estimator/prefix grid per dataset. This configuration independently won
+held-out validation in all three VPN folds, all three TLS-120 folds, and the
+USTC-app development fold. The broader grid is retained only as selection and
+ablation evidence.
+
 The router contains no VPN class names or dataset-specific expert branches.
 Datasets train independent numerical parameters, while retaining the same
 semantic/structural slots, router features, GroupDRO objective, and bounded

@@ -1627,10 +1627,13 @@ def main() -> None:
             if paper_structural:
                 feature_command.extend(
                     [
-                        "--byte_prefix_len", "32", "64", "128",
-                        "--min_samples_leaf", "1", "2",
+                        # Frozen after the same configuration won validation in
+                        # all VPN/TLS folds and the USTC-app development fold.
+                        # Paper runs train parameters, not an expert family grid.
+                        "--byte_prefix_len", "64",
+                        "--min_samples_leaf", "1",
                         "--n_estimators", "200",
-                        "--estimator_types", "extra_trees", "random_forest",
+                        "--estimator_types", "random_forest",
                         "--mask_session_fields",
                     ]
                 )
