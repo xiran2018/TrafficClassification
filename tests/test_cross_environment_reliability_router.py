@@ -1,6 +1,7 @@
 import numpy as np
 
 from train_cross_environment_reliability_router import (
+    aligned_packet_flow_ids,
     aligned_test_consensus,
     aligned_split,
     input_provenance,
@@ -115,9 +116,21 @@ def test_save_packet_probabilities_preserves_exact_identities(tmp_path):
         np.asarray([[0.8, 0.2], [0.1, 0.9]], dtype=np.float32),
         np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
         ["flow-a_0", "flow-b_0"],
+        np.asarray([17, 29]),
     )
     with np.load(path, allow_pickle=False) as payload:
         assert payload["packet_uids"].tolist() == ["flow-a_0", "flow-b_0"]
+        assert payload["flow_ids"].tolist() == [17, 29]
+
+
+def test_aligned_packet_flow_ids_uses_packet_identity(tmp_path):
+    path = tmp_path / "packet.npz"
+    np.savez(
+        path,
+        packet_uids=np.asarray(["p1", "p0"]),
+        flow_ids=np.asarray([11, 7]),
+    )
+    assert aligned_packet_flow_ids(path, ["p0", "p1"]).tolist() == [7, 11]
 
 
 def test_load_packet_environment_rejects_expert_label_mismatch(tmp_path):

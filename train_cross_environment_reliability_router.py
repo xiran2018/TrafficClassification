@@ -69,16 +69,39 @@ def save_packet_probabilities(
     probability: np.ndarray,
     gate_weights: np.ndarray,
     packet_uids: list[str],
+    flow_ids: np.ndarray | None = None,
 ) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        output_path,
-        y_true=y_true,
-        probabilities=probability.astype(np.float32),
-        structural_gate=gate_weights.astype(np.float32),
-        packet_uids=np.asarray(packet_uids),
-    )
+    arrays = {
+        "y_true": y_true,
+        "probabilities": probability.astype(np.float32),
+        "structural_gate": gate_weights.astype(np.float32),
+        "packet_uids": np.asarray(packet_uids),
+    }
+    if flow_ids is not None:
+        arrays["flow_ids"] = np.asarray(flow_ids)
+    np.savez(output_path, **arrays)
+
+
+def aligned_packet_flow_ids(path: str | Path, packet_uids: list[str]) -> np.ndarray | None:
+    """Return flow clusters aligned by packet identity when the expert exports them."""
+    with np.load(path, allow_pickle=False) as payload:
+        if "flow_ids" not in payload:
+            return None
+        if "packet_uids" not in payload:
+            raise ValueError(f"{path}: flow_ids require packet_uids for safe alignment")
+        source_packet_uids = [str(value) for value in payload["packet_uids"]]
+        source_flow_ids = np.asarray(payload["flow_ids"])
+    if len(source_packet_uids) != len(source_flow_ids):
+        raise ValueError(f"{path}: packet_uids/flow_ids length mismatch")
+    index = {packet_uid: row for row, packet_uid in enumerate(source_packet_uids)}
+    if len(index) != len(source_packet_uids):
+        raise ValueError(f"{path}: duplicate packet_uids")
+    missing = [packet_uid for packet_uid in packet_uids if packet_uid not in index]
+    if missing:
+        raise ValueError(f"{path}: misses {len(missing)} packet identities")
+    return source_flow_ids[[index[packet_uid] for packet_uid in packet_uids]]
 
 
 def normalize_prob(values: Any) -> np.ndarray:
@@ -626,6 +649,18 @@ def main() -> None:
             }
         )
     else:
+        packet_flow_ids = [
+            aligned_packet_flow_ids(spec[2], flow_ids) for spec in environment_specs
+        ]
+        available_groups = [value for value in packet_flow_ids if value is not None]
+        if available_groups and len(available_groups) != len(packet_flow_ids):
+            raise ValueError("packet flow-id availability differs across environments")
+        if available_groups and any(
+            not np.array_equal(available_groups[0], value)
+            for value in available_groups[1:]
+        ):
+            raise ValueError("packet flow ids differ across environments")
+        aligned_flow_ids = available_groups[0] if available_groups else None
         probability_path = (
             Path(args.output_npz)
             if args.output_npz
@@ -637,6 +672,7 @@ def main() -> None:
             probability,
             gate_weights,
             flow_ids,
+            aligned_flow_ids,
         )
         payload.update(
             {

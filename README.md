@@ -134,11 +134,21 @@ These differences are too small to claim a material VPN benefit. The final
 objective will therefore be selected only after the identical TLS-120
 shared-core evaluation; Test fluctuations alone do not select the paper model.
 
+A 5,000-sample, class-stratified paired bootstrap resampling complete flow
+clusters compares the router against structural log-mean consensus. The router
+accuracy delta is `+0.0052` with 95% CI `[-0.0060, +0.0154]`; its Macro-F1
+delta is `-0.0079` with 95% CI `[-0.0277, +0.0169]`. Both intervals cross zero.
+Accordingly, the VPN result supports a higher point-estimate accuracy and
+better calibration, but not a statistically significant superiority claim.
+The routed Packet NPZ preserves both `packet_uid` and `flow_ids`, so confidence
+intervals do not incorrectly treat correlated packets from one flow as
+independent samples.
+
 Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 499 passed
+pytest: 500 passed
 ```
 
 ---
