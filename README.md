@@ -41,6 +41,13 @@ held-out validation in all three VPN folds, all three TLS-120 folds, and the
 USTC-app development fold. The broader grid is retained only as selection and
 ablation evidence.
 
+The paper-facing Flow structural expert is likewise frozen across datasets:
+`ExtraTrees(max_depth=16, min_samples_leaf=2, class_weight="balanced")` over
+the same protocol-closed feature contract, using at most 64 packets and no
+header-byte prefix. Its topology was selected once from the pooled VPN
+three-fold validation reports and then transferred unchanged to TLS-120. TLS
+validation and Test labels did not select its estimator or hyperparameters.
+
 The router contains no VPN class names or dataset-specific expert branches.
 Datasets train independent numerical parameters, while retaining the same
 semantic/structural slots, router features, GroupDRO objective, and bounded
@@ -56,8 +63,9 @@ Frozen VPN Flow Test results on the shared 1,672-flow test split:
 | candidate | accuracy | macro-F1 |
 |---|---:|---:|
 | strict unified semantic fold consensus | 0.6477 | 0.6120 |
-| protocol-closed structural fold consensus | 0.6172 | 0.5880 |
-| **protocol-closed reliability router (validation-selected main)** | **0.6633** | **0.6221** |
+| fixed protocol-closed structural fold consensus | 0.6268 | 0.5986 |
+| per-fold grid structural router (superseded ablation) | 0.6633 | 0.6221 |
+| **fixed protocol-closed reliability router (paper main)** | **0.6836** | **0.6523** |
 | protocol-closed payload-byte router (rejected ablation) | 0.6669 | 0.6240 |
 | header/port structural fold consensus (specialized diagnostic) | 0.6657 | 0.6278 |
 | header/port router + bounded prior (specialized upper bound) | 0.6950 | 0.6738 |
@@ -65,13 +73,14 @@ Frozen VPN Flow Test results on the shared 1,672-flow test split:
 
 The protocol-closed result is stored outside the repository's large-artifact
 boundary at
-`/tmp/two_tower_runs/pcfrr_v1_results/vpn_flow_protocol_closed_reliability_router.json`.
-It automatically selects zero prior transport. Its mean LOEO Macro-F1 is
-`0.6315`, compared with `0.6282` for the same deterministic router using the
-header/port expert. Adding eight header-stripped payload bytes per packet raises
-the Test point estimate slightly but lowers mean LOEO Macro-F1 to `0.6275`, so
-it is not promoted. The protocol-closed main reaches the SWEET Macro-F1 but is
-`2.87` accuracy points lower; this limitation must remain explicit.
+`/tmp/two_tower_runs/pcfrr_v1_results/vpn_flow_protocol_closed_fixed_structural_reliability_router.json`.
+It automatically selects zero prior transport. Relative to the superseded
+per-fold-grid router, the fixed topology improves Accuracy by `+0.0203` and
+Macro-F1 by `+0.0302`; 5,000 paired bootstrap samples give 95% intervals
+`[+0.0072,+0.0329]` and `[+0.0145,+0.0468]`, and McNemar's exact `p=0.0034`.
+The protocol-closed main exceeds SWEET Macro-F1 by `3.03` points but remains
+`0.84` accuracy points lower; this limitation is explicit rather than repaired
+with a VPN-specific rule.
 
 The previous specialized result is stored at
 `/tmp/two_tower_runs/pcfrr_v1_results/vpn_flow_cross_environment_reliability_router_safe_prior.json`.
@@ -86,17 +95,26 @@ Frozen TLS-120 Flow Test results on the shared 11,542-flow test split:
 | candidate | accuracy | macro-F1 |
 |---|---:|---:|
 | strict unified semantic fold 0 | 0.7558 | 0.7465 |
-| rich structural folds (range) | 0.8348-0.8367 | 0.8129-0.8138 |
-| cross-environment reliability router | 0.9020 | 0.8909 |
-| router + bounded OOF-selected prior transport | **0.9023** | **0.8912** |
-| previous heterogeneous consensus | 0.8461 | 0.8292 |
+| fixed protocol-closed structural folds (range) | 0.7290-0.7335 | 0.6988-0.7043 |
+| fixed protocol-closed structural equal-mean | 0.7349 | 0.7059 |
+| fixed protocol-closed reliability router (provisional shared-core rerun) | **0.8750** | **0.8608** |
+| rich-header router (specialized upper bound) | 0.9023 | 0.8912 |
+| SWEET TLS-120 Flow reference | 0.7130 | 0.6810 |
 
 TLS-120 uses the same expert slots, router inputs, GroupDRO objective,
 consensus rule, and prior-strength search as VPN. No TLS-specific class rule,
-feature branch, or loss was introduced. The bounded prior contributes only
-about `+0.0003` accuracy and Macro-F1 on TLS-120; almost all improvement comes
-from the learned cross-environment router. The result is stored at
-`/tmp/two_tower_runs/pcfrr_v1_results/tls120_flow_cross_environment_reliability_router_safe_prior.json`.
+feature branch, or loss was introduced. The fixed structural topology transfers
+from VPN and exceeds SWEET by `2.19` Accuracy and `2.49` Macro-F1 points under
+equal three-fold averaging. Its single-fold standard deviations are only
+`0.0026/0.0031`. The routed result is currently provisional because fold 0 and
+folds 1/2 semantic probabilities came from different historical training
+batches of the same Tower1/Tower2 family; it is stored at
+`/tmp/two_tower_runs/pcfrr_v1_results/tls120_flow_protocol_closed_fixed_structural_reliability_router_provisional.json`.
+The ongoing frozen shared-core rerun must replace those semantic inputs before
+the routed number is called final. The rich-header result remains only a
+specialized upper bound: protocol closure costs `2.73/3.04` points with paired
+95% intervals `[-3.18,-2.29]` and `[-3.59,-2.52]`, directly quantifying the
+shortcut-sensitive evidence removed by the method.
 
 Strict one-packet TLS-120 routing milestone on 553,994 Test packets:
 
@@ -193,7 +211,7 @@ Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 506 passed
+pytest: 512 passed
 ```
 
 ---

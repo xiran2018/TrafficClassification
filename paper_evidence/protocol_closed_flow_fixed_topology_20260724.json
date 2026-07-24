@@ -1,0 +1,61 @@
+{
+  "schema": "protocol_closed_flow_fixed_topology_evidence_v1",
+  "date": "2026-07-24",
+  "selection_protocol": {
+    "topology_selected_from": "vpn-app pooled three-fold validation reports",
+    "tls_validation_or_test_used_for_topology_selection": false,
+    "estimator": "extra_trees",
+    "max_depth": 16,
+    "min_samples_leaf": 2,
+    "class_weight": "balanced",
+    "feature_version": "protocol_closed",
+    "max_packets": 64,
+    "prefix_len": 32,
+    "uses_ip": false,
+    "uses_ports": false,
+    "uses_header_bytes": false
+  },
+  "vpn_app": {
+    "test_flows": 1672,
+    "single_fold": [
+      {"fold": 0, "accuracy": 0.6291866028708134, "macro_f1": 0.5997659157927305},
+      {"fold": 1, "accuracy": 0.6255980861244019, "macro_f1": 0.6025300498759945},
+      {"fold": 2, "accuracy": 0.6202153110047847, "macro_f1": 0.5963128158784615}
+    ],
+    "fixed_structural_equal_mean": {
+      "accuracy": 0.6267942583732058,
+      "macro_f1": 0.5986107287301259
+    },
+    "fixed_structural_reliability_router": {
+      "accuracy": 0.6836124401913876,
+      "macro_f1": 0.6522847810404823,
+      "prior_strength": 0.0
+    },
+    "sweet_reference": {"accuracy": 0.692, "macro_f1": 0.622}
+  },
+  "tls_120": {
+    "test_flows": 11542,
+    "single_fold": [
+      {"fold": 0, "accuracy": 0.7289897764685497, "macro_f1": 0.6987717861362939},
+      {"fold": 1, "accuracy": 0.7334950615144689, "macro_f1": 0.7041876559048601},
+      {"fold": 2, "accuracy": 0.7334950615144689, "macro_f1": 0.70426186021834}
+    ],
+    "single_fold_mean_std": {
+      "accuracy_mean": 0.7319932998324958,
+      "accuracy_sample_std": 0.0026011275340374358,
+      "macro_f1_mean": 0.7024071007531646,
+      "macro_f1_sample_std": 0.0031484934242841612
+    },
+    "fixed_structural_equal_mean": {
+      "accuracy": 0.7348813030670595,
+      "macro_f1": 0.7059406652330353
+    },
+    "fixed_structural_reliability_router_provisional": {
+      "accuracy": 0.8749783399757408,
+      "macro_f1": 0.8607858738209264,
+      "prior_strength": 0.0,
+      "final_status": "awaiting identical frozen shared-core semantic inputs"
+    },
+    "sweet_reference": {"accuracy": 0.713, "macro_f1": 0.681}
+  }
+}
