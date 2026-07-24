@@ -9,6 +9,7 @@ log-mean aggregation. Test labels are used only for the final report.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,60 @@ from calibrate_prediction_prior import estimate_prior_em
 
 
 EPS = 1e-12
+
+
+def file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def input_provenance(
+    environment_specs: list[list[str]], task_scope: str
+) -> list[dict[str, Any]]:
+    roles = (
+        ("semantic_valid", "semantic_test", "structural_valid_test")
+        if task_scope == "flow_level"
+        else (
+            "semantic_valid",
+            "semantic_test",
+            "structural_valid",
+            "structural_test",
+        )
+    )
+    records = []
+    for spec in environment_specs:
+        name, *paths = spec
+        records.append(
+            {
+                "environment": name,
+                "artifacts": {
+                    role: {"path": path, "sha256": file_sha256(path)}
+                    for role, path in zip(roles, paths, strict=True)
+                },
+            }
+        )
+    return records
+
+
+def save_packet_probabilities(
+    path: str | Path,
+    y_true: np.ndarray,
+    probability: np.ndarray,
+    gate_weights: np.ndarray,
+    packet_uids: list[str],
+) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        output_path,
+        y_true=y_true,
+        probabilities=probability.astype(np.float32),
+        structural_gate=gate_weights.astype(np.float32),
+        packet_uids=np.asarray(packet_uids),
+    )
 
 
 def normalize_prob(values: Any) -> np.ndarray:
@@ -443,7 +498,11 @@ def main() -> None:
         help="Maximum LOEO Macro-F1 gap admitted to the target-weighted selection plateau.",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Router device. CPU is the reproducible paper default; upstream experts may still use CUDA.",
+    )
     parser.add_argument("--checkpoint", default="")
     parser.add_argument(
         "--output_npz",
@@ -541,9 +600,11 @@ def main() -> None:
                 "prior_strength_step",
                 "prior_macro_plateau_tolerance",
                 "seed",
+                "device",
             )
         },
         "environments": [env.name for env in environments],
+        "input_provenance": input_provenance(environment_specs, task_scope),
         "leave_one_environment_out": leave_one_environment_out,
         "per_environment_test": per_environment,
         "final_train_group_weights": group_weights.tolist(),
@@ -565,19 +626,28 @@ def main() -> None:
             }
         )
     else:
-        probability_path = Path(args.output_npz) if args.output_npz else Path(args.output_json).with_suffix(".npz")
-        probability_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
+        probability_path = (
+            Path(args.output_npz)
+            if args.output_npz
+            else Path(args.output_json).with_suffix(".npz")
+        )
+        save_packet_probabilities(
             probability_path,
-            y_true=y_true,
-            probabilities=probability.astype(np.float32),
-            structural_gate=gate_weights.astype(np.float32),
+            y_true,
+            probability,
+            gate_weights,
+            flow_ids,
         )
         payload.update(
             {
                 "num_packets": int(len(y_true)),
                 "probability_path": str(probability_path),
-                "alignment": "packet_uid" if not flow_ids[0].startswith("packet:") else "strict_shared_row_order",
+                "probability_sha256": file_sha256(probability_path),
+                "alignment": (
+                    "packet_uid"
+                    if not flow_ids[0].startswith("packet:")
+                    else "strict_shared_row_order"
+                ),
             }
         )
     output_path = Path(args.output_json)

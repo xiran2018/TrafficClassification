@@ -39,9 +39,9 @@ semantic/structural slots, router features, GroupDRO objective, and bounded
 prior-transfer protocol. For packet classification, the same slot contract is
 used with one-packet semantic and structural experts; flow classification adds
 the flow feature extractor and aggregation boundary. VPN and TLS-120 Flow
-validation is complete; Packet validation remains required before this router
-can replace the paper-main cross-task framework. VPN Packet shared-core Test is
-now complete; TLS-120 shared-core Packet extraction remains in progress.
+validation is complete. VPN Packet shared-core Test is now complete; the final
+TLS-120 shared-core Packet run remains required before this router can replace
+the paper-main cross-task framework.
 
 Frozen VPN Flow Test results on the shared 1,672-flow test split:
 
@@ -103,25 +103,42 @@ Frozen VPN Packet Test results on the shared 111,678-packet test split:
 | Qwen/native shared-core semantic consensus | 0.8790 | 0.7653 |
 | protocol-structural consensus | 0.9070 | **0.8222** |
 | fixed 50/50 expert fusion | 0.9057 | 0.8071 |
-| cross-environment reliability router | **0.9113** | 0.8119 |
+| cross-environment reliability router | **0.9122** | 0.8143 |
 
 All four candidates use the same three train/validation folds and the same
 strict one-packet Test rows. Expert artifacts must contain exact `packet_uid`
 alignment; row-order fallback is rejected whenever either slot supplies
-explicit identities. The learned router raises accuracy by `+0.0323` and
-Macro-F1 by `+0.0466` over semantic consensus, while lowering ECE from `0.0482`
-to `0.0162`. The structural consensus retains a `+0.0102` Macro-F1 advantage
+explicit identities. The learned router raises accuracy by `+0.0332` and
+Macro-F1 by `+0.0490` over semantic consensus, while lowering ECE from `0.0482`
+to `0.0193`. The structural consensus retains a `+0.0080` Macro-F1 advantage
 over the router, revealing the next model question: reliability routing must
 preserve cross-fold error diversity instead of optimizing only per-environment
-expert choice. No target-prior transport is used for this Packet result. The
-artifact is
+expert choice. No target-prior transport is used for this Packet result. Router
+training is fixed to CPU for deterministic reproduction; two consecutive runs
+produced identical metrics. Its NPZ retains exact `packet_uid` values, and its
+JSON records SHA-256 provenance for every expert input and the routed output.
+The artifact is
 `/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_cross_environment_reliability_router_safe_prior.json`.
+
+VPN Packet router regularization ablation, using the same frozen expert
+artifacts:
+
+| router objective | Test accuracy | Test macro-F1 | mean LOEO macro-F1 |
+|---|---:|---:|---:|
+| GroupDRO + gate entropy | 0.9122 | 0.8143 | 0.8126 |
+| no GroupDRO | 0.9128 | 0.8150 | 0.8122 |
+| no gate entropy | 0.9123 | 0.8134 | 0.8124 |
+| neither regularizer | 0.9129 | 0.8146 | 0.8124 |
+
+These differences are too small to claim a material VPN benefit. The final
+objective will therefore be selected only after the identical TLS-120
+shared-core evaluation; Test fluctuations alone do not select the paper model.
 
 Implementation verification:
 
 ```text
 conda environment: llm-factory
-pytest: 497 passed
+pytest: 499 passed
 ```
 
 ---

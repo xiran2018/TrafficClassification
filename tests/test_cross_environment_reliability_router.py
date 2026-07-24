@@ -3,11 +3,13 @@ import numpy as np
 from train_cross_environment_reliability_router import (
     aligned_test_consensus,
     aligned_split,
+    input_provenance,
     load_packet_environment,
     normalize_prob,
     packet_split,
     router_features,
     safe_prior_transport,
+    save_packet_probabilities,
 )
 
 
@@ -83,6 +85,39 @@ def test_packet_split_uses_packet_uids_when_available(tmp_path):
     assert ids == ["flow-a_0", "flow-b_0"]
     assert labels.tolist() == [0, 1]
     assert probability.argmax(axis=1).tolist() == [0, 1]
+
+
+def test_input_provenance_records_paths_and_hashes(tmp_path):
+    paths = []
+    for index in range(4):
+        path = tmp_path / f"artifact_{index}.npz"
+        path.write_bytes(f"artifact-{index}".encode())
+        paths.append(str(path))
+    records = input_provenance([["fold0", *paths]], "packet_level")
+    assert records[0]["environment"] == "fold0"
+    assert set(records[0]["artifacts"]) == {
+        "semantic_valid",
+        "semantic_test",
+        "structural_valid",
+        "structural_test",
+    }
+    for role, path in zip(records[0]["artifacts"], paths, strict=True):
+        artifact = records[0]["artifacts"][role]
+        assert artifact["path"] == path
+        assert len(artifact["sha256"]) == 64
+
+
+def test_save_packet_probabilities_preserves_exact_identities(tmp_path):
+    path = tmp_path / "routed.npz"
+    save_packet_probabilities(
+        path,
+        np.asarray([0, 1]),
+        np.asarray([[0.8, 0.2], [0.1, 0.9]], dtype=np.float32),
+        np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32),
+        ["flow-a_0", "flow-b_0"],
+    )
+    with np.load(path, allow_pickle=False) as payload:
+        assert payload["packet_uids"].tolist() == ["flow-a_0", "flow-b_0"]
 
 
 def test_load_packet_environment_rejects_expert_label_mismatch(tmp_path):
