@@ -688,6 +688,11 @@ def test_packet_runner_common_reference_keeps_method_and_effective_hash_equal(tm
     tower1 = next(
         line for line in result.stdout.splitlines() if "train_tower1_multitask.py" in line
     )
+    structural = next(
+        line
+        for line in result.stdout.splitlines()
+        if "train_packet_feature_expert.py" in line
+    )
     packet_test = next(
         line for line in result.stdout.splitlines() if "test_packet_byte_transformer.py" in line
     )
@@ -715,6 +720,10 @@ def test_packet_runner_common_reference_keeps_method_and_effective_hash_equal(tm
     assert "--content_group_loss_reduction group_mean" in packet
     assert "--required_semantic_packet_context_policy single_packet" in packet
     assert "--required_semantic_packet_context_policy single_packet" in packet_test
+    assert "--mask_session_fields" in structural
+    assert "--byte_prefix_len 32 64 128" in structural
+    assert "--min_samples_leaf 1 2" in structural
+    assert "--n_estimators 200" in structural
     manifest = json.loads(
         next((tmp_path / "packet_artifacts").glob("vpn-app/fold0/packet_framework_manifest.json")).read_text(
             encoding="utf-8"

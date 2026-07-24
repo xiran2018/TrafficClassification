@@ -100,28 +100,42 @@ Frozen VPN Packet Test results on the shared 111,678-packet test split:
 
 | candidate | accuracy | macro-F1 |
 |---|---:|---:|
-| Qwen/native shared-core semantic consensus | 0.8790 | 0.7653 |
-| protocol-structural consensus | 0.9070 | **0.8222** |
-| fixed 50/50 expert fusion | 0.9057 | 0.8071 |
-| cross-environment reliability router | **0.9122** | 0.8143 |
+| Qwen/native shared-core packet-head consensus | 0.8790 | 0.7653 |
+| protocol-closed structural consensus | 0.8511 | 0.7325 |
+| **protocol-closed reliability router (paper main)** | **0.9085** | **0.8229** |
+| raw-header structural consensus (shortcut diagnostic) | 0.9070 | 0.8222 |
+| raw-header reliability router (specialized upper bound) | 0.9122 | 0.8143 |
 
-All four candidates use the same three train/validation folds and the same
+All candidates use the same three train/validation folds and the same
 strict one-packet Test rows. Expert artifacts must contain exact `packet_uid`
 alignment; row-order fallback is rejected whenever either slot supplies
-explicit identities. The learned router raises accuracy by `+0.0332` and
-Macro-F1 by `+0.0490` over semantic consensus, while lowering ECE from `0.0482`
-to `0.0193`. The structural consensus retains a `+0.0080` Macro-F1 advantage
-over the router, revealing the next model question: reliability routing must
-preserve cross-fold error diversity instead of optimizing only per-environment
-expert choice. No target-prior transport is used for this Packet result. Router
-training is fixed to CPU for deterministic reproduction; two consecutive runs
-produced identical metrics. Its NPZ retains exact `packet_uid` values, and its
-JSON records SHA-256 provenance for every expert input and the routed output.
-The artifact is
-`/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_cross_environment_reliability_router_safe_prior.json`.
+explicit identities. The paper-main structural expert masks IP addresses,
+ports, IPv4 identification/TTL/checksum, IPv6 flow label/hop limit, transport
+checksums, TCP sequence/acknowledgement numbers, and inferred direction. The
+router raises accuracy by `+0.0295` and Macro-F1 by `+0.0576` over the
+shared-core packet-head consensus, while lowering ECE from `0.0482` to
+`0.0132`. Its mean Test structural gate is only `0.0792`, so the weaker
+protocol-closed expert acts as selective residual evidence rather than a
+replacement classifier.
 
-VPN Packet router regularization ablation, using the same frozen expert
-artifacts:
+Selection is validation-only: the protocol-closed router obtains pooled LOEO
+`0.8206/0.8192` accuracy/Macro-F1 versus `0.8152/0.8126` for the raw-header
+router. On Test, masking trades `-0.0038` accuracy for `+0.0086` Macro-F1. A
+5,000-sample paired flow-cluster bootstrap gives 95% intervals
+`[-0.0098,+0.0017]` and `[-0.0055,+0.0246]`, respectively, so neither Test
+difference is statistically conclusive. The main designation follows the
+held-out LOEO result and the anti-shortcut method contract, not Test
+preference. The raw-header rows are retained only to quantify the specialized
+environment upper bound.
+
+No target-prior transport is used for either Packet result. Router training is
+fixed to CPU for deterministic reproduction. Routed NPZ files retain exact
+`packet_uid` and `flow_ids`, and JSON reports record SHA-256 provenance for
+every expert input and routed output. The paper-main artifact is
+`/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_masked_structural_reliability_router.json`.
+
+VPN Packet router regularization ablation, using the shortcut-sensitive
+raw-header expert artifacts:
 
 | router objective | Test accuracy | Test macro-F1 | mean LOEO macro-F1 |
 |---|---:|---:|---:|

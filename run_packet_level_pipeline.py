@@ -288,6 +288,12 @@ def verify_paper_unified_evaluation_source(
         "tower1_adapter_config": checkpoint / "best" / "adapter" / "adapter_config.json",
         "tower1_heads": checkpoint / "best" / "tower1_heads.pt",
         "packet_classifier": checkpoint / "byte_transformer" / "best.pt",
+        "protocol_closed_structural_expert": (
+            checkpoint / "protocol_closed_structural_expert.joblib"
+        ),
+        "protocol_closed_structural_selection": (
+            artifacts / "packet_protocol_closed_structural_expert.json"
+        ),
     }
     missing = [str(path) for path in required.values() if not path.is_file()]
     if missing:
@@ -1590,39 +1596,72 @@ def main() -> None:
                     args.dry_run,
                 )
 
-    # The tree feature expert is a legacy/ablation baseline.  The paper-facing
-    # path must classify the shared learned packet representation directly.
-    if args.stage in {"feature", "packet_best", "all"}:
-        run(
-            [
+    # The paper-facing residual expert is protocol-closed: it removes mutable
+    # session identifiers and is routed only after the shared learned packet
+    # representation. The unrestricted feature expert remains an ablation.
+    if args.stage in {
+        "feature", "packet_best", "paper_unified", "paper_unified_eval", "all"
+    }:
+        paper_structural = args.stage in {"paper_unified", "paper_unified_eval"}
+        feature_result = artifacts / (
+            "packet_protocol_closed_structural_expert.json"
+            if paper_structural
+            else "packet_feature_expert.json"
+        )
+        feature_model = checkpoint / (
+            "protocol_closed_structural_expert.joblib"
+            if paper_structural
+            else "feature_expert.joblib"
+        )
+        if args.stage != "paper_unified_eval":
+            feature_command = [
                 sys.executable,
                 "train_packet_feature_expert.py",
                 "--train_index", str(train_dir / "packet_index.jsonl"),
                 "--valid_index", str(valid_dir / "packet_index.jsonl"),
                 "--test_index", str(test_dir / "packet_index.jsonl"),
                 "--label_map", str(label_map),
-                "--output_json", str(artifacts / "packet_feature_expert.json"),
-                "--model_out", str(checkpoint / "feature_expert.joblib"),
-                "--byte_prefix_len", "32", "64", "96", "128", "256",
-                "--min_samples_leaf", "1", "2", "4",
-                "--n_estimators", "300",
-                "--estimator_types", "extra_trees", "random_forest",
-            ],
-            args.dry_run,
-        )
+                "--output_json", str(feature_result),
+                "--model_out", str(feature_model),
+            ]
+            if paper_structural:
+                feature_command.extend(
+                    [
+                        "--byte_prefix_len", "32", "64", "128",
+                        "--min_samples_leaf", "1", "2",
+                        "--n_estimators", "200",
+                        "--estimator_types", "extra_trees", "random_forest",
+                        "--mask_session_fields",
+                    ]
+                )
+            else:
+                feature_command.extend(
+                    [
+                        "--byte_prefix_len", "32", "64", "96", "128", "256",
+                        "--min_samples_leaf", "1", "2", "4",
+                        "--n_estimators", "300",
+                        "--estimator_types", "extra_trees", "random_forest",
+                    ]
+                )
+            run(feature_command, args.dry_run)
         eval_directories = {"valid": valid_dir, "test": test_dir}
         for split_name in args.eval_splits:
             split_dir = eval_directories[split_name]
+            output_stem = (
+                f"{split_name}_protocol_closed_structural_probs"
+                if paper_structural
+                else f"{split_name}_feature_probs"
+            )
             run(
                 [
                     sys.executable,
                     "test_packet_feature_expert.py",
-                    "--model", str(checkpoint / "feature_expert.joblib"),
-                    "--training_result", str(artifacts / "packet_feature_expert.json"),
+                    "--model", str(feature_model),
+                    "--training_result", str(feature_result),
                     "--test_index", str(split_dir / "packet_index.jsonl"),
                     "--label_map", str(label_map),
-                    "--output_json", str(artifacts / f"{split_name}_feature_probs.json"),
-                    "--output_npz", str(artifacts / f"{split_name}_feature_probs.npz"),
+                    "--output_json", str(artifacts / f"{output_stem}.json"),
+                    "--output_npz", str(artifacts / f"{output_stem}.npz"),
                 ],
                 args.dry_run,
             )

@@ -161,7 +161,10 @@ def test_paper_unified_eval_only_builds_requested_split_and_never_trains(tmp_pat
     assert "--embedding_header_policy protocol_closed_mixture" in commands
     assert commands.count("extract_packet_embeddings_qwen.py") == 2
     assert "test_packet_byte_transformer.py" in commands
+    assert "test_packet_feature_expert.py" in commands
+    assert "protocol_closed_structural_expert.joblib" in commands
     assert "train_tower1_multitask.py" not in commands
+    assert "train_packet_feature_expert.py" not in commands
     assert "pretrain_native_flow_encoder.py" not in commands
     assert "train_packet_byte_transformer.py" not in commands
     assert "/train/packet_index.jsonl --output_dir" not in commands
@@ -230,6 +233,8 @@ def test_paper_unified_eval_verifies_frozen_training_provenance(tmp_path):
         checkpoint / "best" / "adapter" / "adapter_config.json",
         checkpoint / "best" / "tower1_heads.pt",
         checkpoint / "byte_transformer" / "best.pt",
+        checkpoint / "protocol_closed_structural_expert.joblib",
+        artifacts / "packet_protocol_closed_structural_expert.json",
     )
     for path in required:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,6 +253,8 @@ def test_paper_unified_eval_verifies_frozen_training_provenance(tmp_path):
         "tower1_adapter_config",
         "tower1_heads",
         "packet_classifier",
+        "protocol_closed_structural_expert",
+        "protocol_closed_structural_selection",
     }
 
     args.shared_core_config_sha256 = "different"
