@@ -620,6 +620,29 @@ def iter_model_candidates(model_kinds: str):
             raise ValueError(f"Unknown model kind: {kind}")
 
 
+def model_candidates(
+    model_kinds: str,
+    fixed_model_kind: str = "",
+    fixed_max_depth: int = 0,
+    fixed_min_samples_leaf: int = 1,
+    fixed_class_weight: str = "none",
+):
+    if fixed_model_kind:
+        if fixed_min_samples_leaf < 1:
+            raise ValueError("fixed_min_samples_leaf must be at least 1")
+        max_depth = None if fixed_max_depth <= 0 else fixed_max_depth
+        class_weight = None if fixed_class_weight == "none" else fixed_class_weight
+        return [
+            (
+                fixed_model_kind,
+                max_depth,
+                fixed_min_samples_leaf,
+                class_weight,
+            )
+        ]
+    return list(iter_model_candidates(model_kinds))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train_index", required=True)
@@ -627,6 +650,33 @@ def main() -> None:
     ap.add_argument("--test_index", required=True)
     ap.add_argument("--label_map", default="")
     ap.add_argument("--model_kinds", default="extra_trees,random_forest")
+    ap.add_argument(
+        "--fixed_model_kind",
+        choices=[
+            "extra_trees",
+            "random_forest",
+            "hist_gbdt",
+            "gradient_boosting",
+            "logistic",
+            "mlp",
+            "svc",
+            "knn",
+        ],
+        default="",
+        help="Evaluate one frozen model topology instead of a validation grid.",
+    )
+    ap.add_argument(
+        "--fixed_max_depth",
+        type=int,
+        default=0,
+        help="Maximum depth for --fixed_model_kind; <=0 means unlimited.",
+    )
+    ap.add_argument("--fixed_min_samples_leaf", type=int, default=1)
+    ap.add_argument(
+        "--fixed_class_weight",
+        choices=["none", "balanced"],
+        default="none",
+    )
     ap.add_argument("--max_packets", type=int, default=64)
     ap.add_argument("--prefix_len", type=int, default=32)
     ap.add_argument("--use_ports", action="store_true")
@@ -650,13 +700,21 @@ def main() -> None:
 
     if args.feature_version in {"protocol_closed", "protocol_closed_payload"} and args.use_ports:
         ap.error("protocol-closed feature versions cannot be combined with --use_ports")
+    if args.fixed_min_samples_leaf < 1:
+        ap.error("--fixed_min_samples_leaf must be at least 1")
 
     x_train, y_train, _ = load_split(args.train_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
     x_valid, y_valid, valid_fids = load_split(args.valid_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
     x_test, y_test, test_fids = load_split(args.test_index, args.max_packets, args.prefix_len, args.use_ports, args.feature_version)
     print(f"features train={x_train.shape} valid={x_valid.shape} test={x_test.shape}")
 
-    grids = list(iter_model_candidates(args.model_kinds))
+    grids = model_candidates(
+        args.model_kinds,
+        args.fixed_model_kind,
+        args.fixed_max_depth,
+        args.fixed_min_samples_leaf,
+        args.fixed_class_weight,
+    )
 
     reports = []
     best = None
@@ -739,6 +797,9 @@ def main() -> None:
                 "prefix_len": args.prefix_len,
                 "use_ports": args.use_ports,
                 "feature_version": args.feature_version,
+                "selection_protocol": (
+                    "fixed_topology" if args.fixed_model_kind else "validation_grid"
+                ),
             },
         }
         Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)

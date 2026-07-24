@@ -3,7 +3,11 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
-from train_flow_stats_classifier import flow_features, protocol_payload_prefix
+from train_flow_stats_classifier import (
+    flow_features,
+    model_candidates,
+    protocol_payload_prefix,
+)
 
 
 def flow_row():
@@ -123,3 +127,32 @@ def test_protocol_payload_extraction_fails_closed_without_header_lengths():
     meta["ip_header_len"] = 20
     meta.pop("tcp_data_offset")
     assert protocol_payload_prefix(meta) == []
+
+
+def test_fixed_model_candidates_returns_only_frozen_topology():
+    assert model_candidates(
+        "random_forest,extra_trees",
+        fixed_model_kind="extra_trees",
+        fixed_max_depth=16,
+        fixed_min_samples_leaf=2,
+        fixed_class_weight="balanced",
+    ) == [("extra_trees", 16, 2, "balanced")]
+
+
+def test_fixed_model_candidates_maps_nonpositive_depth_to_unlimited():
+    assert model_candidates(
+        "random_forest",
+        fixed_model_kind="random_forest",
+        fixed_max_depth=0,
+        fixed_min_samples_leaf=1,
+        fixed_class_weight="none",
+    ) == [("random_forest", None, 1, None)]
+
+
+def test_fixed_model_candidates_rejects_invalid_leaf_size():
+    with pytest.raises(ValueError, match="at least 1"):
+        model_candidates(
+            "extra_trees",
+            fixed_model_kind="extra_trees",
+            fixed_min_samples_leaf=0,
+        )
