@@ -31,6 +31,15 @@
       "macro_f1": 0.6522847810404823,
       "prior_strength": 0.0
     },
+    "router_mechanism": {
+      "semantic_wrong_gate_mean": 0.41357530266552534,
+      "semantic_correct_gate_mean": 0.3873638599644202,
+      "structural_only_correct_gate_mean": 0.5112443709612657,
+      "semantic_only_correct_gate_mean": 0.392538742177296,
+      "rescues": 130,
+      "harms": 72,
+      "net_rescues": 58
+    },
     "sweet_reference": {"accuracy": 0.692, "macro_f1": 0.622}
   },
   "tls_120": {
@@ -55,6 +64,15 @@
       "macro_f1": 0.8607858738209264,
       "prior_strength": 0.0,
       "final_status": "awaiting identical frozen shared-core semantic inputs"
+    },
+    "router_mechanism": {
+      "semantic_wrong_gate_mean": 0.40570892055443747,
+      "semantic_correct_gate_mean": 0.13348013278884824,
+      "structural_only_correct_gate_mean": 0.5475653058057413,
+      "semantic_only_correct_gate_mean": 0.13405505453232475,
+      "rescues": 869,
+      "harms": 219,
+      "net_rescues": 650
     },
     "sweet_reference": {"accuracy": 0.713, "macro_f1": 0.681}
   }
