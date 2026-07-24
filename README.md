@@ -40,7 +40,8 @@ prior-transfer protocol. For packet classification, the same slot contract is
 used with one-packet semantic and structural experts; flow classification adds
 the flow feature extractor and aggregation boundary. VPN and TLS-120 Flow
 validation is complete; Packet validation remains required before this router
-can replace the paper-main cross-task framework.
+can replace the paper-main cross-task framework. VPN Packet shared-core Test is
+now complete; TLS-120 shared-core Packet extraction remains in progress.
 
 Frozen VPN Flow Test results on the shared 1,672-flow test split:
 
@@ -94,6 +95,27 @@ whereas the Flow semantic slot uses Qwen/Tower1. The final paper matrix must
 rerun the router with all three Qwen plus native-byte shared-core Packet folds.
 The milestone artifact is
 `/tmp/two_tower_runs/pcfrr_v1_results/tls120_packet_cross_environment_reliability_router_safe_prior.json`.
+
+Frozen VPN Packet Test results on the shared 111,678-packet test split:
+
+| candidate | accuracy | macro-F1 |
+|---|---:|---:|
+| Qwen/native shared-core semantic consensus | 0.8790 | 0.7653 |
+| protocol-structural consensus | 0.9070 | **0.8222** |
+| fixed 50/50 expert fusion | 0.9057 | 0.8071 |
+| cross-environment reliability router | **0.9113** | 0.8119 |
+
+All four candidates use the same three train/validation folds and the same
+strict one-packet Test rows. Expert artifacts must contain exact `packet_uid`
+alignment; row-order fallback is rejected whenever either slot supplies
+explicit identities. The learned router raises accuracy by `+0.0323` and
+Macro-F1 by `+0.0466` over semantic consensus, while lowering ECE from `0.0482`
+to `0.0162`. The structural consensus retains a `+0.0102` Macro-F1 advantage
+over the router, revealing the next model question: reliability routing must
+preserve cross-fold error diversity instead of optimizing only per-environment
+expert choice. No target-prior transport is used for this Packet result. The
+artifact is
+`/tmp/two_tower_runs/pcfrr_v1_results/vpn_packet_shared_core_cross_environment_reliability_router_safe_prior.json`.
 
 Implementation verification:
 

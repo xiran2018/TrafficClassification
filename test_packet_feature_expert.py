@@ -10,6 +10,7 @@ import joblib
 import numpy as np
 
 from packet_eval_utils import packet_classification_metrics
+from test_packet_byte_transformer import load_packet_uids
 from train_packet_feature_expert import load_split
 from train_tower1_multitask import load_label_names
 
@@ -32,6 +33,11 @@ def main() -> None:
     mask_session_fields = bool(training_result["config"].get("mask_session_fields", False))
     label_names = load_label_names(args.label_map)
     x_test, y_true = load_split(args.test_index, prefix, zero_ip, zero_ports, mask_session_fields)
+    packet_uids = load_packet_uids(args.test_index)
+    if len(packet_uids) != len(y_true):
+        raise ValueError(
+            f"packet index/prediction length mismatch: {len(packet_uids)} != {len(y_true)}"
+        )
     model = joblib.load(args.model)
     raw_probs = model.predict_proba(x_test)
     probabilities = np.zeros((len(y_true), len(label_names)), dtype=np.float32)
@@ -52,7 +58,12 @@ def main() -> None:
     output_npz.parent.mkdir(parents=True, exist_ok=True)
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-    np.savez_compressed(output_npz, y_true=y_true, probabilities=probabilities)
+    np.savez_compressed(
+        output_npz,
+        y_true=y_true,
+        probabilities=probabilities,
+        packet_uids=packet_uids,
+    )
     print(f"accuracy={metrics['accuracy']:.4f} macro_f1={metrics['macro_f1']:.4f}")
     print(f"saved {output_json} and {output_npz}")
 
